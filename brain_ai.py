@@ -1,83 +1,105 @@
-# 🧠 NEURAL OVERLORD : MOTEUR D'ANALYSE PRÉDICTIVE (ISOLATION FOREST)
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ============================================================
+# NEURO-MESH CORTEX IA : STAFF DETERMINISTIC OVERRIDE (V5.0)
+# ============================================================
 import json
 import time
-import numpy as np
-from sklearn.ensemble import IsolationForest
 import os
-from collections import deque
+import socket
+import threading
 
-# Configuration du Moteur
-DATA_FILE = "api.json"
+# 🔥 ML REMOVED: Unsupervised ML causes hallucinated false-positives on localhost loopbacks.
+# We are enforcing strict, deterministic SOC limits.
+
+DATA_FILE = "c2_central_data.json"
+REACT_FILE = "api.json"
 CMD_FILE = "ia_commands.txt"
-HISTORY_LIMIT = 30  # Fenêtre glissante de 30 secondes pour apprendre la "normalité"
-nodes_history = {}
+SLEEP_INTERVAL = 1.0
 
-print("\033[1;36m[SYSTEME]\033[0m Initialisation du Cortex IA (Isolation Forest)...")
-print("\033[1;35m[NEURAL]\033[0m Moteur prédictif en écoute sur le maillage P2P.\n")
+live_p2p_nodes = {}
+p2p_lock = threading.Lock()
+
+def listen_p2p_telemetry():
+    UDP_IP = "127.0.0.1"
+    UDP_PORT = 9998
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    except AttributeError: pass
+    sock.bind((UDP_IP, UDP_PORT))
+
+    while True:
+        try:
+            data, _ = sock.recvfrom(65536)
+            msg = data.decode('utf-8')
+            if msg.startswith("TELEMETRY:"):
+                node_data = json.loads(msg[10:])
+                nid = node_data.get("ID")
+                if nid:
+                    with p2p_lock:
+                        live_p2p_nodes[nid] = {
+                            "id": nid,
+                            "hostname": node_data.get("HOST", "UNKNOWN"),
+                            "ram_mb": node_data.get("RAM_MB", 0),
+                            "cpu_load": node_data.get("CPU_LOAD", 0.0),
+                            "procs": node_data.get("PROCS", 1),
+                            "net_out_bytes_s": node_data.get("NET_OUT", 0),
+                            "status": "COMPROMIS" if "SELF_ISOLATED" in str(node_data.get("STATUS", "")) else "STABLE",
+                            "_last_seen": time.time()
+                        }
+        except Exception: pass
+
+threading.Thread(target=listen_p2p_telemetry, daemon=True).start()
+
+def write_command_safe(cmd):
+    with open(CMD_FILE, 'a') as f:
+        f.write(cmd + "\n")
 
 def analyze_anomalies():
-    global nodes_history
-    if not os.path.exists(DATA_FILE):
-        return
+    current_time = time.time()
+    nodes = []
+    c2_is_alive = False
 
-    try:
-        # Lecture tolérante aux pannes (si le C++ écrit en même temps)
-        with open(DATA_FILE, 'r') as f:
-            data = json.load(f)
+    if os.path.exists(DATA_FILE):
+        try:
+            if current_time - os.path.getmtime(DATA_FILE) < 3.0:
+                with open(DATA_FILE, 'r') as f: data = json.load(f)
+                nodes = data.get('active_nodes', [])
+                c2_is_alive = True
+        except: pass
 
-        for node in data.get('active_nodes', []):
-            nid = node['id']
-            ram = node['ram_mb']
-            lat = node['latency']
-            status = node['status']
+    with p2p_lock:
+        if not c2_is_alive:
+            dead_keys = [k for k, v in live_p2p_nodes.items() if current_time - v.get('_last_seen', current_time) > 10.0]
+            for k in dead_keys: del live_p2p_nodes[k]
+            nodes = list(live_p2p_nodes.values())
+        else: live_p2p_nodes.clear()
 
-            # On n'analyse pas les agents déjà morts ou isolés
-            if status == "COMPROMIS":
-                continue
+    if not nodes: return
 
-            if nid not in nodes_history:
-                nodes_history[nid] = deque(maxlen=HISTORY_LIMIT)
+    for node in nodes:
+        nid = node.get('id', 'UNKNOWN')
+        if nid == 'UNKNOWN' or node.get('status') == "COMPROMIS": continue
 
-            # 🧬 FEATURE ENGINEERING : Calcul de la Vélocité (Delta RAM)
-            delta_ram = 0
-            if len(nodes_history[nid]) > 0:
-                delta_ram = ram - nodes_history[nid][-1][0] # RAM actuelle - RAM précédente
+        ram = node.get('ram_mb', 0)
+        cpu = node.get('cpu_load', 0.0)
 
-            # On stocke [RAM_Totale, Latence, Variation_RAM]
-            nodes_history[nid].append([ram, lat, delta_ram])
+        # 🔥 THE FIX: DETERMINISTIC OVERRIDE
+        # The node will ONLY turn red if CPU hits 85% or RAM hits 7.5GB.
+        is_anomaly = False
+        if cpu > 85.0 or ram > 7500:
+            is_anomaly = True
 
-            # Déclenchement de l'IA uniquement si on a assez de données d'apprentissage
-            if len(nodes_history[nid]) == HISTORY_LIMIT:
-                X = np.array(nodes_history[nid])
-                
-                # Entraînement dynamique (Contamination = 5% de chance d'anomalie)
-                clf = IsolationForest(contamination=0.05, random_state=42)
-                clf.fit(X)
-                
-                # Prédiction sur l'instant T
-                current_state = np.array([[ram, lat, delta_ram]])
-                prediction = clf.predict(current_state)
+        if is_anomaly:
+            print(f"\033[1;41;37m[ALERTE]\033[0m ANOMALY DETECTED on {nid}")
+            write_command_safe(f"CMD_IA:ISOLATE|{nid}")
 
-                # ⚡ PRISE DE DÉCISION (Anomalie ET augmentation brutale de la RAM > 50MB/s)
-                if prediction[0] == -1 and delta_ram > 50:
-                    print(f"\n\033[1;41;37m [!!! DÉTECTION HEURISTIQUE DE MALWARE !!!] \033[0m")
-                    print(f"🎯 Cible : {node['hostname']} ({nid})")
-                    print(f"📊 Analyse : Hausse suspecte de RAM (+{delta_ram}MB) & Latence ({lat}ms)")
-                    print(f"⚡ Action  : Transmission de l'ordre d'AUTO-ISOLATION au C2...\n")
-                    
-                    # L'IA DONNE UN ORDRE AU C++
-                    with open(CMD_FILE, 'a') as cmd_f:
-                        cmd_f.write(f"CMD_IA:ISOLATE|{nid}\n")
-                    
-                    # On vide l'historique de cet agent pour éviter de spammer le C2
-                    nodes_history[nid].clear()
+def main():
+    print("\033[1;36m[INFO]\033[0m Initializing AI Cortex (Deterministic Override Edition) - V5.0")
+    while True:
+        analyze_anomalies()
+        time.sleep(SLEEP_INTERVAL)
 
-    except json.JSONDecodeError:
-        pass # Le fichier était en cours d'écriture par le C++, on réessaiera dans 1s
-    except Exception as e:
-        print(f"❌ Erreur Mineure IA: {e}")
-
-# Boucle Temporelle (Heartbeat de l'IA)
-while True:
-    analyze_anomalies()
-    time.sleep(1)
+if __name__ == "__main__":
+    main()
