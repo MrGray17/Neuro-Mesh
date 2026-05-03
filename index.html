@@ -66,7 +66,6 @@
             transition: 0.2s;
         }
         .btn:hover { border-color: var(--neon-blue); color: var(--neon-blue); box-shadow: 0 0 8px rgba(0,229,255,0.3); }
-        /* Bouton attaque flamboyant */
         #attackBtn {
             background: linear-gradient(45deg, #ff003c, #ff6600);
             border: none;
@@ -85,7 +84,6 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.7; box-shadow: 0 0 10px #ff003c; }
         }
-        /* Sonar ping */
         @keyframes sonar-ping {
             0% { box-shadow: 0 0 0 0 rgba(255,0,60,0.7); }
             70% { box-shadow: 0 0 0 20px rgba(255,0,60,0); }
@@ -94,7 +92,6 @@
         .sonar-active {
             animation: sonar-ping 1s ease-out;
         }
-        /* Timeline */
         .event-timeline {
             height: 100%;
             overflow-y: auto;
@@ -144,7 +141,6 @@
         .p-cpu { grid-column: 3; grid-row: 1; }
         .p-graph { grid-column: 3; grid-row: 2; }
         .p-logs { grid-column: 3; grid-row: 3; }
-        .p-events { grid-column: 1; grid-row: 2; } /* on va l'ajouter dans la grille */
         .radar-container {
             flex-grow: 1; display: flex; justify-content: center; align-items: center;
             background: radial-gradient(circle, #0a0a12 0%, #000 100%); min-height: 150px;
@@ -222,7 +218,6 @@
         <div class="panel-header">📡 NETWORK RADAR</div>
         <div class="radar-container"><div class="radar" id="radar-core"><div class="radar-threat" id="radar-threat"></div></div></div>
     </div>
-    <!-- Panel "EVENT TIMELINE" ajouté à la place de l'ancien p-threat (mais on garde threat plus bas) -->
     <div class="panel p-events" style="grid-column: 1; grid-row: 2;">
         <div class="panel-header">📅 EVENT TIMELINE</div>
         <div class="event-timeline" id="eventTimeline">
@@ -267,7 +262,6 @@
     let autoScroll = true;
     let timeLabels = [], ramData = [], cpuData = [];
 
-    // État précédent des nœuds pour détecter les nouvelles compromissions
     let previousNodes = [];
 
     Chart.defaults.color = '#565f89';
@@ -279,10 +273,6 @@
     const cpuChart = new Chart(document.getElementById('cpuChart'), {
         type: 'line', data: { labels: [], datasets: [{ label: 'CPU/core', data: [], borderColor: '#b100ff', fill: true, tension: 0.3, pointRadius: 0 }] },
         options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } } }
-    });
-    const statusChart = new Chart(document.getElementById('statusChart'), {
-        type: 'doughnut', data: { labels: ['STABLE','COMPROMISED'], datasets: [{ data: [0,0], backgroundColor: ['#00ff66','#ff003c'] }] },
-        options: { cutout: '65%', plugins: { legend: { position: 'right', labels: { font: { size: 9 } } } } }
     });
 
     const logContainer = document.getElementById('logs-list');
@@ -299,7 +289,6 @@
         while(logContainer.children.length > 200) logContainer.removeChild(logContainer.firstChild);
     }
 
-    // Gestion de la timeline des événements
     const timelineContainer = document.getElementById('eventTimeline');
     function addEvent(message, type = 'info') {
         const entry = document.createElement('div');
@@ -325,7 +314,6 @@
         const logs = data.logs || [];
         document.getElementById('count-val').innerText = nodes.length;
 
-        // Détecter les nouvelles compromissions
         const oldCompromised = previousNodes.filter(n => n.status === 'COMPROMIS').map(n => n.id);
         const newCompromised = nodes.filter(n => n.status === 'COMPROMIS').map(n => n.id);
         for (let id of newCompromised) {
@@ -381,7 +369,6 @@
                 }
             }
         }
-        // Force graph
         const newNodeArr = Array.from(nodeMap.values());
         const newEdgeArr = Array.from(edgeSet).map(k => { let [a,b]=k.split('-'); return { from: a, to: b }; });
         graphNodes.clear(); graphEdges.clear();
@@ -397,8 +384,6 @@
             network.setData({ nodes: graphNodes, edges: graphEdges });
         }
 
-        statusChart.data.datasets[0].data = [stable, comp];
-        statusChart.update();
         const avgRam = nodes.length ? Math.round(totalRam/nodes.length) : 0;
         const avgCpu = nodes.length ? (totalCpuNorm/nodes.length) : 0;
         const nowLabel = new Date().toLocaleTimeString('fr-FR', { hour12: false });
@@ -428,7 +413,6 @@
         updateLastUpdate();
     }
 
-    // WebSocket avec token
     function initWebSocket() {
         const wsStatus = document.getElementById('ws-status');
         ws = new WebSocket('ws://' + window.location.hostname + ':8081/?token=NEURO_MESH_SECRET');
@@ -439,7 +423,6 @@
     }
     initWebSocket();
 
-    // Fallback polling (si WebSocket indisponible)
     setTimeout(() => {
         if(!ws || ws.readyState !== WebSocket.OPEN) {
             addLog('WebSocket indisponible, fallback polling toutes les 2s', 'alert');
@@ -448,7 +431,6 @@
         }
     }, 3000);
 
-    // Bouton d'attaque via API Flask
     document.getElementById('attackBtn').onclick = async () => {
         addEvent('🔥 Attaque manuelle déclenchée', 'attack');
         playSonar();
@@ -460,7 +442,6 @@
         } catch(e) {
             addEvent('❌ Échec du déclenchement de l\'attaque (API Flask?)', 'attack');
             addLog(`[ERROR] Impossible de contacter l'API Flask: ${e}`, 'alert');
-            // Fallback: lancer le script local si Flask n'est pas actif
             fetch('/api/attack').catch(() => {});
         }
     };
