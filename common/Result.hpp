@@ -1,5 +1,6 @@
 #pragma once
 #include <variant>
+#include <optional>
 #include <string>
 
 namespace neuro_mesh {
@@ -24,7 +25,7 @@ public:
     }
 };
 
-template<typename E = std::string>
+template<typename E>
 class Result<void, E> {
     std::optional<E> m_error;
 public:

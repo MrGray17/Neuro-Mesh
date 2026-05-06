@@ -22,3 +22,5 @@ neuro_mesh_full_*.txt
 neuro_mesh_pure_code*
 *.log
 ia_commands.txt
+third_party/
+third_party/
