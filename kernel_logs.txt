@@ -1,4 +1,0 @@
-[MESH_NODE] Subsystem online on port 5000
-[SYSTEM] Neuro-Mesh Sovereign Cell Active (NODE_2213)
-[SYSTEM] Shutdown signal acknowledged. Cleaning kernel links...
-[MESH_NODE] Subsystem offline.

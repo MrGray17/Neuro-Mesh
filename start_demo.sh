@@ -27,7 +27,7 @@ for ENV_DIR in "neuro-mesh-env" "ia_env" "neuro-env" "venv"; do
 done
 
 echo -e "\n${YELLOW}[3] Launching Omni-C2 Orchestrator...${NC}"
-$PY_CMD c2_server.py > c2_logs.txt 2>&1 &
+$PY_CMD orchestration/c2_server.py > c2_logs.txt 2>&1 &
 sleep 2
 
 if ! pgrep -f "c2_server.py" > /dev/null; then

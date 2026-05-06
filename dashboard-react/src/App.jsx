@@ -3,6 +3,7 @@ import { useWebSocket } from './hooks/useWebSocket';
 import Radar from './components/Radar';
 import AgentsTable from './components/AgentsTable';
 import ForceGraph from './components/ForceGraph';
+import { CommandHeader } from './components/CommandHeader';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, ArcElement, Tooltip, Legend } from 'chart.js';
 import { Line, Doughnut } from 'react-chartjs-2';
 
@@ -22,12 +23,10 @@ function App() {
     const [timeLabels, setTimeLabels] = useState([]);
     const [ramData, setRamData] = useState([]);
     const [cpuData, setCpuData] = useState([]);
-    const [sysTime, setSysTime] = useState(new Date().toLocaleTimeString('fr-FR'));
 
     const activeNodes = data.active_nodes || [];
     const logs = data.logs || [];
     
-    // 🛡️ THE FIX: Accurate node calculation ensuring no phantom stable nodes
     const agentCount = activeNodes.length;
     const compCount = activeNodes.filter(n => n.status === 'COMPROMIS' || n.status === 'DISCONNECTED_ALERT' || n.status === 'SELF_ISOLATED').length;
     const stableCount = agentCount === 0 ? 0 : agentCount - compCount; 
@@ -39,11 +38,6 @@ function App() {
     const avgCpu = agentCount > 0 ? (totalCpu / agentCount) : 0;
 
     useEffect(() => {
-        const timer = setInterval(() => setSysTime(new Date().toLocaleTimeString('fr-FR')), 1000);
-        return () => clearInterval(timer);
-    }, []);
-
-    useEffect(() => {
         if (agentCount > 0) {
             const now = new Date().toLocaleTimeString('fr-FR', { hour12: false });
             setTimeLabels(prev => [...prev.slice(-24), now]);
@@ -52,53 +46,42 @@ function App() {
         }
     }, [agentCount, avgRam, avgCpu]);
 
+    // ARCHITECTURAL FIX: Dynamic Edge Severing
+    const isolatedSet = new Set(activeNodes.filter(n => n.status === 'COMPROMIS').map(n => n.id));
+    
     const edges = [];
     activeNodes.forEach(node => {
-        if (node.neighbors) {
+        if (node.neighbors && !isolatedSet.has(node.id)) {
             node.neighbors.split(',').forEach(neighbor => {
                 if (neighbor && neighbor !== node.id && neighbor !== "NEIGHBORS:") {
-                    edges.push({ from: node.id, to: neighbor });
+                    if (!isolatedSet.has(neighbor)) {
+                        edges.push({ from: node.id, to: neighbor });
+                    }
                 }
             });
         }
     });
 
-    const renderBannerState = () => {
-        if (connectionState === 'C2_CENTRAL') return <div className="status-indicator status-green"><div className="pulse-dot"></div>C2 CENTRAL (CONNECTED)</div>;
-        if (connectionState === 'DISCONNECTED') return <div className="status-indicator status-red" style={{color: '#ff003c'}}><div className="pulse-dot"></div>CONNEXION PERDUE</div>;
-        return <div className="status-indicator status-orange"><div className="pulse-dot"></div>RECHERCHE C2...</div>;
-    };
-
     return (
         <div id="dashboard-root" className="app">
-            <div className="status-banner">
-                <div className="banner-title">
-                    <span className="shield-icon">🛡️</span> NEURO-MESH COMMAND CENTER
-                    <span className="banner-clock">🕒 {sysTime}</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center' }}>
-                    {renderBannerState()}
-                    <div className="button-group">
-                        <button id="btn-attack" onClick={() => alert("Exécutez ./test_attack.sh dans le terminal")}>💣 INJECT THREAT</button>
-                    </div>
-                </div>
-            </div>
+            
+            <CommandHeader connectionState={connectionState} />
 
             <div className="soc-grid">
                 <div className="kpi-card">
-                    <div className="kpi-header">Agents Déployés</div>
+                    <div className="kpi-header">AGENTS DEPLOYED</div>
                     <div className="kpi-value val-blue">{agentCount}</div>
                 </div>
                 <div className="kpi-card">
-                    <div className="kpi-header">Menaces Actives</div>
+                    <div className="kpi-header">ACTIVE THREATS</div>
                     <div className={compCount > 0 ? "kpi-value val-red" : "kpi-value val-green"}>{compCount}</div>
                 </div>
                 <div className="kpi-card">
-                    <div className="kpi-header">Charge CPU Réseau</div>
+                    <div className="kpi-header">NETWORK CPU LOAD</div>
                     <div className={avgCpu > 0.5 ? "kpi-value val-red" : "kpi-value val-purple"}>{(avgCpu * 100).toFixed(1)}%</div>
                 </div>
                 <div className="kpi-card">
-                    <div className="kpi-header">RAM Allouée</div>
+                    <div className="kpi-header">ALLOCATED RAM</div>
                     <div className="kpi-value val-green">{avgRam} MB</div>
                 </div>
 
