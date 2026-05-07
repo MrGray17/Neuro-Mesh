@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  alpha:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neuro_alpha
+    privileged: true
+    network_mode: host
+    command: ["ALPHA"]
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /lib/modules:/lib/modules:ro
+      - ./journal_ALPHA.log:/app/journal_ALPHA.log
+    restart: unless-stopped
+
+  bravo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neuro_bravo
+    privileged: true
+    network_mode: host
+    command: ["BRAVO"]
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /lib/modules:/lib/modules:ro
+      - ./journal_BRAVO.log:/app/journal_BRAVO.log
+    restart: unless-stopped
+    depends_on:
+      - alpha
+
+  charlie:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neuro_charlie
+    privileged: true
+    network_mode: host
+    command: ["CHARLIE"]
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /lib/modules:/lib/modules:ro
+      - ./journal_CHARLIE.log:/app/journal_CHARLIE.log
+    restart: unless-stopped
+    depends_on:
+      - alpha
+      - bravo

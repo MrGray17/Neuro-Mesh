@@ -1,0 +1,38 @@
+# Archived experiments
+_archive_old/
+
+# Build artifacts (rebuilt in container)
+bin/
+obj/
+*.skel.h
+
+# Node modules and Python venv
+node_modules/
+venv/
+dashboard-react/node_modules/
+orchestration/__pycache__/
+
+# Git metadata
+.git/
+.gitignore
+
+# Logs, env, trained models
+*.log
+.env
+trained_models/
+api.json
+api_tmp.json
+ia_commands.txt
+
+# IDE / OS
+.vscode/
+.DS_Store
+
+# Large archives and dumps
+*.tar.gz
+neuro_mesh_full_*.txt
+neuro_mesh_pure_code*.txt
+
+# Old dashboard (replaced by dashboard-fui)
+dashboard-react/
+web/

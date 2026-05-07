@@ -8,18 +8,20 @@
 using namespace neuro_mesh;
 
 static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " --target <node_id> [--event <type>] [--verdict <severity>]\n"
+    std::cerr << "Usage: " << prog << " --target <node_id> [--event <type>] [--verdict <severity>] [--tag <str>]\n"
               << "  --target   Target node ID (required, e.g. ALPHA, 10.99.99.99)\n"
               << "  --event    Event type: lateral_movement | privilege_escalation | entropy_spike (default: lateral_movement)\n"
               << "  --verdict  Severity: THREAT | CRITICAL | ANOMALY (default: THREAT)\n"
+              << "  --tag      Unique tag for evidence (default: none) — ensures unique PBFT rounds per run\n"
               << "\nExample:\n"
-              << "  " << prog << " --target ALPHA --event lateral_movement --verdict CRITICAL\n";
+              << "  " << prog << " --target ALPHA --event lateral_movement --verdict CRITICAL --tag run1\n";
 }
 
 int main(int argc, char* argv[]) {
     std::string target;
     std::string event_type = "lateral_movement";
     std::string verdict = "THREAT";
+    std::string tag;
 
     // Parse --key value pairs
     for (int i = 1; i < argc; ++i) {
@@ -30,6 +32,8 @@ int main(int argc, char* argv[]) {
             event_type = argv[++i];
         } else if (arg == "--verdict" && i + 1 < argc) {
             verdict = argv[++i];
+        } else if (arg == "--tag" && i + 1 < argc) {
+            tag = argv[++i];
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -48,15 +52,16 @@ int main(int argc, char* argv[]) {
 
     // Build the evidence JSON from parsed flags
     std::string evidence;
+    std::string tag_field = tag.empty() ? "" : R"(,"tag":")" + tag + R"(")";
     if (event_type == "lateral_movement") {
         evidence = R"({"event":"lateral_movement","src_ip":")" + target
-                 + R"(","pid":4201,"comm":"sshd","verdict":")" + verdict + R"("})";
+                 + R"(","pid":4201,"comm":"sshd","verdict":")" + verdict + R"(")" + tag_field + "}";
     } else if (event_type == "privilege_escalation") {
         evidence = R"({"event":"privilege_escalation","uid":0,"comm":"bash")"
-                   R"(,"parent_comm":"nginx","verdict":")" + verdict + R"("})";
+                   R"(,"parent_comm":"nginx","verdict":")" + verdict + R"(")" + tag_field + "}";
     } else {
         evidence = R"({"sensor":"ebpf_entropy","value":0.98,"threshold":0.85,"verdict":")"
-                 + verdict + R"("})";
+                 + verdict + R"(")" + tag_field + "}";
     }
 
     SystemJailer jailer;

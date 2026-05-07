@@ -24,7 +24,8 @@ MeshNode::MeshNode(const std::string& node_id,
       m_running(false),
       m_pbft(1),   // start with n=1 (self), scale up via discovery
       m_jailer(jailer),
-      m_mitigation(mitigation)
+      m_mitigation(mitigation),
+      m_journal("./journal_" + node_id + ".log")
 {
     m_private_key = crypto::IdentityCore::generate_ed25519_key();
     m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
@@ -33,6 +34,8 @@ MeshNode::MeshNode(const std::string& node_id,
 
     // Register self so self-votes pass verification
     m_pbft.register_peer_key(m_node_id, m_public_key_pem);
+
+    std::cout << "[JOURNAL] Initialized. Last seq: " << m_journal.last_seq() << std::endl;
 }
 
 MeshNode::~MeshNode() {
@@ -527,9 +530,11 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
             it->second.last_heartbeat = steady_clock::now();
             it->second.ip = sender_ip;        // update IP (may change)
             it->second.tcp_port = peer_tcp_port;
-            if (!it->second.verified && !peer_pem.empty()) {
+            // Update key if the peer re-announces with a new identity (e.g. simulator restarts)
+            if (!peer_pem.empty()) {
                 it->second.public_key_pem = peer_pem;
                 it->second.verified = true;
+                m_pbft.register_peer_key(peer_id, peer_pem);
             }
         }
     }  // m_peers_mtx RELEASED — safe to call perform_pex_handshake now
@@ -579,11 +584,6 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
 
         if (m_jailer) m_jailer->register_peer_ip(peer_id, sender_ip);
 
-        // Update PBFT peer count for ANNOUNCE-based discovery too
-        if (is_new_peer) {
-            m_pbft.increment_peers();
-        }
-
         if (!is_new_peer) {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_last_announce_time).count();
@@ -616,11 +616,13 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
             }
             else if (next_stage == PBFTStage::COMMIT) {
                 std::cout << "[PBFT] -> Advanced to COMMIT, broadcasting..." << std::endl;
+                m_journal.append("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
                 broadcast_pbft_stage("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
             }
             else if (next_stage == PBFTStage::EXECUTED) {
                 std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << incoming_msg.target_id
                           << " — executing MitigationEngine response." << std::endl;
+                m_journal.append("EXECUTED", incoming_msg.target_id, incoming_msg.evidence_json);
                 std::string ev = incoming_msg.evidence_json;
                 std::string tgt = incoming_msg.target_id;
                 std::thread([this, ev, tgt]() {
@@ -663,10 +665,12 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
             broadcast_pbft_stage("PREPARE", target_id, evidence_json);
         } else if (next_stage == PBFTStage::COMMIT) {
             std::cout << "[PBFT] -> Advanced to COMMIT, broadcasting..." << std::endl;
+            m_journal.append("COMMIT", target_id, evidence_json);
             broadcast_pbft_stage("COMMIT", target_id, evidence_json);
         } else if (next_stage == PBFTStage::EXECUTED) {
             std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << target_id
                       << " — executing MitigationEngine response." << std::endl;
+            m_journal.append("EXECUTED", target_id, evidence_json);
             std::string ev = evidence_json;
             std::string tgt = target_id;
             std::thread([this, ev, tgt]() {

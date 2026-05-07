@@ -46,7 +46,7 @@ AGENT_TARGET = $(BIN_DIR)/neuro_agent
 SIM_TARGET = $(BIN_DIR)/simulate_threat
 CRYPTO_TEST_TARGET = $(BIN_DIR)/test_crypto
 
-all: directories skel $(AGENT_TARGET) tools
+all: directories kernel/sensor.skel.h $(AGENT_TARGET) tools
 
 directories:
 	@mkdir -p $(OBJ_DIR) $(BIN_DIR)
@@ -58,8 +58,8 @@ directories:
 $(OBJ_DIR)/sensor.bpf.o: kernel/sensor.bpf.c
 	$(BPF_CC) $(BPF_CFLAGS) -c $< -o $@
 
-skel: $(OBJ_DIR)/sensor.bpf.o
-	bpftool gen skeleton $< > kernel/sensor.skel.h
+kernel/sensor.skel.h: $(OBJ_DIR)/sensor.bpf.o
+	bpftool gen skeleton $< > $@
 
 # ---- uSockets C compilation ----
 $(OBJ_DIR)/usockets/%.o: $(USOCK_DIR)/%.c
@@ -92,4 +92,4 @@ tools: $(SIM_TARGET) $(CRYPTO_TEST_TARGET)
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR) kernel/sensor.skel.h
 
-.PHONY: all directories skel tools clean
+.PHONY: all directories tools clean

@@ -10,6 +10,7 @@
 #include <chrono>
 #include "consensus/PBFT.hpp"
 #include "crypto/CryptoCore.hpp"
+#include "common/StateJournal.hpp"
 #include "jailer/SystemJailer.hpp"
 
 namespace neuro_mesh {
@@ -93,6 +94,7 @@ private:
     // === Dependencies ===
     SystemJailer* m_jailer;
     MitigationEngine* m_mitigation;
+    StateJournal m_journal;
 
     // === Legacy peer tracking (for ANNOUNCE protocol compatibility) ===
     std::mutex m_peer_mtx;
