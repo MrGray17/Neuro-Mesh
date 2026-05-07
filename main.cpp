@@ -22,58 +22,36 @@ void signal_handler(int signum) {
 }
 
 // =============================================================================
-// Mock threat generator — injects synthetic telemetry into the bridge every 2s
+// Heartbeat loop — pushes node vitals to the TelemetryBridge every 2s
 // =============================================================================
 
-void mock_threat_loop(TelemetryBridge& bridge, const std::string& node_id) {
+void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh, const std::string& node_id) {
     int seq = 0;
     while (global_running) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
-        // Build a realistic JSON telemetry payload.
-        // Alternates between entropy spikes, lateral movement alerts,
-        // and normal heartbeat entries.
-        std::string json;
-        switch (seq % 5) {
-            case 0:
-                json = R"({"seq":)" + std::to_string(seq)
-                     + R"(,"node":")" + node_id
-                     + R"(","event":"entropy_spike","sensor":"ebpf_entropy")"
-                     + R"(,"value":0.97,"threshold":0.85,"verdict":"ANOMALY"})";
-                break;
-            case 1:
-                json = R"({"seq":)" + std::to_string(seq)
-                     + R"(,"node":")" + node_id
-                     + R"(","event":"lateral_movement","src_ip":"10.99.99.99")"
-                     + R"(,"pid":4201,"comm":"sshd","verdict":"THREAT"})";
-                break;
-            case 2:
-                json = R"({"seq":)" + std::to_string(seq)
-                     + R"(,"node":")" + node_id
-                     + R"(","event":"heartbeat","cpu":0.12,"mem_mb":48)"
-                     + R"(,"peers":3,"uptime_s":)" + std::to_string(seq * 2) + "}";
-                break;
-            case 3:
-                json = R"({"seq":)" + std::to_string(seq)
-                     + R"(,"node":")" + node_id
-                     + R"(","event":"privilege_escalation","uid":0,"comm":"bash")"
-                     + R"(,"parent_comm":"nginx","verdict":"CRITICAL"})";
-                break;
-            case 4:
-                json = R"({"seq":)" + std::to_string(seq)
-                     + R"(,"node":")" + node_id
-                     + R"(","event":"pbft_round_complete")"
-                     + R"(,"target":"10.99.99.99","quorum":4,"stage":"EXECUTED"})";
-                break;
+        // Build peer_list JSON array
+        auto peer_ids = mesh.get_active_peer_ids();
+        std::string peer_list_json = "[";
+        for (size_t i = 0; i < peer_ids.size(); ++i) {
+            if (i > 0) peer_list_json += ",";
+            peer_list_json += "\"" + peer_ids[i] + "\"";
         }
+        peer_list_json += "]";
+
+        std::string json = "{\"seq\":" + std::to_string(seq)
+                         + ",\"node\":\"" + node_id + "\""
+                         + ",\"event\":\"heartbeat\""
+                         + ",\"peers\":" + std::to_string(mesh.peer_count())
+                         + ",\"peer_list\":" + peer_list_json
+                         + ",\"cpu\":0.0,\"mem_mb\":0}";
 
         auto result = bridge.push_telemetry(json);
         if (result.is_err()) {
-            std::cerr << "[MOCK] Bridge push failed: " << result.error() << std::endl;
+            std::cerr << "[HEARTBEAT] Bridge push failed: " << result.error() << std::endl;
         }
         ++seq;
     }
-    std::cout << "[MOCK] Threat generator halted (" << seq << " payloads sent)." << std::endl;
 }
 
 // =============================================================================
@@ -181,15 +159,15 @@ int main(int argc, char* argv[]) {
                   << std::endl;
     }
 
-    // ---- Stage 3: Mock threat generator (synthetic telemetry) ----
-    std::thread mock_thread;
-    if (bridge.alive()) {
-        mock_thread = std::thread(mock_threat_loop, std::ref(bridge), node_id);
-        std::cout << "[BOOT] Mock threat generator started (2s interval)." << std::endl;
-    }
+    // ---- Stage 3: Consensus engine (dynamic scaling, starts with n=1) ----
+    MeshNode mesh(node_id, &jailer, &mitigation);
 
-    // ---- Stage 4: Consensus engine (5-node PBFT, tolerates f=1) ----
-    MeshNode mesh(node_id, 5, &jailer, &mitigation);
+    // ---- Stage 4: Heartbeat (node vitals broadcast every 2s) ----
+    std::thread heartbeat_thread;
+    if (bridge.alive()) {
+        heartbeat_thread = std::thread(heartbeat_loop, std::ref(bridge), std::ref(mesh), node_id);
+        std::cout << "[BOOT] Heartbeat pulse started (2s interval)." << std::endl;
+    }
 
     // ---- Stage 5: P2P listener ----
     mesh.start();
@@ -205,8 +183,8 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- Graceful shutdown (reverse order of init) ----
-    std::cout << "[SHUTDOWN] Stopping mock generator..." << std::endl;
-    if (mock_thread.joinable()) mock_thread.join();
+    std::cout << "[SHUTDOWN] Stopping heartbeat..." << std::endl;
+    if (heartbeat_thread.joinable()) heartbeat_thread.join();
 
     std::cout << "[SHUTDOWN] Halting MeshNode..." << std::endl;
     mesh.stop();

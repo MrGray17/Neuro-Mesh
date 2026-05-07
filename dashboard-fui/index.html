@@ -1,0 +1,1283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SOVEREIGN SOC // NEURO-MESH COMMAND</title>
+<style>
+/* ==========================================================================
+   NEON-NOIR FUI BASE
+   ========================================================================== */
+:root {
+  --bg:        #000000;
+  --panel:     #0a0a0a;
+  --border:    #1a1a1a;
+  --cyan:      #00ffff;
+  --cyan-dim:  #004444;
+  --amber:     #ffb000;
+  --amber-dim: #442800;
+  --red:       #ff0040;
+  --red-dim:   #440010;
+  --green:     #00ff41;
+  --white:     #c0c0c0;
+  --dim:       #505050;
+  --font:      'Courier New', Courier, monospace;
+  --scanline-opacity: 0.03;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--white);
+  font-family: var(--font);
+  font-size: 15px;
+  overflow: hidden;
+  height: 100vh;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ---- Hex-grid background ---- */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    url("data:image/svg+xml,%3Csvg width='60' height='52' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M30 0L60 15v22L30 52 0 37V15z' fill='none' stroke='%23111111' stroke-width='1'/%3E%3C/svg%3E");
+  background-size: 60px 52px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ---- Scanline overlay ---- */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.08) 2px,
+    rgba(0,0,0,0.08) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ---- Glitch overlay (hidden by default) ---- */
+#glitch-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.05s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+}
+
+#glitch-overlay.active {
+  opacity: 1;
+  animation: glitch-flash 0.5s ease-out;
+}
+
+#glitch-overlay .glitch-text {
+  font-family: var(--font);
+  font-size: 42px;
+  font-weight: bold;
+  color: var(--red);
+  text-shadow:
+    3px 0 #00ffff,
+    -3px 0 #ff0040;
+  letter-spacing: 8px;
+  animation: glitch-rgb 0.15s infinite;
+}
+
+#glitch-overlay .glitch-sub {
+  font-family: var(--font);
+  font-size: 14px;
+  color: var(--amber);
+  margin-top: 8px;
+  letter-spacing: 4px;
+}
+
+@keyframes glitch-flash {
+  0%   { background: rgba(255,0,64,0.3); }
+  100% { background: transparent; }
+}
+
+@keyframes glitch-rgb {
+  0%   { transform: translate(2px, 0); }
+  25%  { transform: translate(-3px, 1px); }
+  50%  { transform: translate(1px, -1px); }
+  75%  { transform: translate(-2px, 0); }
+  100% { transform: translate(0, 0); }
+}
+
+/* ==========================================================================
+   LAYOUT
+   ========================================================================== */
+#app {
+  position: relative;
+  z-index: 1;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 6px;
+}
+
+/* ---- Header ---- */
+#header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 12px 20px;
+  min-height: 80px;
+  clip-path: polygon(0 0, 100% 0, calc(100% - 16px) 100%, 0 100%);
+}
+
+#header .identity { display: flex; align-items: center; gap: 14px; }
+#header .id-label   { color: var(--cyan); font-size: 24px; font-weight: bold; letter-spacing: 4px; }
+#header .id-value   { color: var(--white); font-size: 18px; font-weight: bold; }
+
+#header .status-row { display: flex; align-items: center; gap: 28px; }
+
+.status-badge {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; text-transform: uppercase; letter-spacing: 2px;
+}
+.status-dot {
+  width: 10px; height: 10px;
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+  animation: pulse-dot 2s infinite;
+}
+.status-dot.danger { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.status-dot.warn   { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+
+.stat-chip {
+  display: flex; gap: 7px;
+  font-size: 13px; letter-spacing: 1px;
+}
+.stat-chip .label { color: var(--dim); text-transform: uppercase; }
+.stat-chip .value { color: var(--cyan); font-weight: bold; }
+
+/* ---- Main grid ---- */
+#main-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 0.8fr;
+  grid-template-rows: 1fr;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0,255,255,0.02);
+  font-size: 12px;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--cyan);
+}
+
+.panel-header .pill {
+  font-size: 10px;
+  padding: 3px 10px;
+  background: rgba(0,255,255,0.08);
+  border: 1px solid var(--cyan-dim);
+  letter-spacing: 1px;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.panel-body canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---- Kill Feed ---- */
+#kill-feed-section {
+  height: 170px;
+  min-height: 170px;
+}
+
+#kill-feed {
+  height: 100%;
+  overflow-y: auto;
+  padding: 6px 10px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+#kill-feed::-webkit-scrollbar { width: 4px; }
+#kill-feed::-webkit-scrollbar-track { background: var(--bg); }
+#kill-feed::-webkit-scrollbar-thumb { background: var(--border); }
+
+.kill-entry {
+  display: flex;
+  gap: 10px;
+  padding: 3px 6px;
+  border-left: 3px solid transparent;
+  animation: feed-in 0.3s ease-out;
+}
+
+.kill-entry.ENFORCEMENT { border-left-color: var(--red); }
+.kill-entry.ENTROPY     { border-left-color: var(--amber); }
+.kill-entry.PBFT        { border-left-color: var(--cyan); }
+.kill-entry.HEARTBEAT   { border-left-color: var(--dim); }
+
+.kill-entry .ts    { color: var(--dim); white-space: nowrap; min-width: 165px; }
+.kill-entry .cat   { color: var(--cyan); min-width: 110px; text-transform: uppercase; font-weight: bold; }
+.kill-entry .hash  { color: var(--dim); min-width: 100px; }
+.kill-entry .msg   { color: var(--white); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@keyframes feed-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ---- Vitals panel ---- */
+#vitals-panel .panel-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+}
+
+.gauge-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.gauge-container .gauge-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--dim);
+}
+
+.gauge-container .gauge-value {
+  font-size: 24px;
+  font-weight: bold;
+  color: var(--cyan);
+  margin-top: -8px;
+}
+
+.gauge-container svg {
+  width: 100px;
+  height: 56px;
+}
+
+#vitals-extra {
+  width: 100%;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.vital-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 3px 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.vital-row .vkey   { color: var(--dim); text-transform: uppercase; }
+.vital-row .vval   { color: var(--white); }
+
+/* ---- Tick bar ---- */
+#tick-bar {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 24px;
+  background: rgba(0,0,0,0.6);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  font-size: 11px;
+  color: var(--dim);
+  z-index: 2;
+}
+
+#conn-indicator { display: flex; align-items: center; gap: 5px; }
+#conn-dot {
+  width: 8px; height: 8px;
+  background: var(--red);
+  box-shadow: 0 0 4px var(--red);
+}
+#conn-dot.live { background: var(--green); box-shadow: 0 0 4px var(--green); }
+</style>
+</head>
+<body>
+
+<!-- Glitch Overlay -->
+<div id="glitch-overlay">
+  <div class="glitch-text">[ ENFORCEMENT EXECUTED ]</div>
+  <div class="glitch-sub" id="glitch-detail"></div>
+</div>
+
+<!-- App Shell -->
+<div id="app">
+
+  <!-- HEADER -->
+  <div id="header">
+    <div class="identity">
+      <span class="id-label">SOVEREIGN NODE</span>
+      <span class="id-value" id="node-id-display">NODE_1</span>
+    </div>
+    <div class="status-row">
+      <div class="status-badge">
+        <span class="status-dot" id="mesh-dot"></span>
+        <span id="mesh-status-label">MESH: --</span>
+      </div>
+      <div class="stat-chip">
+        <span class="label">PEERS:</span>
+        <span class="value" id="peer-count">0</span>
+      </div>
+      <div class="stat-chip">
+        <span class="label">PBFT ROUNDS:</span>
+        <span class="value" id="pbft-rounds">0</span>
+      </div>
+      <div class="stat-chip">
+        <span class="label">QUORUM:</span>
+        <span class="value" id="quorum-display">--</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN GRID -->
+  <div id="main-grid">
+
+    <!-- Mesh Overlay -->
+    <div class="panel" id="mesh-panel">
+      <div class="panel-header">
+        <span>TACTICAL MESH OVERLAY</span>
+        <span class="pill" id="mesh-pill">TOPO: 1 NODES</span>
+      </div>
+      <div class="panel-body">
+        <canvas id="mesh-canvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Spectrogram -->
+    <div class="panel" id="spectro-panel">
+      <div class="panel-header">
+        <span>ENTROPY SPECTROGRAM</span>
+        <span class="pill">eBPF SENSOR</span>
+      </div>
+      <div class="panel-body">
+        <canvas id="spectro-canvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Vitals -->
+    <div class="panel" id="vitals-panel">
+      <div class="panel-header">
+        <span>NODE VITALS</span>
+        <span class="pill" id="vitals-pill">STABLE</span>
+      </div>
+      <div class="panel-body" id="vitals-body"></div>
+    </div>
+
+  </div>
+
+  <!-- Kill Feed -->
+  <div class="panel" id="kill-feed-section">
+    <div class="panel-header">
+      <span>SOVEREIGN AUDIT LOG // LIVE</span>
+      <span class="pill" id="feed-count">0 EVENTS</span>
+    </div>
+    <div id="kill-feed"></div>
+  </div>
+
+  <!-- Tick Bar -->
+  <div id="tick-bar">
+    <span id="tick-clock">--</span>
+    <div id="conn-indicator">
+      <span id="conn-dot"></span>
+      <span id="conn-label">WS: DISCONNECTED</span>
+    </div>
+    <span id="tick-frame">FRAME: --</span>
+  </div>
+
+</div>
+
+<script>
+/* ==========================================================================
+   FUI SOVEREIGN COMMAND DASHBOARD — Zero-dependency Vanilla JS
+   ========================================================================== */
+
+// ---- Constants ----
+const WS_URL      = 'ws://localhost:9000';
+const MAX_FEED    = 200;
+const SPEC_BARS   = 64;
+const ENTROPY_MAX = 1.0;
+
+// ---- State ----
+const state = {
+  nodeId: 'NODE_1',
+  peers: 0,
+  pbftRounds: 0,
+  quorum: '--',
+  meshStatus: 'INIT',
+  cpuLoad: 0,
+  ramMb: 0,
+  entropy: 0,
+  lastThreat: false,
+  threatFlag: false,
+  wsLive: false,
+  feedCount: 0,
+  frameCount: 0,
+  // Mesh graph
+  nodes: [],
+  edges: [],
+  // Spectrogram history
+  specHistory: [],
+};
+
+// ---- DOM refs ----
+const $ = (s) => document.getElementById(s);
+const dom = {
+  nodeId:       $('node-id-display'),
+  meshDot:      $('mesh-dot'),
+  meshStatus:   $('mesh-status-label'),
+  peerCount:    $('peer-count'),
+  pbftRounds:   $('pbft-rounds'),
+  quorum:       $('quorum-display'),
+  meshPill:     $('mesh-pill'),
+  vitalsPill:   $('vitals-pill'),
+  vitalsBody:   $('vitals-body'),
+  feedCount:    $('feed-count'),
+  killFeed:     $('kill-feed'),
+  tickClock:    $('tick-clock'),
+  tickFrame:    $('tick-frame'),
+  connDot:      $('conn-dot'),
+  connLabel:    $('conn-label'),
+  glitch:       $('glitch-overlay'),
+  glitchDetail: $('glitch-detail'),
+  meshCanvas:   $('mesh-canvas'),
+  spectroCanvas:$('spectro-canvas'),
+};
+
+/* ==========================================================================
+   SVG ARC GAUGES
+   ========================================================================== */
+function buildGauges() {
+  const cpuPct = Math.min(state.cpuLoad * 100, 100);
+  const ramPct = Math.min((state.ramMb / 8192) * 100, 100); // 8GB scale
+
+  const cpuColor = cpuPct > 80 ? 'var(--red)' : cpuPct > 50 ? 'var(--amber)' : 'var(--cyan)';
+  const ramColor = ramPct > 80 ? 'var(--red)' : ramPct > 50 ? 'var(--amber)' : 'var(--cyan)';
+
+  dom.vitalsBody.innerHTML = `
+    <div class="gauge-container">
+      <span class="gauge-label">CPU LOAD</span>
+      <svg viewBox="0 0 100 56">${arcPath(cpuPct, cpuColor)}</svg>
+      <span class="gauge-value" style="color:${cpuColor}">${cpuPct.toFixed(0)}%</span>
+    </div>
+    <div class="gauge-container">
+      <span class="gauge-label">MEMORY</span>
+      <svg viewBox="0 0 100 56">${arcPath(ramPct, ramColor)}</svg>
+      <span class="gauge-value" style="color:${ramColor}">${state.ramMb} MB</span>
+    </div>
+    <div id="vitals-extra">
+      <div class="vital-row"><span class="vkey">ENTROPY</span><span class="vval">${state.entropy.toFixed(4)}</span></div>
+      <div class="vital-row"><span class="vkey">THREAT</span><span class="vval" style="color:${state.threatFlag ? 'var(--red)' : 'var(--green)'}">${state.threatFlag ? 'ACTIVE' : 'NONE'}</span></div>
+      <div class="vital-row"><span class="vkey">STATUS</span><span class="vval">${state.meshStatus}</span></div>
+      <div class="vital-row"><span class="vkey">PEERS</span><span class="vval">${state.peers}</span></div>
+    </div>
+  `;
+}
+
+function arcPath(pct, color) {
+  if (pct > 100) pct = 100;
+  if (pct < 0) pct = 0;
+  const startAngle = -210;
+  const endAngle = 30;
+  const range = endAngle - startAngle;
+  const sweep = (pct / 100) * range;
+
+  const cx = 50, cy = 44, r = 32;
+  const sw = 8;
+
+  // Background arc
+  const bgStart = polar(cx, cy, r, startAngle);
+  const bgEnd   = polar(cx, cy, r, endAngle);
+  const largeBg = (endAngle - startAngle) > 180 ? 1 : 0;
+
+  // Foreground arc
+  const fgEndAngle = startAngle + sweep;
+  const fgEnd = polar(cx, cy, r, fgEndAngle);
+  const largeFg = sweep > 180 ? 1 : 0;
+
+  return `
+    <path d="M ${bgStart.x} ${bgStart.y} A ${r} ${r} 0 ${largeBg} 1 ${bgEnd.x} ${bgEnd.y}"
+          fill="none" stroke="var(--border)" stroke-width="${sw}" stroke-linecap="round"/>
+    <path d="M ${bgStart.x} ${bgStart.y} A ${r} ${r} 0 ${largeFg} 1 ${fgEnd.x} ${fgEnd.y}"
+          fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round"
+          filter="url(#glow-${color.replace('var(--','').replace(')','')})"/>
+  `;
+}
+
+function polar(cx, cy, r, deg) {
+  const rad = (deg * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+/* ==========================================================================
+   FORCE-DIRECTED MESH GRAPH
+   ========================================================================== */
+let meshCtx, meshW, meshH;
+const meshForces = {
+  centerX: 0, centerY: 0,
+  repulsion: 800,
+  springLen: 100,
+  springK: 0.03,
+  damping: 0.85,
+};
+
+function initMeshCanvas() {
+  const canvas = dom.meshCanvas;
+  meshCtx = canvas.getContext('2d');
+  resizeMesh();
+}
+
+function resizeMesh() {
+  const canvas = dom.meshCanvas;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  meshW = rect.width;
+  meshH = rect.height;
+  canvas.width = meshW * dpr;
+  canvas.height = meshH * dpr;
+  canvas.style.width = meshW + 'px';
+  canvas.style.height = meshH + 'px';
+  meshCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  meshForces.centerX = meshW / 2;
+  meshForces.centerY = meshH / 2;
+  if (state.nodes.length === 0) seedMeshNodes();
+}
+
+function seedMeshNodes() {
+  // Self node always at center
+  state.nodes = [{
+    id: state.nodeId,
+    x: meshForces.centerX + (Math.random() - 0.5) * 20,
+    y: meshForces.centerY + (Math.random() - 0.5) * 20,
+    vx: 0, vy: 0,
+    isSelf: true,
+    threat: false,
+  }];
+  state.edges = [];
+}
+
+function upsertPeerNode(peerId) {
+  if (state.nodes.find(n => n.id === peerId)) return;
+  // Don't add a peer that matches our own ID (rename instead)
+  if (peerId === state.nodeId) return;
+  const angle = Math.random() * Math.PI * 2;
+  const dist = 80 + Math.random() * 60;
+  state.nodes.push({
+    id: peerId,
+    x: meshForces.centerX + Math.cos(angle) * dist,
+    y: meshForces.centerY + Math.sin(angle) * dist,
+    vx: 0, vy: 0,
+    isSelf: false,
+    threat: false,
+  });
+  // Full-mesh (clique): connect new peer to every existing node
+  for (const existing of state.nodes) {
+    const a = existing.id, b = peerId;
+    if (a === b) continue;
+    if (!state.edges.find(e => (e.a === a && e.b === b) || (e.a === b && e.b === a))) {
+      state.edges.push({ a, b });
+    }
+  }
+}
+
+let nodeIdLocked = false; // true once we've learned our real ID from a heartbeat
+
+function renameSelfNode(newId) {
+  if (newId === state.nodeId) return;
+  const oldId = state.nodeId;
+  state.nodeId = newId;
+  dom.nodeId.textContent = newId;
+
+  // Update the self node in the graph
+  const selfNode = state.nodes.find(n => n.isSelf);
+  if (selfNode) selfNode.id = newId;
+
+  // Re-key all edges that referenced the old ID
+  for (const edge of state.edges) {
+    if (edge.a === oldId) edge.a = newId;
+    if (edge.b === oldId) edge.b = newId;
+  }
+}
+
+function markNodeThreat(nodeId) {
+  const node = state.nodes.find(n => n.id === nodeId);
+  if (node) node.threat = true;
+}
+
+function stepMeshForces() {
+  const nodes = state.nodes;
+  const cx = meshForces.centerX;
+  const cy = meshForces.centerY;
+  const rep = meshForces.repulsion;
+  const springLen = meshForces.springLen;
+  const springK = meshForces.springK;
+  const damp = meshForces.damping;
+
+  // Repulsion between all node pairs
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const dx = nodes[j].x - nodes[i].x;
+      const dy = nodes[j].y - nodes[i].y;
+      const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 10);
+      const force = rep / (dist * dist);
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      nodes[i].vx -= fx;
+      nodes[i].vy -= fy;
+      nodes[j].vx += fx;
+      nodes[j].vy += fy;
+    }
+  }
+
+  // Spring attraction along edges
+  for (const edge of state.edges) {
+    const a = nodes.find(n => n.id === edge.a);
+    const b = nodes.find(n => n.id === edge.b);
+    if (!a || !b) continue;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist === 0) continue;
+    const force = springK * (dist - springLen);
+    const fx = (dx / dist) * force;
+    const fy = (dy / dist) * force;
+    a.vx += fx;
+    a.vy += fy;
+    b.vx -= fx;
+    b.vy -= fy;
+  }
+
+  // Center gravity for non-self nodes
+  for (const node of nodes) {
+    if (node.isSelf) {
+      // Pull self toward center
+      node.vx += (cx - node.x) * 0.01;
+      node.vy += (cy - node.y) * 0.01;
+    }
+    node.vx *= damp;
+    node.vy *= damp;
+    node.x += node.vx;
+    node.y += node.vy;
+    // Clamp
+    node.x = Math.max(20, Math.min(meshW - 20, node.x));
+    node.y = Math.max(20, Math.min(meshH - 20, node.y));
+  }
+}
+
+function drawMeshGraph() {
+  const ctx = meshCtx;
+  if (!ctx || meshW === 0) return;
+
+  ctx.clearRect(0, 0, meshW, meshH);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(0,255,255,0.03)';
+  ctx.lineWidth = 0.5;
+  for (let x = 0; x < meshW; x += 40) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, meshH); ctx.stroke();
+  }
+  for (let y = 0; y < meshH; y += 40) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(meshW, y); ctx.stroke();
+  }
+
+  // Edges
+  for (const edge of state.edges) {
+    const a = state.nodes.find(n => n.id === edge.a);
+    const b = state.nodes.find(n => n.id === edge.b);
+    if (!a || !b) continue;
+    ctx.strokeStyle = 'rgba(0,255,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+
+  // Nodes
+  for (const node of state.nodes) {
+    const r = node.isSelf ? 12 : 8;
+
+    // Glow
+    const glowColor = node.threat ? 'rgba(255,0,64,0.3)' : 'rgba(0,255,255,0.2)';
+    const glow = ctx.createRadialGradient(node.x, node.y, r * 0.5, node.x, node.y, r * 3);
+    glow.addColorStop(0, glowColor);
+    glow.addColorStop(1, 'transparent');
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(node.x, node.y, r * 3, 0, Math.PI * 2); ctx.fill();
+
+    // Core
+    ctx.fillStyle = node.threat ? '#ff0040' : node.isSelf ? '#00ffff' : '#004444';
+    ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = node.threat ? '#ff0040' : node.isSelf ? '#00ffff' : '#008888';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = node.isSelf ? '#00ffff' : '#aaaaaa';
+    ctx.font = 'bold 11px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(node.id, node.x, node.y - r - 7);
+  }
+
+  // Crosshair on center
+  ctx.strokeStyle = 'rgba(0,255,255,0.06)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 8]);
+  ctx.beginPath();
+  ctx.moveTo(meshForces.centerX, 0);
+  ctx.lineTo(meshForces.centerX, meshH);
+  ctx.moveTo(0, meshForces.centerY);
+  ctx.lineTo(meshW, meshForces.centerY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/* ==========================================================================
+   ENTROPY SPECTROGRAM (Waterfall)
+   ========================================================================== */
+let specCtx, specW, specH;
+
+function initSpectroCanvas() {
+  const canvas = dom.spectroCanvas;
+  specCtx = canvas.getContext('2d');
+  resizeSpectro();
+}
+
+function resizeSpectro() {
+  const canvas = dom.spectroCanvas;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  specW = rect.width;
+  specH = rect.height;
+  canvas.width = specW * dpr;
+  canvas.height = specH * dpr;
+  canvas.style.width = specW + 'px';
+  canvas.style.height = specH + 'px';
+  specCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function pushSpectrogram(value) {
+  // Generate frequency-like bars from entropy value
+  const bars = [];
+  for (let i = 0; i < SPEC_BARS; i++) {
+    const noise = (Math.sin(i * 0.3 + Date.now() * 0.001) * 0.15);
+    const base = value * (0.3 + 0.7 * (1 - Math.abs(i - SPEC_BARS/2) / (SPEC_BARS/2)));
+    bars.push(Math.max(0, Math.min(1, base + noise)));
+  }
+  state.specHistory.push(bars);
+  // Cap history
+  const maxRows = Math.floor(specH / 3.5) || 60;
+  while (state.specHistory.length > maxRows) state.specHistory.shift();
+}
+
+function drawSpectrogram() {
+  const ctx = specCtx;
+  if (!ctx || specW === 0) return;
+
+  ctx.clearRect(0, 0, specW, specH);
+
+  const barW = specW / SPEC_BARS;
+  const barH = 3;
+  const gap = 0.5;
+  const rows = state.specHistory.length;
+
+  for (let row = 0; row < rows; row++) {
+    const bars = state.specHistory[rows - 1 - row]; // newest at bottom
+    const y = specH - (row + 1) * (barH + gap);
+
+    for (let i = 0; i < SPEC_BARS; i++) {
+      const val = bars[i];
+      let color;
+      if (val > 0.85)      color = `rgba(255,0,64,${0.4 + val * 0.6})`;
+      else if (val > 0.6)  color = `rgba(255,176,0,${0.3 + val * 0.5})`;
+      else                 color = `rgba(0,255,255,${0.15 + val * 0.4})`;
+
+      ctx.fillStyle = color;
+      ctx.fillRect(i * barW, y, barW - gap, barH);
+    }
+  }
+
+  // Threshold line
+  const threshY = specH * (1 - 0.85);
+  ctx.strokeStyle = 'rgba(255,0,64,0.3)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 6]);
+  ctx.beginPath();
+  ctx.moveTo(0, threshY);
+  ctx.lineTo(specW, threshY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Label
+  ctx.fillStyle = 'rgba(255,0,64,0.5)';
+  ctx.font = 'bold 10px "Courier New", monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('THRESH 0.85', specW - 4, threshY - 4);
+}
+
+/* ==========================================================================
+   KILL FEED
+   ========================================================================== */
+function pushFeed(category, message, hash) {
+  state.feedCount++;
+  const now = new Date();
+  const ts = now.toISOString().replace('T', ' ').slice(0, 19);
+  const shortHash = hash ? hash.slice(0, 12) : '--';
+
+  const entry = document.createElement('div');
+  entry.className = `kill-entry ${category}`;
+  entry.innerHTML = `
+    <span class="ts">${ts}</span>
+    <span class="cat">[${category}]</span>
+    <span class="hash">${shortHash}</span>
+    <span class="msg">${escapeHtml(message)}</span>
+  `;
+
+  dom.killFeed.prepend(entry);
+  dom.feedCount.textContent = `${state.feedCount} EVENTS`;
+
+  // Prune
+  while (dom.killFeed.children.length > MAX_FEED) {
+    dom.killFeed.removeChild(dom.killFeed.lastChild);
+  }
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+/* ==========================================================================
+   GLITCH TRIGGER
+   ========================================================================== */
+function triggerGlitch(detail) {
+  dom.glitchDetail.textContent = detail || 'THREAT MITIGATION ACTIVE';
+  dom.glitch.classList.add('active');
+  setTimeout(() => dom.glitch.classList.remove('active'), 500);
+}
+
+/* ==========================================================================
+   WEBSOCKET CLIENT
+   ========================================================================== */
+let ws = null;
+let wsReconnectTimer = null;
+let wsReconnectMs = 1000;
+
+function wsConnect() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+  try { ws = new WebSocket(WS_URL); } catch (e) {
+    scheduleReconnect();
+    return;
+  }
+
+  ws.onopen = () => {
+    state.wsLive = true;
+    wsReconnectMs = 1000;
+    dom.connDot.classList.add('live');
+    dom.connLabel.textContent = 'WS: LIVE';
+    // Subscribe to telemetry topic
+    try { ws.send(JSON.stringify({ action: 'subscribe', topic: 'telemetry' })); } catch(e) {}
+    pushFeed('HEARTBEAT', 'WebSocket connected — telemetry stream active', '');
+  };
+
+  ws.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      routeMessage(data);
+    } catch (e) {
+      // Non-JSON message, ignore
+    }
+  };
+
+  ws.onclose = () => {
+    state.wsLive = false;
+    dom.connDot.classList.remove('live');
+    dom.connLabel.textContent = 'WS: RECONNECTING';
+    scheduleReconnect();
+  };
+
+  ws.onerror = () => {
+    // onclose will fire after this
+    state.wsLive = false;
+  };
+}
+
+function scheduleReconnect() {
+  if (wsReconnectTimer) return;
+  dom.connDot.classList.remove('live');
+  dom.connLabel.textContent = `WS: RETRY ${(wsReconnectMs / 1000).toFixed(0)}s`;
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    wsReconnectMs = Math.min(wsReconnectMs * 2, 30000);
+    wsConnect();
+  }, wsReconnectMs);
+}
+
+/* ==========================================================================
+   MESSAGE ROUTER
+   ========================================================================== */
+function routeMessage(data) {
+  const event = data.event || data.type || '';
+
+  switch (event) {
+    case 'entropy_spike':
+    case 'ebpf_entropy':
+      state.entropy = parseFloat(data.value) || 0;
+      if (state.entropy > 0.85) {
+        state.threatFlag = true;
+        dom.meshDot.classList.add('danger');
+      }
+      pushSpectrogram(state.entropy);
+      pushFeed('ENTROPY',
+        `eBPF entropy spike: ${state.entropy.toFixed(3)} (threshold: ${data.threshold || 0.85})`,
+        data.hash || '');
+      break;
+
+    case 'lateral_movement':
+      state.threatFlag = true;
+      dom.meshDot.classList.add('danger');
+      const srcIp = data.src_ip || '0.0.0.0';
+      pushFeed('ENFORCEMENT',
+        `Lateral movement detected — src: ${srcIp} pid: ${data.pid || '?'} comm: ${data.comm || '?'}`,
+        data.hash || '');
+      triggerGlitch(`LATERAL MOVE: ${srcIp}`);
+      // Mark source IP as threat node
+      markNodeThreat(srcIp);
+      break;
+
+    case 'privilege_escalation':
+      state.threatFlag = true;
+      dom.meshDot.classList.add('danger');
+      pushFeed('ENFORCEMENT',
+        `Privilege escalation — uid:${data.uid || '?'} comm: ${data.comm || '?'} parent: ${data.parent_comm || '?'}`,
+        data.hash || '');
+      triggerGlitch(`PRIVESC: ${data.comm || 'UNKNOWN'}`);
+      break;
+
+    case 'pbft_round_complete':
+      state.pbftRounds++;
+      dom.pbftRounds.textContent = state.pbftRounds;
+      const stage = data.stage || '';
+      const target = data.target || '';
+      if (stage === 'EXECUTED') {
+        pushFeed('PBFT',
+          `Consensus EXECUTED — target: ${target} quorum: ${data.quorum || '?'}`,
+          data.hash || '');
+        triggerGlitch(`PBFT EXECUTED: ${target}`);
+        markNodeThreat(target);
+      } else {
+        pushFeed('PBFT',
+          `PBFT ${stage} — target: ${target} quorum: ${data.quorum || '?'}`,
+          data.hash || '');
+      }
+      // Update quorum display
+      if (data.quorum) {
+        state.quorum = String(data.quorum);
+        dom.quorum.textContent = state.quorum;
+      }
+      break;
+
+    case 'heartbeat':
+    case 'telemetry':
+      state.cpuLoad = parseFloat(data.cpu) || state.cpuLoad;
+      state.ramMb = parseInt(data.mem_mb) || parseInt(data.RAM_MB) || state.ramMb;
+      if (data.peers !== undefined) {
+        state.peers = parseInt(data.peers);
+        dom.peerCount.textContent = state.peers;
+      }
+      // First heartbeat with a real node ID renames the center node
+      if (data.node && !nodeIdLocked) {
+        renameSelfNode(data.node);
+        nodeIdLocked = true;
+      }
+      // Render peer list from heartbeat (e.g. ["BRAVO","CHARLIE"])
+      if (Array.isArray(data.peer_list)) {
+        for (const pid of data.peer_list) {
+          if (pid !== state.nodeId) upsertPeerNode(pid);
+        }
+      }
+      if (data.status === 'SELF_ISOLATED' || data.KERNEL_THREAT === 'TRUE') {
+        state.threatFlag = true;
+        dom.meshDot.classList.add('danger');
+      }
+      if (data.node_id && data.node_id !== state.nodeId) upsertPeerNode(data.node_id);
+      break;
+
+    case 'discovery':
+    case 'peer_join':
+      if (data.node_id) upsertPeerNode(data.node_id);
+      if (data.peer_count !== undefined) {
+        state.peers = parseInt(data.peer_count);
+        dom.peerCount.textContent = state.peers;
+      }
+      pushFeed('HEARTBEAT', `Peer joined mesh: ${data.node_id || 'unknown'}`, '');
+      break;
+
+    case 'enforcement':
+      state.threatFlag = true;
+      dom.meshDot.classList.add('danger');
+      pushFeed('ENFORCEMENT',
+        `${data.action || 'MITIGATION'} — ${data.detail || 'enforcement executed'}`,
+        data.consensus_hash || '');
+      triggerGlitch(data.detail || 'ENFORCEMENT EXECUTED');
+      if (data.target) markNodeThreat(data.target);
+      break;
+
+    default:
+      // Generic telemetry — try to extract useful fields
+      if (data.ID || data.node_id) {
+        const nid = data.ID || data.node_id;
+        if (nid !== state.nodeId) upsertPeerNode(nid);
+      }
+      if (data.CPU_LOAD !== undefined) state.cpuLoad = parseFloat(data.CPU_LOAD);
+      if (data.RAM_MB !== undefined) state.ramMb = parseInt(data.RAM_MB);
+      if (data.KERNEL_THREAT === 'TRUE') {
+        state.threatFlag = true;
+        dom.meshDot.classList.add('danger');
+      }
+      if (data.STATUS === 'SELF_ISOLATED') {
+        state.meshStatus = 'ISOLATED';
+        dom.meshDot.classList.add('danger');
+      }
+      break;
+  }
+
+  // Update node display from heartbeat data (only before first heartbeat lock-in)
+  if (!nodeIdLocked) {
+    if (data.ID && data.ID !== state.nodeId) renameSelfNode(data.ID);
+    if (data.node && data.node !== state.nodeId) renameSelfNode(data.node);
+  }
+
+  // Update mesh status
+  if (state.threatFlag) {
+    state.meshStatus = 'THREAT ACTIVE';
+    dom.meshStatus.textContent = state.meshStatus;
+  } else if (state.peers > 0) {
+    state.meshStatus = 'MESH OPERATIONAL';
+    dom.meshStatus.textContent = state.meshStatus;
+  } else {
+    state.meshStatus = 'STANDALONE';
+    dom.meshStatus.textContent = state.meshStatus;
+  }
+
+  // Update peer count
+  state.peers = Math.max(state.peers, state.nodes.length - 1);
+  dom.peerCount.textContent = state.peers;
+  dom.meshPill.textContent = `TOPO: ${state.nodes.length} NODES`;
+
+  // Vitals pill
+  dom.vitalsPill.textContent = state.threatFlag ? 'THREAT' : 'STABLE';
+  dom.vitalsPill.style.color = state.threatFlag ? 'var(--red)' : 'var(--green)';
+  dom.vitalsPill.style.borderColor = state.threatFlag ? 'var(--red-dim)' : 'var(--cyan-dim)';
+}
+
+/* ==========================================================================
+   RENDER LOOP
+   ========================================================================== */
+let animFrame;
+let lastVitalsUpdate = 0;
+
+function renderLoop(ts) {
+  state.frameCount++;
+
+  // Step mesh physics (only if nodes > 1 for performance)
+  if (state.nodes.length > 1) stepMeshForces();
+  drawMeshGraph();
+  drawSpectrogram();
+
+  // Update vitals every 500ms (SVG rebuild is expensive)
+  if (ts - lastVitalsUpdate > 500) {
+    buildGauges();
+    lastVitalsUpdate = ts;
+  }
+
+  // Tick bar
+  dom.tickClock.textContent = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' Z';
+  dom.tickFrame.textContent = `FRAME: ${state.frameCount}`;
+
+  // Mesh status dot
+  dom.meshDot.className = 'status-dot' +
+    (state.threatFlag ? ' danger' : state.wsLive ? '' : ' warn');
+
+  animFrame = requestAnimationFrame(renderLoop);
+}
+
+/* ==========================================================================
+   RESIZE HANDLER
+   ========================================================================== */
+function onResize() {
+  resizeMesh();
+  resizeSpectro();
+}
+
+/* ==========================================================================
+   SIMULATION FALLBACK (when WebSocket not connected, generate mock data)
+   ========================================================================== */
+let simInterval = null;
+
+function startSimulation() {
+  if (simInterval) return;
+  const simPeers = ['NODE_2', 'NODE_3', 'NODE_4', 'NODE_5'];
+  let simSeq = 0;
+  let peerIdx = 0;
+
+  simInterval = setInterval(() => {
+    if (state.wsLive) return; // Don't simulate if WS is live
+
+    const seq = simSeq++;
+    const eventType = seq % 5;
+
+    switch (eventType) {
+      case 0: // entropy spike
+        const entropy = 0.55 + Math.random() * 0.5;
+        routeMessage({
+          event: 'entropy_spike',
+          sensor: 'ebpf_entropy',
+          value: entropy,
+          threshold: 0.85,
+          verdict: entropy > 0.85 ? 'ANOMALY' : 'NOMINAL',
+        });
+        break;
+      case 1: // lateral movement
+        routeMessage({
+          event: 'lateral_movement',
+          src_ip: '10.99.99.99',
+          pid: 4200 + Math.floor(Math.random() * 100),
+          comm: 'sshd',
+          verdict: 'THREAT',
+        });
+        break;
+      case 2: // heartbeat with peer data
+        const peer = simPeers[peerIdx % simPeers.length];
+        peerIdx++;
+        routeMessage({
+          event: 'heartbeat',
+          node: peer,
+          cpu: 0.1 + Math.random() * 0.3,
+          mem_mb: 40 + Math.floor(Math.random() * 60),
+          peers: 1 + Math.floor(Math.random() * 4),
+          uptime_s: seq * 2,
+        });
+        break;
+      case 3: // privilege escalation
+        routeMessage({
+          event: 'privilege_escalation',
+          uid: 0,
+          comm: 'bash',
+          parent_comm: 'nginx',
+          verdict: 'CRITICAL',
+        });
+        break;
+      case 4: // PBFT round
+        routeMessage({
+          event: 'pbft_round_complete',
+          target: simPeers[Math.floor(Math.random() * simPeers.length)],
+          quorum: 4,
+          stage: 'EXECUTED',
+        });
+        break;
+    }
+  }, 1500);
+}
+
+/* ==========================================================================
+   INIT
+   ========================================================================== */
+function init() {
+  initMeshCanvas();
+  initSpectroCanvas();
+  buildGauges();
+  pushFeed('HEARTBEAT', 'Sovereign SOC Command Center online', '');
+
+  window.addEventListener('resize', onResize);
+
+  // Start WebSocket connection
+  wsConnect();
+
+  // Start simulation fallback (runs until WS connects)
+  startSimulation();
+
+  // Start render loop
+  animFrame = requestAnimationFrame(renderLoop);
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+
+<!-- SVG glow filter (injected for gauge arcs) -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <filter id="glow-cyan">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-amber">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-red">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+</svg>
+
+</body>
+</html>

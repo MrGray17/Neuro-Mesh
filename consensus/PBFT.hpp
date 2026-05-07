@@ -109,6 +109,33 @@ public:
 
     int peer_count() const { return m_total_nodes; }
 
+    // ---- Dynamic quorum management ----
+    void set_peer_count(int n) {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        m_total_nodes = std::max(1, n);
+    }
+
+    void increment_peers() {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        ++m_total_nodes;
+    }
+
+    void decrement_peers() {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        m_total_nodes = std::max(1, m_total_nodes - 1);
+    }
+
+    void prune_peer(const std::string& node_id) {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        m_peer_public_keys.erase(node_id);
+        for (auto& [evidence, stage_map] : m_vote_registry) {
+            for (auto& [stage, voters] : stage_map) {
+                voters.erase(node_id);
+            }
+        }
+        m_total_nodes = std::max(1, m_total_nodes - 1);
+    }
+
 private:
     int quorum_size() const {
         // PBFT requires 2f+1 where f = floor((n-1)/3)
