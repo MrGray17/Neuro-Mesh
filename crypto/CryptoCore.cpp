@@ -1,7 +1,10 @@
 #include "crypto/CryptoCore.hpp"
 #include <openssl/pem.h>
 #include <openssl/err.h>
+#include <openssl/evp.h>
 #include <vector>
+#include <sstream>
+#include <iomanip>
 #include <stdexcept>
 
 namespace neuro_mesh::crypto {
@@ -88,6 +91,30 @@ UniquePKEY IdentityCore::get_pubkey_from_pem(const std::string& pem) {
     EVP_PKEY* key = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
     BIO_free(bio);
     return UniquePKEY(key);
+}
+
+std::string IdentityCore::sha256_hex(const std::string& data) {
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len = 0;
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return "";
+
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(ctx, data.data(), data.size()) != 1 ||
+        EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return "";
+    }
+
+    EVP_MD_CTX_free(ctx);
+
+    std::ostringstream oss;
+    for (unsigned int i = 0; i < hash_len; ++i) {
+        oss << std::hex << std::setfill('0') << std::setw(2)
+            << static_cast<unsigned>(hash[i]);
+    }
+    return oss.str();
 }
 
 } // namespace neuro_mesh::crypto

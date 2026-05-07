@@ -34,6 +34,11 @@ public:
     // Resolution flow: safe-list check → loopback check → IP resolution → backends in priority order.
     void isolate_target(const std::string& target);
 
+    // Block a raw IP address through the enforcement cascade (no node-ID resolution).
+    // Used by MitigationEngine when evidence_json carries a src_ip field.
+    // Returns true if at least one backend successfully applied the drop rule.
+    bool block_ip_address(const std::string& ip);
+
     void imprison(uint32_t pid);
     void eradicate_threats();
     void release_target(const std::string& target);

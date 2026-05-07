@@ -290,6 +290,49 @@ bool SystemJailer::remove_iptables_drop(const std::string& ip) {
 }
 
 // ---------------------------------------------------------------------------
+// Raw IP blocking (no node-ID resolution) — used by MitigationEngine
+// ---------------------------------------------------------------------------
+
+bool SystemJailer::block_ip_address(const std::string& ip) {
+    if (!is_valid_ip(ip)) {
+        std::cerr << "[ENFORCER] Invalid IP address: " << ip << std::endl;
+        return false;
+    }
+
+    if (is_loopback(ip)) {
+        std::cerr << "[ENFORCER] REFUSED: " << ip
+                  << " is loopback — will not block localhost." << std::endl;
+        return false;
+    }
+
+    std::cout << "[ENFORCER] Applying network block for IP " << ip << "..." << std::endl;
+
+    EnforcementBackend backends = available_backends();
+
+    if ((backends & EnforcementBackend::EBPF) && apply_ebpf_drop(ip)) {
+        std::cout << "[ENFORCER] IP " << ip
+                  << " blocked via eBPF blocklist map." << std::endl;
+        return true;
+    }
+
+    if ((backends & EnforcementBackend::NFTABLES) && apply_nftables_drop(ip)) {
+        std::cout << "[ENFORCER] IP " << ip
+                  << " blocked via nftables drop rule." << std::endl;
+        return true;
+    }
+
+    if ((backends & EnforcementBackend::IPTABLES) && apply_iptables_drop(ip)) {
+        std::cout << "[ENFORCER] IP " << ip
+                  << " blocked via iptables drop rule." << std::endl;
+        return true;
+    }
+
+    std::cerr << "[ENFORCER] CRITICAL: All enforcement backends failed for IP "
+              << ip << ". Traffic NOT blocked." << std::endl;
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // Core isolation pipeline
 // ---------------------------------------------------------------------------
 

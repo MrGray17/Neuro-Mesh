@@ -7,6 +7,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include "jailer/SystemJailer.hpp"
+#include "jailer/MitigationEngine.hpp"
 #include "consensus/MeshNode.hpp"
 #include "telemetry/TelemetryBridge.hpp"
 #include "common/UniqueFD.hpp"
@@ -149,6 +150,7 @@ void ipc_listener_loop(const std::string& node_id, SystemJailer& jailer) {
 // =============================================================================
 
 int main(int argc, char* argv[]) {
+    std::signal(SIGPIPE, SIG_IGN);   // survive broken pipe to dead child
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
@@ -162,6 +164,8 @@ int main(int argc, char* argv[]) {
     // ---- Stage 1: Defense mechanisms ----
     SystemJailer jailer;
     jailer.add_safe_node(node_id);
+
+    MitigationEngine mitigation(&jailer);
 
     // ---- Stage 2: Telemetry bridge (privilege-separated child process) ----
     TelemetryBridge bridge({.websocket_port = 9000});
@@ -185,7 +189,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- Stage 4: Consensus engine (5-node PBFT, tolerates f=1) ----
-    MeshNode mesh(node_id, 5, &jailer);
+    MeshNode mesh(node_id, 5, &jailer, &mitigation);
 
     // ---- Stage 5: P2P listener ----
     mesh.start();

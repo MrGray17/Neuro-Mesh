@@ -1,6 +1,7 @@
 #include "consensus/MeshNode.hpp"
 #include "common/UniqueFD.hpp"
 #include "common/Base64.hpp"
+#include "jailer/MitigationEngine.hpp"
 #include <iostream>
 #include <sstream>
 #include <sys/socket.h>
@@ -11,12 +12,14 @@
 
 namespace neuro_mesh {
 
-MeshNode::MeshNode(const std::string& node_id, int total_mesh_size, SystemJailer* jailer)
+MeshNode::MeshNode(const std::string& node_id, int total_mesh_size,
+                   SystemJailer* jailer, MitigationEngine* mitigation)
     : m_node_id(node_id),
       m_udp_port(9999),
       m_running(false),
       m_pbft(total_mesh_size),
-      m_jailer(jailer)
+      m_jailer(jailer),
+      m_mitigation(mitigation)
 {
     m_private_key = crypto::IdentityCore::generate_ed25519_key();
     m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
@@ -76,8 +79,9 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
             std::cout << "[PBFT] -> Advanced to COMMIT, broadcasting..." << std::endl;
             broadcast_pbft_stage("COMMIT", target_id, evidence_json);
         } else if (next_stage == PBFTStage::EXECUTED) {
-            std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << target_id << " must be isolated." << std::endl;
-            if (m_jailer) m_jailer->isolate_target(target_id);
+            std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << target_id
+                      << " — executing MitigationEngine response." << std::endl;
+            if (m_mitigation) m_mitigation->execute_response(evidence_json, target_id);
         }
     }
 }
@@ -205,8 +209,9 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                 broadcast_pbft_stage("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
             }
             else if (next_stage == PBFTStage::EXECUTED) {
-                std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << incoming_msg.target_id << " must be isolated." << std::endl;
-                if (m_jailer) m_jailer->isolate_target(incoming_msg.target_id);
+                std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << incoming_msg.target_id
+                          << " — executing MitigationEngine response." << std::endl;
+                if (m_mitigation) m_mitigation->execute_response(incoming_msg.evidence_json, incoming_msg.target_id);
             }
         } else {
             std::cerr << "[PBFT] Signature verification FAILED for " << incoming_msg.stage_str

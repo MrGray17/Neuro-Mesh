@@ -30,6 +30,9 @@ public:
     // Network transport helpers (Convert keys to/from strings)
     static std::string get_pem_from_pubkey(EVP_PKEY* key);
     static UniquePKEY get_pubkey_from_pem(const std::string& pem);
+
+    // SHA-256 hex digest — used for enforcement audit hashing
+    static std::string sha256_hex(const std::string& data);
 };
 
 } // namespace neuro_mesh::crypto

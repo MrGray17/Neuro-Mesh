@@ -36,6 +36,7 @@ AGENT_SRCS = main.cpp \
              cell/InferenceEngine.cpp \
              consensus/MeshNode.cpp \
              jailer/SystemJailer.cpp \
+             jailer/MitigationEngine.cpp \
              crypto/CryptoCore.cpp \
              telemetry/AuditLogger.cpp \
              telemetry/TelemetryBridge.cpp
@@ -78,9 +79,9 @@ $(AGENT_TARGET): $(USOCK_OBJS) $(AGENT_OBJS)
 	$(CXX) $(CXXFLAGS) $(USOCK_OBJS) $(AGENT_OBJS) -o $@ $(BPF_LIBS) $(SSL_LIBS) $(SECC_LIBS)
 
 # ---- Tools ----
-$(SIM_TARGET): tools/simulate_threat.cpp $(OBJ_DIR)/consensus/MeshNode.o $(OBJ_DIR)/jailer/SystemJailer.o $(OBJ_DIR)/crypto/CryptoCore.o
+$(SIM_TARGET): tools/simulate_threat.cpp $(OBJ_DIR)/consensus/MeshNode.o $(OBJ_DIR)/jailer/SystemJailer.o $(OBJ_DIR)/jailer/MitigationEngine.o $(OBJ_DIR)/crypto/CryptoCore.o
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/consensus/MeshNode.o $(OBJ_DIR)/jailer/SystemJailer.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(BPF_LIBS) $(SSL_LIBS)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/consensus/MeshNode.o $(OBJ_DIR)/jailer/SystemJailer.o $(OBJ_DIR)/jailer/MitigationEngine.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(BPF_LIBS) $(SSL_LIBS)
 
 $(CRYPTO_TEST_TARGET): tools/test_crypto.cpp $(OBJ_DIR)/crypto/CryptoCore.o
 	@mkdir -p $(BIN_DIR)

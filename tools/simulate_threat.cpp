@@ -17,7 +17,7 @@ int main(int argc, char* argv[]) {
     SystemJailer jailer;
 
     std::string sim_id = "NODE_SIMULATOR";
-    MeshNode node(sim_id, 5, &jailer);
+    MeshNode node(sim_id, 5, &jailer, nullptr);
     node.start();
 
     std::cout << "[TEST] Booting " << sim_id << ". Waiting for mesh discovery (5s)..." << std::endl;

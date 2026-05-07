@@ -12,10 +12,13 @@
 
 namespace neuro_mesh {
 
+class MitigationEngine;
+
 class MeshNode {
 public:
-    // Inject the SystemJailer dependency via the constructor
-    MeshNode(const std::string& node_id, int total_mesh_size, SystemJailer* jailer);
+    // Inject SystemJailer and MitigationEngine dependencies via the constructor
+    MeshNode(const std::string& node_id, int total_mesh_size,
+             SystemJailer* jailer, MitigationEngine* mitigation);
     ~MeshNode();
 
     void start();
@@ -41,7 +44,8 @@ private:
     std::string m_public_key_pem;
     PBFTConsensus m_pbft;
     
-    SystemJailer* m_jailer; // Pointer to the execution module
+    SystemJailer* m_jailer;         // Network isolation execution module
+    MitigationEngine* m_mitigation;  // Verdict consumption + process termination
 
     std::mutex m_peer_mtx;
     std::set<std::string> m_known_peer_ips;

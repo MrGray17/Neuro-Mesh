@@ -295,17 +295,21 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(bind), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(listen), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(accept4), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(shutdown), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(setsockopt), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getsockname), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getpeername), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getsockopt), 0);
 
     // ---- connect — glibc getaddrinfo() probes addresses via connect().
     //      Must be allowed for the resolver to function. The chroot+jail
     //      limits the blast radius — no outbound reachability exists. ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(connect), 0);
 
-    // ---- Socket I/O — uSockets uses sendmsg/recvmsg internally ----
+    // ---- Socket I/O — uSockets uses sendmsg/recvmsg/recvfrom/sendto internally ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendmsg), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvmsg), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(recvfrom), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sendto), 0);
 
     // ---- fcntl — required by uSockets to set O_NONBLOCK on accepted sockets ----
@@ -335,6 +339,10 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigaction), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigprocmask), 0);
 
+    // ---- kill / tgkill — process termination (MitigationEngine enforcement) ----
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(kill), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(tgkill), 0);
+
     // ---- getpid / gettid — identity checks in libraries ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getpid), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(gettid), 0);
@@ -362,11 +370,12 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
 
     std::cerr << "[SECCOMP] Default-kill BPF filter loaded ("
               << "read/write/close/exit_group/brk + "
-              << "epoll + socket/bind/listen/accept4/setsockopt + "
-              << "sendmsg/recvmsg + fcntl + futex + clock_gettime + "
+              << "epoll + socket/bind/listen/accept4/shutdown/setsockopt + "
+              << "sendmsg/recvmsg/recvfrom + fcntl + futex + clock_gettime + "
+              << "getpeername/getsockopt + "
               << "eventfd2 + getrandom + mmap/munmap/mprotect + "
               << "openat/newfstatat/readlink + "
-              << "set_robust_list/rseq/prlimit64)."
+              << "set_robust_list/rseq/prlimit64 + kill/tgkill)."
               << std::endl;
 }
 
@@ -450,9 +459,9 @@ static void pipe_read_callback(struct us_internal_callback_t *cb) {
 
     app.ws<PerSocketData>("/*", std::move(ws_behaviour));
 
-    // ---- Listen on the configured port ----
+    // ---- Listen on the configured port (explicit IPv4 all-interfaces) ----
     bool listening = false;
-    app.listen(static_cast<int>(port), [&](auto *listen_socket) {
+    app.listen("0.0.0.0", static_cast<int>(port), [&](auto *listen_socket) {
         if (listen_socket) {
             listening = true;
             std::cerr << "[TELEMETRY_BRIDGE] WebSocket server listening on port "
