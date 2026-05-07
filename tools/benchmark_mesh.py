@@ -16,6 +16,8 @@ CONTAINERS = {
     "CHARLIE": "neuro_charlie",
 }
 
+INJECTOR_NODE = "CHARLIE"  # daemon that receives IPC injection command
+
 JOURNAL_PATHS = {
     "ALPHA":   "./journal_ALPHA.log",
     "BRAVO":   "./journal_BRAVO.log",
@@ -75,11 +77,12 @@ def snapshot_all_stats():
     return stats
 
 
-def run_simulate_threat(target: str, event: str, verdict: str, tag: str = ""):
-    """Inject a threat via a fresh container with host networking."""
-    cmd = ["docker", "run", "--rm", "--network=host",
-           "--entrypoint", "/app/simulate_threat", "neuro_mesh:titan",
-           "--target", target, "--event", event, "--verdict", verdict]
+def run_simulate_threat(node: str, target: str, event: str, verdict: str, tag: str = ""):
+    """Inject a threat via IPC to a local daemon inside a running container."""
+    cmd = ["docker", "exec", CONTAINERS[node],
+           "/app/simulate_threat",
+           "--node", node, "--target", target,
+           "--event", event, "--verdict", verdict]
     if tag:
         cmd.extend(["--tag", tag])
     try:
@@ -115,7 +118,7 @@ def run_single_benchmark(run_id: int, target: str, event: str, verdict: str) -> 
     t_inject = time.time()
 
     # Run simulate_threat in a fresh container with host networking
-    ok = run_simulate_threat(target, event, verdict, tag=f"run{run_id}")
+    ok = run_simulate_threat(INJECTOR_NODE, target, event, verdict, tag=f"run{run_id}")
     if not ok:
         result["delta_ms"] = "SIM_FAILED"
         return result

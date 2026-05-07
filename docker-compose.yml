@@ -1,6 +1,19 @@
 version: "3.8"
 
 services:
+  # WebSocket bridge — exposes TelemetryBridge port 9000 to host.
+  # Host-networked containers bind inside the Docker VM; this proxy
+  # forwards from the Docker bridge so the port is visible to WSL2/Windows.
+  wsbridge:
+    image: alpine/socat:latest
+    container_name: neuro_wsbridge
+    ports:
+      - "9001:9001"
+    command: ["TCP-LISTEN:9001,fork,reuseaddr", "TCP:172.17.0.1:9000"]
+    restart: unless-stopped
+    depends_on:
+      - alpha
+
   alpha:
     build:
       context: .

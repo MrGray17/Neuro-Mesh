@@ -58,7 +58,7 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh, const std::string& 
 // IPC listener — accepts commands from Python C2 server over Unix domain socket
 // =============================================================================
 
-void ipc_listener_loop(const std::string& node_id, SystemJailer& jailer) {
+void ipc_listener_loop(const std::string& node_id, SystemJailer& jailer, MeshNode& mesh) {
     std::string socket_path = "/tmp/neuro_mesh_" + node_id.substr(node_id.find('_') + 1) + ".sock";
     unlink(socket_path.c_str());
 
@@ -108,7 +108,20 @@ void ipc_listener_loop(const std::string& node_id, SystemJailer& jailer) {
             std::string cmd(buf);
             std::cout << "[IPC] Received command: " << cmd << std::endl;
 
-            if (cmd == "CMD:ISOLATE") {
+            if (cmd.rfind("CMD:INJECT ", 0) == 0) {
+                // Format: CMD:INJECT <target> <evidence_json>
+                std::string payload = cmd.substr(strlen("CMD:INJECT "));
+                size_t space = payload.find(' ');
+                if (space != std::string::npos) {
+                    std::string inject_target = payload.substr(0, space);
+                    std::string evidence = payload.substr(space + 1);
+                    std::cout << "[IPC] INJECT: initiating threat consensus against "
+                              << inject_target << std::endl;
+                    mesh.initiate_threat_consensus(inject_target, evidence);
+                    const char* ack = "ACK:INJECT\n";
+                    write(client_fd, ack, strlen(ack));
+                }
+            } else if (cmd == "CMD:ISOLATE") {
                 std::cout << "[IPC] ISOLATE command acknowledged (requires consensus)." << std::endl;
             } else if (cmd == "CMD:VACCINATE") {
                 jailer.eradicate_threats();
@@ -173,7 +186,7 @@ int main(int argc, char* argv[]) {
     mesh.start();
 
     // ---- Stage 6: IPC listener for C2 commands ----
-    std::thread ipc_thread(ipc_listener_loop, node_id, std::ref(jailer));
+    std::thread ipc_thread(ipc_listener_loop, node_id, std::ref(jailer), std::ref(mesh));
 
     std::cout << "[BOOT] System fully operational. Awaiting P2P telemetry..." << std::endl;
 

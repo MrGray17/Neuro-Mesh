@@ -1,32 +1,37 @@
-#include "consensus/MeshNode.hpp"
-#include "jailer/SystemJailer.hpp"
 #include <iostream>
-#include <thread>
-#include <chrono>
+#include <string>
 #include <cstring>
-
-using namespace neuro_mesh;
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 static void print_usage(const char* prog) {
-    std::cerr << "Usage: " << prog << " --target <node_id> [--event <type>] [--verdict <severity>] [--tag <str>]\n"
-              << "  --target   Target node ID (required, e.g. ALPHA, 10.99.99.99)\n"
-              << "  --event    Event type: lateral_movement | privilege_escalation | entropy_spike (default: lateral_movement)\n"
-              << "  --verdict  Severity: THREAT | CRITICAL | ANOMALY (default: THREAT)\n"
-              << "  --tag      Unique tag for evidence (default: none) — ensures unique PBFT rounds per run\n"
+    std::cerr << "Usage: " << prog
+              << " --node <daemon_id> --target <target_id>"
+              << " [--event <type>] [--verdict <severity>] [--tag <str>]\n"
+              << "  --node     Local daemon to command via IPC (e.g., CHARLIE)\n"
+              << "  --target   Target node ID for threat consensus (e.g., ALPHA)\n"
+              << "  --event    lateral_movement | privilege_escalation | entropy_spike"
+              << " (default: lateral_movement)\n"
+              << "  --verdict  THREAT | CRITICAL | ANOMALY (default: THREAT)\n"
+              << "  --tag      Unique tag for evidence (default: none)\n"
               << "\nExample:\n"
-              << "  " << prog << " --target ALPHA --event lateral_movement --verdict CRITICAL --tag run1\n";
+              << "  " << prog << " --node CHARLIE --target ALPHA"
+              << " --event lateral_movement --verdict THREAT --tag run1\n";
 }
 
 int main(int argc, char* argv[]) {
+    std::string node;
     std::string target;
     std::string event_type = "lateral_movement";
     std::string verdict = "THREAT";
     std::string tag;
 
-    // Parse --key value pairs
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--target" && i + 1 < argc) {
+        if (arg == "--node" && i + 1 < argc) {
+            node = argv[++i];
+        } else if (arg == "--target" && i + 1 < argc) {
             target = argv[++i];
         } else if (arg == "--event" && i + 1 < argc) {
             event_type = argv[++i];
@@ -44,13 +49,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (target.empty()) {
-        std::cerr << "Error: --target is required.\n";
+    if (node.empty() || target.empty()) {
+        std::cerr << "Error: --node and --target are required.\n";
         print_usage(argv[0]);
         return 1;
     }
 
-    // Build the evidence JSON from parsed flags
+    // Build evidence JSON
     std::string evidence;
     std::string tag_field = tag.empty() ? "" : R"(,"tag":")" + tag + R"(")";
     if (event_type == "lateral_movement") {
@@ -64,27 +69,44 @@ int main(int argc, char* argv[]) {
                  + verdict + R"(")" + tag_field + "}";
     }
 
-    SystemJailer jailer;
+    // Connect to local daemon via Unix domain socket
+    std::string socket_path = "/tmp/neuro_mesh_" + node + ".sock";
 
-    std::string sim_id = "NODE_SIMULATOR";
-    MeshNode node(sim_id, &jailer, nullptr);
-    node.start();
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "[SIM] Failed to create socket." << std::endl;
+        return 1;
+    }
 
-    std::cout << "[SIMULATOR] Booting " << sim_id << ". Waiting for mesh discovery (5s)..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
-    std::cout << "[SIMULATOR] Injecting threat consensus:" << std::endl;
-    std::cout << "  Target  : " << target << std::endl;
-    std::cout << "  Event   : " << event_type << std::endl;
-    std::cout << "  Verdict : " << verdict << std::endl;
-    std::cout << "  Evidence: " << evidence << std::endl;
+    if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        std::cerr << "[SIM] Failed to connect to " << socket_path << std::endl;
+        close(fd);
+        return 1;
+    }
 
-    node.initiate_threat_consensus(target, evidence);
+    // Send injection command
+    std::string cmd = "CMD:INJECT " + target + " " + evidence;
+    if (write(fd, cmd.c_str(), cmd.size()) < 0) {
+        std::cerr << "[SIM] Failed to send command." << std::endl;
+        close(fd);
+        return 1;
+    }
 
-    // Wait for consensus propagation and enforcement
-    std::this_thread::sleep_for(std::chrono::seconds(10));
+    std::cout << "[SIM] Sent: " << cmd << std::endl;
 
-    node.stop();
-    std::cout << "[SIMULATOR] Done." << std::endl;
+    // Read acknowledgment
+    char buf[256];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        std::cout << "[SIM] Response: " << buf;
+    }
+
+    close(fd);
+    std::cout << "[SIM] Done." << std::endl;
     return 0;
 }
