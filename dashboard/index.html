@@ -742,13 +742,10 @@ function switchNodeContext(nodeId) {
 }
 
 function matchesSelectedNode(data) {
-  // No filter active — accept all telemetry
   if (!state.selectedNode) return true;
-  // Match against all known node-ID fields
-  if (data.node === state.selectedNode) return true;
-  if (data.ID === state.selectedNode) return true;
-  if (data.node_id === state.selectedNode) return true;
-  return false;
+  const selected = state.selectedNode.toUpperCase();
+  const incoming = (data.node || data.ID || data.node_id || '').toUpperCase();
+  return incoming.includes(selected);
 }
 
 function stepMeshForces() {

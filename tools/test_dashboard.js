@@ -90,13 +90,10 @@ function switchNodeContext(nodeId) {
 
 // ---- matchesSelectedNode (EXACT copy from dashboard/index.html) ----
 function matchesSelectedNode(data) {
-  // No filter active — accept all telemetry
   if (!state.selectedNode) return true;
-  // Match against all known node-ID fields
-  if (data.node === state.selectedNode) return true;
-  if (data.ID === state.selectedNode) return true;
-  if (data.node_id === state.selectedNode) return true;
-  return false;
+  const selected = state.selectedNode.toUpperCase();
+  const incoming = (data.node || data.ID || data.node_id || '').toUpperCase();
+  return incoming.includes(selected);
 }
 
 // ---- Route message helper (simplified for testing vitals filtering) ----
@@ -184,13 +181,16 @@ assert(state.ramMb === 0, 'Select: ramMb reset');
 assert(state.entropy === 0, 'Select: entropy reset');
 assert(state.alertFlag === false, 'Select: alertFlag cleared');
 
-// TEST 3: matchesSelectedNode filtering
-assert(matchesSelectedNode({ node: 'ALPHA', cpu: 0.9 }) === true, 'Filter: ALPHA node field accepted');
-assert(matchesSelectedNode({ ID: 'ALPHA', RAM_MB: 4096 }) === true, 'Filter: ALPHA ID field accepted');
-assert(matchesSelectedNode({ node_id: 'ALPHA' }) === true, 'Filter: ALPHA node_id field accepted');
-assert(matchesSelectedNode({ node: 'BRAVO', cpu: 0.9 }) === false, 'Filter: BRAVO rejected');
-assert(matchesSelectedNode({ ID: 'CHARLIE' }) === false, 'Filter: CHARLIE rejected');
-assert(matchesSelectedNode({}) === false, 'Filter: empty data rejected when filtered');
+// TEST 3: matchesSelectedNode filtering (fuzzy)
+assert(matchesSelectedNode({ node: 'ALPHA', cpu: 0.9 }) === true, 'Fuzzy: exact ALPHA accepted');
+assert(matchesSelectedNode({ ID: 'ALPHA', RAM_MB: 4096 }) === true, 'Fuzzy: ID ALPHA accepted');
+assert(matchesSelectedNode({ node_id: 'ALPHA' }) === true, 'Fuzzy: node_id ALPHA accepted');
+assert(matchesSelectedNode({ node: 'neuro_alpha', cpu: 0.9 }) === true, 'Fuzzy: neuro_alpha matches ALPHA');
+assert(matchesSelectedNode({ ID: 'NEURO_ALPHA', RAM_MB: 4096 }) === true, 'Fuzzy: NEURO_ALPHA matches ALPHA (case)');
+assert(matchesSelectedNode({ node_id: 'docker-neuro_alpha-1' }) === true, 'Fuzzy: docker prefix matches ALPHA');
+assert(matchesSelectedNode({ node: 'neuro_bravo', cpu: 0.9 }) === false, 'Fuzzy: neuro_bravo rejected (no ALPHA)');
+assert(matchesSelectedNode({ ID: 'CHARLIE' }) === false, 'Fuzzy: CHARLIE rejected (no ALPHA)');
+assert(matchesSelectedNode({}) === false, 'Fuzzy: empty data rejected when filtered');
 
 // TEST 4: Deselect (click same node)
 state.specHistory = [{}, {}];
@@ -199,12 +199,13 @@ assert(state.selectedNode === null, 'Deselect: selectedNode back to null');
 assert(matchesSelectedNode({ node: 'BRAVO' }) === true, 'Deselect: any node accepted again');
 assert(matchesSelectedNode({}) === true, 'Deselect: empty data accepted again');
 
-// TEST 5: Select self node
+// TEST 5: Select self node (with fuzzy matching)
 state.specHistory = [{}, {}, {}, {}];
 switchNodeContext('NODE_1');
 assert(state.selectedNode === 'NODE_1', 'Select self: selectedNode = NODE_1');
-assert(matchesSelectedNode({ node: 'NODE_1' }) === true, 'Select self: own data accepted');
-assert(matchesSelectedNode({ node: 'ALPHA' }) === false, 'Select self: peer data rejected');
+assert(matchesSelectedNode({ node: 'NODE_1' }) === true, 'Select self: exact own data accepted');
+assert(matchesSelectedNode({ ID: 'neuro_node_1' }) === true, 'Select self: fuzzy neuro_node_1 accepted');
+assert(matchesSelectedNode({ node: 'neuro_alpha' }) === false, 'Select self: peer data rejected');
 
 // Deselect self
 switchNodeContext('NODE_1');
@@ -239,6 +240,25 @@ assert(state.cpuLoad === 0.42, 'Matching: cpuLoad updated from ALPHA');
 assert(state.ramMb === 2048, 'Matching: ramMb updated from ALPHA');
 assert(state.entropy === 0.33, 'Matching: entropy updated from ALPHA');
 assert(state.specHistory.length > specLenBefore, 'Matching: spectrogram pushed');
+
+// Fuzzy heartbeat from neuro_alpha — SHOULD match ALPHA
+state.cpuLoad = 0; state.ramMb = 0; state.entropy = 0; state.specHistory = [];
+routeVitals({
+  event: 'heartbeat', node: 'neuro_alpha', cpu: 0.77, mem_mb: 3072,
+  entropy: 0.55, threat: 'NOMINAL', peers: 4,
+});
+assert(state.cpuLoad === 0.77, 'Fuzzy: neuro_alpha updates cpuLoad when viewing ALPHA');
+assert(state.ramMb === 3072, 'Fuzzy: neuro_alpha updates ramMb when viewing ALPHA');
+assert(state.entropy === 0.55, 'Fuzzy: neuro_alpha updates entropy when viewing ALPHA');
+
+// Fuzzy heartbeat from neuro_bravo — should NOT match ALPHA
+state.cpuLoad = 0; state.ramMb = 0; state.entropy = 0;
+routeVitals({
+  event: 'heartbeat', node: 'neuro_bravo', cpu: 0.99, mem_mb: 8192,
+  entropy: 0.92, threat: 'CRITICAL', peers: 2,
+});
+assert(state.cpuLoad === 0, 'Fuzzy: neuro_bravo rejected when viewing ALPHA');
+assert(state.entropy === 0, 'Fuzzy: neuro_bravo entropy rejected when viewing ALPHA');
 
 // TEST 7: entropy_spike filtering
 state.entropy = 0.3;
