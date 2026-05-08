@@ -1038,6 +1038,15 @@ function routeMessage(data) {
     case 'telemetry':
       state.cpuLoad = parseFloat(data.cpu) || state.cpuLoad;
       state.ramMb = parseInt(data.mem_mb) || parseInt(data.RAM_MB) || state.ramMb;
+
+      if (data.entropy !== undefined) {
+        state.entropy = parseFloat(data.entropy) || 0;
+        pushSpectrogram(state.entropy);
+      }
+      if (data.threat === 'CRITICAL') {
+        state.threatFlag = true;
+        dom.meshDot.classList.add('danger');
+      }
       if (data.peers !== undefined) {
         state.peers = parseInt(data.peers);
         dom.peerCount.textContent = state.peers;

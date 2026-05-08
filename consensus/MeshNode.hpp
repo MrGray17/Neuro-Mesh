@@ -16,6 +16,7 @@
 namespace neuro_mesh {
 
 class MitigationEngine;
+class TelemetryBridge;
 
 struct PeerInfo {
     std::string node_id;
@@ -35,7 +36,8 @@ public:
 
     // Constructor: starts with n=1 (self), scales up as peers are discovered.
     MeshNode(const std::string& node_id,
-             SystemJailer* jailer, MitigationEngine* mitigation);
+             SystemJailer* jailer, MitigationEngine* mitigation,
+             TelemetryBridge* bridge = nullptr);
     ~MeshNode();
 
     void start();
@@ -94,6 +96,7 @@ private:
     // === Dependencies ===
     SystemJailer* m_jailer;
     MitigationEngine* m_mitigation;
+    TelemetryBridge* m_bridge;
     StateJournal m_journal;
 
     // === Legacy peer tracking (for ANNOUNCE protocol compatibility) ===

@@ -108,6 +108,7 @@ public:
     }
 
     int peer_count() const { return m_total_nodes; }
+    int quorum_size() const { return (2 * m_total_nodes + 2) / 3; }  // PBFT: 2f+1 = ceil(2n/3)
 
     // ---- Dynamic quorum management ----
     void set_peer_count(int n) {
@@ -137,12 +138,6 @@ public:
     }
 
 private:
-    int quorum_size() const {
-        // PBFT requires 2f+1 where f = floor((n-1)/3)
-        // Equivalent to ceiling(2n/3) = (2*n + 2) / 3
-        return (2 * m_total_nodes + 2) / 3;
-    }
-
     void cleanup_stale_rounds() {
         auto now = std::chrono::steady_clock::now();
         for (auto it = m_rounds.begin(); it != m_rounds.end(); ) {

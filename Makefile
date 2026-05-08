@@ -6,7 +6,8 @@ CC  = clang
 
 CXXFLAGS = -std=c++20 -Wall -Wextra -O3 -I. \
            -Ithird_party/uWebSockets/src \
-           -Ithird_party/uWebSockets/uSockets/src
+           -Ithird_party/uWebSockets/uSockets/src \
+           -I/usr/local/include/onnxruntime
 
 BPF_CC = clang
 BPF_CFLAGS = -g -O2 -target bpf -D__TARGET_ARCH_x86 -I/usr/include/$(shell uname -m)-linux-gnu
@@ -17,6 +18,7 @@ USOCK_CFLAGS = -std=c11 -O3 -DLIBUS_NO_SSL -I$(USOCK_DIR)
 SSL_LIBS  = -lssl -lcrypto -lpthread
 BPF_LIBS  = -lbpf -lelf -lz -lpthread
 SECC_LIBS = -lseccomp
+ONNX_LIBS = -L/usr/local/lib -lonnxruntime
 
 OBJ_DIR = obj
 BIN_DIR = bin
@@ -76,7 +78,7 @@ $(OBJ_DIR)/cell/SovereignCell.o: kernel/sensor.skel.h
 
 # ---- Link neuro_agent ----
 $(AGENT_TARGET): $(USOCK_OBJS) $(AGENT_OBJS)
-	$(CXX) $(CXXFLAGS) $(USOCK_OBJS) $(AGENT_OBJS) -o $@ $(BPF_LIBS) $(SSL_LIBS) $(SECC_LIBS)
+	$(CXX) $(CXXFLAGS) $(USOCK_OBJS) $(AGENT_OBJS) -o $@ $(BPF_LIBS) $(SSL_LIBS) $(SECC_LIBS) $(ONNX_LIBS)
 
 # ---- Tools ----
 $(SIM_TARGET): tools/simulate_threat.cpp

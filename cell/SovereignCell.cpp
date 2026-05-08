@@ -15,7 +15,10 @@ static_assert(sizeof(neuro_mesh::core::KernelEventData) == 280,
 namespace neuro_mesh::core {
 
 SovereignCell::SovereignCell(std::string id)
-    : m_node_id(std::move(id)), m_brain(100), m_jailer(), m_mesh_node(m_node_id, &m_jailer, nullptr)
+    : m_node_id(std::move(id)),
+      m_brain("/app/isolation_forest.onnx", -0.05f),
+      m_jailer(),
+      m_mesh_node(m_node_id, &m_jailer, nullptr)
 {
     m_jailer.add_safe_node(m_node_id); // Never isolate ourselves
 }

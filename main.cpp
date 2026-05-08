@@ -3,13 +3,16 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <memory>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/sysinfo.h>
 #include <unistd.h>
 #include "jailer/SystemJailer.hpp"
 #include "jailer/MitigationEngine.hpp"
 #include "consensus/MeshNode.hpp"
 #include "telemetry/TelemetryBridge.hpp"
+#include "cell/InferenceEngine.hpp"
 #include "common/UniqueFD.hpp"
 
 using namespace neuro_mesh;
@@ -25,7 +28,8 @@ void signal_handler(int signum) {
 // Heartbeat loop — pushes node vitals to the TelemetryBridge every 2s
 // =============================================================================
 
-void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh, const std::string& node_id) {
+void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
+                    ai::InferenceEngine& inference, const std::string& node_id) {
     int seq = 0;
     while (global_running) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -39,12 +43,29 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh, const std::string& 
         }
         peer_list_json += "]";
 
+        // Real CPU load (1-min average)
+        double loads[1] = {0.0};
+        double cpu = (getloadavg(loads, 1) != -1) ? loads[0] : 0.0;
+
+        // Real RAM usage in MB
+        struct sysinfo mem_info;
+        long mem_mb = 0;
+        if (sysinfo(&mem_info) == 0) {
+            mem_mb = (mem_info.totalram - mem_info.freeram) / (1024 * 1024);
+        }
+
+        float entropy = inference.last_score();
+        const char* threat = inference.last_threat();
+
         std::string json = "{\"seq\":" + std::to_string(seq)
                          + ",\"node\":\"" + node_id + "\""
                          + ",\"event\":\"heartbeat\""
                          + ",\"peers\":" + std::to_string(mesh.peer_count())
                          + ",\"peer_list\":" + peer_list_json
-                         + ",\"cpu\":0.0,\"mem_mb\":0}";
+                         + ",\"cpu\":" + std::to_string(cpu)
+                         + ",\"mem_mb\":" + std::to_string(mem_mb)
+                         + ",\"entropy\":" + std::to_string(entropy)
+                         + ",\"threat\":\"" + threat + "\"}";
 
         auto result = bridge.push_telemetry(json);
         if (result.is_err()) {
@@ -173,19 +194,32 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- Stage 3: Consensus engine (dynamic scaling, starts with n=1) ----
-    MeshNode mesh(node_id, &jailer, &mitigation);
+    MeshNode mesh(node_id, &jailer, &mitigation, &bridge);
 
-    // ---- Stage 4: Heartbeat (node vitals broadcast every 2s) ----
+    // ---- Stage 4: ML inference engine (ONNX Isolation Forest) ----
+    std::unique_ptr<ai::InferenceEngine> inference;
+    try {
+        inference = std::make_unique<ai::InferenceEngine>("/app/isolation_forest.onnx", -0.05f);
+        std::cout << "[BOOT] ONNX InferenceEngine: "
+                  << (inference->is_operational() ? "OPERATIONAL" : "DEGRADED")
+                  << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[BOOT] InferenceEngine failed to load: " << e.what() << std::endl;
+        std::cerr << "[BOOT] Continuing without ML inference — using fallback." << std::endl;
+    }
+
+    // ---- Stage 5: Heartbeat (node vitals broadcast every 2s) ----
     std::thread heartbeat_thread;
-    if (bridge.alive()) {
-        heartbeat_thread = std::thread(heartbeat_loop, std::ref(bridge), std::ref(mesh), node_id);
+    if (bridge.alive() && inference) {
+        heartbeat_thread = std::thread(heartbeat_loop, std::ref(bridge), std::ref(mesh),
+                                       std::ref(*inference), node_id);
         std::cout << "[BOOT] Heartbeat pulse started (2s interval)." << std::endl;
     }
 
-    // ---- Stage 5: P2P listener ----
+    // ---- Stage 6: P2P listener ----
     mesh.start();
 
-    // ---- Stage 6: IPC listener for C2 commands ----
+    // ---- Stage 7: IPC listener for C2 commands ----
     std::thread ipc_thread(ipc_listener_loop, node_id, std::ref(jailer), std::ref(mesh));
 
     std::cout << "[BOOT] System fully operational. Awaiting P2P telemetry..." << std::endl;

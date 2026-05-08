@@ -1,6 +1,16 @@
 version: "3.8"
 
 services:
+  # Static dashboard served via nginx
+  dashboard:
+    image: nginx:alpine
+    container_name: neuro_dashboard
+    ports:
+      - "8080:80"
+    volumes:
+      - ./dashboard-fui:/usr/share/nginx/html:ro
+    restart: unless-stopped
+
   # WebSocket bridge — exposes TelemetryBridge port 9000 to host.
   # Host-networked containers bind inside the Docker VM; this proxy
   # forwards from the Docker bridge so the port is visible to WSL2/Windows.

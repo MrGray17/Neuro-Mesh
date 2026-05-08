@@ -2,6 +2,7 @@
 #include "common/UniqueFD.hpp"
 #include "common/Base64.hpp"
 #include "jailer/MitigationEngine.hpp"
+#include "telemetry/TelemetryBridge.hpp"
 #include <iostream>
 #include <sstream>
 #include <sys/socket.h>
@@ -17,7 +18,8 @@ namespace neuro_mesh {
 // =============================================================================
 
 MeshNode::MeshNode(const std::string& node_id,
-                   SystemJailer* jailer, MitigationEngine* mitigation)
+                   SystemJailer* jailer, MitigationEngine* mitigation,
+                   TelemetryBridge* bridge)
     : m_node_id(node_id),
       m_udp_port(9999),
       m_tcp_port(0),
@@ -25,6 +27,7 @@ MeshNode::MeshNode(const std::string& node_id,
       m_pbft(1),   // start with n=1 (self), scale up via discovery
       m_jailer(jailer),
       m_mitigation(mitigation),
+      m_bridge(bridge),
       m_journal("./journal_" + node_id + ".log")
 {
     m_private_key = crypto::IdentityCore::generate_ed25519_key();
@@ -617,12 +620,24 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
             else if (next_stage == PBFTStage::COMMIT) {
                 std::cout << "[PBFT] -> Advanced to COMMIT, broadcasting..." << std::endl;
                 m_journal.append("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
+                if (m_bridge) {
+                    std::ignore = m_bridge->push_telemetry(
+                        "{\"event\":\"pbft_round_complete\",\"stage\":\"COMMIT\","
+                        "\"target\":\"" + incoming_msg.target_id + "\","
+                        "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + "}");
+                }
                 broadcast_pbft_stage("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
             }
             else if (next_stage == PBFTStage::EXECUTED) {
                 std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << incoming_msg.target_id
                           << " — executing MitigationEngine response." << std::endl;
                 m_journal.append("EXECUTED", incoming_msg.target_id, incoming_msg.evidence_json);
+                if (m_bridge) {
+                    std::ignore = m_bridge->push_telemetry(
+                        "{\"event\":\"pbft_round_complete\",\"stage\":\"EXECUTED\","
+                        "\"target\":\"" + incoming_msg.target_id + "\","
+                        "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + "}");
+                }
                 std::string ev = incoming_msg.evidence_json;
                 std::string tgt = incoming_msg.target_id;
                 std::thread([this, ev, tgt]() {
@@ -666,11 +681,23 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
         } else if (next_stage == PBFTStage::COMMIT) {
             std::cout << "[PBFT] -> Advanced to COMMIT, broadcasting..." << std::endl;
             m_journal.append("COMMIT", target_id, evidence_json);
+            if (m_bridge) {
+                std::ignore = m_bridge->push_telemetry(
+                    "{\"event\":\"pbft_round_complete\",\"stage\":\"COMMIT\","
+                    "\"target\":\"" + target_id + "\","
+                    "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + "}");
+            }
             broadcast_pbft_stage("COMMIT", target_id, evidence_json);
         } else if (next_stage == PBFTStage::EXECUTED) {
             std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << target_id
                       << " — executing MitigationEngine response." << std::endl;
             m_journal.append("EXECUTED", target_id, evidence_json);
+            if (m_bridge) {
+                std::ignore = m_bridge->push_telemetry(
+                    "{\"event\":\"pbft_round_complete\",\"stage\":\"EXECUTED\","
+                    "\"target\":\"" + target_id + "\","
+                    "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + "}");
+            }
             std::string ev = evidence_json;
             std::string tgt = target_id;
             std::thread([this, ev, tgt]() {
