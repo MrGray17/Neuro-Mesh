@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ============================================================
-# NEURO-MESH CORTEX IA : STAFF DETERMINISTIC OVERRIDE (V5.0)
+# Neuro-Mesh Anomaly Classifier (V5.0)
 # ============================================================
 import json
 import time
@@ -9,12 +9,11 @@ import os
 import socket
 import threading
 
-# 🔥 ML REMOVED: Unsupervised ML causes hallucinated false-positives on localhost loopbacks.
-# We are enforcing strict, deterministic SOC limits.
+# Rule-based classifier — deterministic thresholds avoid ML false positives on loopback.
 
-DATA_FILE = "c2_central_data.json"
+DATA_FILE = "control_plane_data.json"
 REACT_FILE = "api.json"
-CMD_FILE = "ia_commands.txt"
+CMD_FILE = "classifier_commands.txt"
 SLEEP_INTERVAL = 1.0
 
 live_p2p_nodes = {}
@@ -45,7 +44,7 @@ def listen_p2p_telemetry():
                             "cpu_load": node_data.get("CPU_LOAD", 0.0),
                             "procs": node_data.get("PROCS", 1),
                             "net_out_bytes_s": node_data.get("NET_OUT", 0),
-                            "status": "COMPROMIS" if "SELF_ISOLATED" in str(node_data.get("STATUS", "")) else "STABLE",
+                            "status": "FLAGGED" if "SELF_ISOLATED" in str(node_data.get("STATUS", "")) else "STABLE",
                             "_last_seen": time.time()
                         }
         except Exception: pass
@@ -59,18 +58,18 @@ def write_command_safe(cmd):
 def analyze_anomalies():
     current_time = time.time()
     nodes = []
-    c2_is_alive = False
+    control_is_alive = False
 
     if os.path.exists(DATA_FILE):
         try:
             if current_time - os.path.getmtime(DATA_FILE) < 3.0:
                 with open(DATA_FILE, 'r') as f: data = json.load(f)
                 nodes = data.get('active_nodes', [])
-                c2_is_alive = True
+                control_is_alive = True
         except: pass
 
     with p2p_lock:
-        if not c2_is_alive:
+        if not control_is_alive:
             dead_keys = [k for k, v in live_p2p_nodes.items() if current_time - v.get('_last_seen', current_time) > 10.0]
             for k in dead_keys: del live_p2p_nodes[k]
             nodes = list(live_p2p_nodes.values())
@@ -80,23 +79,22 @@ def analyze_anomalies():
 
     for node in nodes:
         nid = node.get('id', 'UNKNOWN')
-        if nid == 'UNKNOWN' or node.get('status') == "COMPROMIS": continue
+        if nid == 'UNKNOWN' or node.get('status') == "FLAGGED": continue
 
         ram = node.get('ram_mb', 0)
         cpu = node.get('cpu_load', 0.0)
 
-        # 🔥 THE FIX: DETERMINISTIC OVERRIDE
-        # The node will ONLY turn red if CPU hits 85% or RAM hits 7.5GB.
+        # Rule-based Override — node flags only if CPU > 85% or RAM > 14 GB.
         is_anomaly = False
-        if cpu > 85.0 or ram > 7500:
+        if cpu > 85.0 or ram > 14000:
             is_anomaly = True
 
         if is_anomaly:
-            print(f"\033[1;41;37m[ALERTE]\033[0m ANOMALY DETECTED on {nid}")
-            write_command_safe(f"CMD_IA:ISOLATE|{nid}")
+            print(f"\033[1;41;37m[ALERT]\033[0m Anomaly detected on {nid}")
+            write_command_safe(f"CMD:ISOLATE|{nid}")
 
 def main():
-    print("\033[1;36m[INFO]\033[0m Initializing AI Cortex (Deterministic Override Edition) - V5.0")
+    print("\033[1;36m[INFO]\033[0m Initializing Anomaly Classifier - V5.0")
     while True:
         analyze_anomalies()
         time.sleep(SLEEP_INTERVAL)

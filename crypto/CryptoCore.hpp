@@ -12,8 +12,10 @@ struct EVPKeyDeleter {
 };
 using UniquePKEY = std::unique_ptr<EVP_PKEY, EVPKeyDeleter>;
 
+// D3FEND: D3-IPI (Identity Protection & Integrity) — Ed25519 signatures bind every
+// PBFT vote to (stage + target + evidence), preventing cross-stage replay and spoofing.
 /**
- * @brief Zero-Trust Identity Core for V8.0 P2P Mesh
+ * @brief Zero-Trust Identity Core for P2P Mesh
  * Uses Ed25519 for high-speed, non-malleable cryptographic signatures.
  */
 class IdentityCore {
@@ -21,7 +23,7 @@ public:
     // Generate a fresh Ed25519 Private/Public keypair
     static UniquePKEY generate_ed25519_key();
 
-    // Sign threat evidence using the node's private key
+    // Sign consensus evidence using the node's private key
     static std::string sign_payload(EVP_PKEY* priv_key, const std::string& data);
 
     // Verify a peer's vote using their public key

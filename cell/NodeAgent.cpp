@@ -1,4 +1,4 @@
-#include "cell/SovereignCell.hpp"
+#include "cell/NodeAgent.hpp"
 #include "kernel/sensor.skel.h"
 #include <iostream>
 #include <sys/socket.h>
@@ -14,25 +14,25 @@ static_assert(sizeof(neuro_mesh::core::KernelEventData) == 280,
 
 namespace neuro_mesh::core {
 
-SovereignCell::SovereignCell(std::string id)
+NodeAgent::NodeAgent(std::string id)
     : m_node_id(std::move(id)),
-      m_brain("/app/isolation_forest.onnx", -0.05f),
-      m_jailer(),
-      m_mesh_node(m_node_id, &m_jailer, nullptr)
+      m_inference("/app/isolation_forest.onnx", -0.05f),
+      m_enforcer(),
+      m_mesh_node(m_node_id, &m_enforcer, nullptr)
 {
-    m_jailer.add_safe_node(m_node_id); // Never isolate ourselves
+    m_enforcer.add_safe_node(m_node_id); // Never isolate ourselves
 }
 
-SovereignCell::~SovereignCell() { trigger_shutdown(); }
+NodeAgent::~NodeAgent() { trigger_shutdown(); }
 
-SovereignCell::Result SovereignCell::create(const std::string& node_id) {
-    auto cell = std::unique_ptr<SovereignCell>(new SovereignCell(node_id));
+NodeAgent::Result NodeAgent::create(const std::string& node_id) {
+    auto cell = std::unique_ptr<NodeAgent>(new NodeAgent(node_id));
     if (!cell->load_and_attach_ebpf().empty()) return {nullptr, "eBPF Error"};
-    cell->m_telemetry_thread = std::thread(&SovereignCell::telemetry_loop, cell.get());
+    cell->m_telemetry_thread = std::thread(&NodeAgent::telemetry_loop, cell.get());
     return {std::move(cell), ""};
 }
 
-std::string SovereignCell::load_and_attach_ebpf() {
+std::string NodeAgent::load_and_attach_ebpf() {
     m_skel = sensor_bpf__open_and_load();
     if (!m_skel) return "Fail";
     sensor_bpf__attach(m_skel);
@@ -41,7 +41,7 @@ std::string SovereignCell::load_and_attach_ebpf() {
     return "";
 }
 
-void SovereignCell::telemetry_loop() noexcept {
+void NodeAgent::telemetry_loop() noexcept {
     int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in c2_addr{};
     c2_addr.sin_family = AF_INET;
@@ -77,11 +77,25 @@ void SovereignCell::telemetry_loop() noexcept {
         }
 
         bool threat_this_tick = false;
+        std::string mitre_ids;  // accumulates distinct MITRE ATT&CK technique IDs
         while (m_internal_queue.pop(event, m_running)) {
-            if (m_brain.analyze(event.comm, event.payload)) {
+            if (m_inference.analyze(event.comm, event.payload)) {
                 if (system_armed) {
                     threat_this_tick = true;
-                    m_jailer.imprison(event.pid);
+                    m_enforcer.suspend_process(event.pid);
+                }
+                // Map eBPF event_type → MITRE ATT&CK technique ID
+                const char* mitre = nullptr;
+                switch (event.event_type) {
+                    case 1: mitre = "T1059"; break;  // Command and Scripting Interpreter
+                    case 2: mitre = "T1571"; break;  // Non-Standard Port
+                    case 3: mitre = "T1021"; break;  // Remote Services
+                    default: break;
+                }
+                if (mitre) {
+                    if (mitre_ids.empty()) mitre_ids = std::string("\"") + mitre + "\"";
+                    else if (mitre_ids.find(mitre) == std::string::npos)
+                        mitre_ids += std::string(",\"") + mitre + "\"";
                 }
             }
         }
@@ -90,11 +104,13 @@ void SovereignCell::telemetry_loop() noexcept {
         long ram = (memInfo.totalram - memInfo.freeram) / (1024 * 1024);
         double loads[1]; double cpu = (getloadavg(loads, 1) != -1) ? loads[0] : 0.0;
 
+        std::string mitre_array = mitre_ids.empty() ? "[]" : ("[" + mitre_ids + "]");
         std::string json = "{\"ID\":\"" + m_node_id + "\",\"RAM_MB\":" + std::to_string(ram) +
                            ",\"CPU_LOAD\":" + std::to_string(cpu) +
                            ",\"PROCS\":1,\"NET_OUT\":0" +
-                           ",\"KERNEL_THREAT\":\"" + std::string(threat_this_tick ? "TRUE" : "FALSE") + "\"" +
-                           ",\"STATUS\":\"" + std::string(threat_this_tick ? "SELF_ISOLATED" : "STABLE") + "\"}";
+                           ",\"KERNEL_ANOMALY\":\"" + std::string(threat_this_tick ? "TRUE" : "FALSE") + "\"" +
+                           ",\"STATUS\":\"" + std::string(threat_this_tick ? "SELF_ISOLATED" : "STABLE") + "\"" +
+                           ",\"mitre_attack\":" + mitre_array + "}";
 
         std::string payload = "TELEMETRY:" + json;
         sendto(udp_sock, payload.c_str(), payload.length(), 0, (struct sockaddr*)&c2_addr, sizeof(c2_addr));
@@ -104,17 +120,17 @@ void SovereignCell::telemetry_loop() noexcept {
     close(udp_sock);
 }
 
-void SovereignCell::run(std::atomic<bool>* shutdown_flag, std::atomic<bool>* vaccine_flag) noexcept {
+void NodeAgent::run(std::atomic<bool>* shutdown_flag, std::atomic<bool>* reset_flag) noexcept {
     while (m_running.load() && !shutdown_flag->load()) {
-        if (vaccine_flag && vaccine_flag->load()) {
-            m_jailer.eradicate_threats();
-            vaccine_flag->store(false);
+        if (reset_flag && reset_flag->load()) {
+            m_enforcer.reset_enforcement();
+            reset_flag->store(false);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
-void SovereignCell::trigger_shutdown() noexcept {
+void NodeAgent::trigger_shutdown() noexcept {
     if (m_running.exchange(false)) {
         if (m_telemetry_thread.joinable()) m_telemetry_thread.join();
         if (m_ringbuf) {
@@ -128,13 +144,13 @@ void SovereignCell::trigger_shutdown() noexcept {
     }
 }
 
-void SovereignCell::vaccinate() noexcept {
-    m_jailer.eradicate_threats();
-    std::cout << "[CELL] Vaccine applied. Threats eradicated." << std::endl;
+void NodeAgent::reset_cell() noexcept {
+    m_enforcer.reset_enforcement();
+    std::cout << "[CELL] Enforcement reset." << std::endl;
 }
 
-int SovereignCell::handle_ringbuf_event(void *ctx, void *data, size_t) {
-    auto* self = static_cast<SovereignCell*>(ctx);
+int NodeAgent::handle_ringbuf_event(void *ctx, void *data, size_t) {
+    auto* self = static_cast<NodeAgent*>(ctx);
     self->m_internal_queue.push(*(static_cast<KernelEventData*>(data)));
     return 0;
 }

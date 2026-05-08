@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SOVEREIGN SOC // NEURO-MESH COMMAND</title>
+<title>Neuro-Mesh Monitor</title>
 <style>
 /* ==========================================================================
-   NEON-NOIR FUI BASE
+   Neuro-Mesh Console
    ========================================================================== */
 :root {
   --bg:        #000000;
@@ -66,8 +66,8 @@ body::after {
   z-index: 9999;
 }
 
-/* ---- Glitch overlay (hidden by default) ---- */
-#glitch-overlay {
+/* ---- Alert overlay (hidden by default) ---- */
+#alert-overlay {
   position: fixed;
   inset: 0;
   z-index: 9998;
@@ -80,12 +80,12 @@ body::after {
   flex-direction: column;
 }
 
-#glitch-overlay.active {
+#alert-overlay.active {
   opacity: 1;
-  animation: glitch-flash 0.5s ease-out;
+  animation: alert-flash 0.5s ease-out;
 }
 
-#glitch-overlay .glitch-text {
+#alert-overlay .alert-text {
   font-family: var(--font);
   font-size: 42px;
   font-weight: bold;
@@ -94,10 +94,10 @@ body::after {
     3px 0 #00ffff,
     -3px 0 #ff0040;
   letter-spacing: 8px;
-  animation: glitch-rgb 0.15s infinite;
+  animation: alert-rgb 0.15s infinite;
 }
 
-#glitch-overlay .glitch-sub {
+#alert-overlay .alert-sub {
   font-family: var(--font);
   font-size: 14px;
   color: var(--amber);
@@ -105,12 +105,12 @@ body::after {
   letter-spacing: 4px;
 }
 
-@keyframes glitch-flash {
+@keyframes alert-flash {
   0%   { background: rgba(255,0,64,0.3); }
   100% { background: transparent; }
 }
 
-@keyframes glitch-rgb {
+@keyframes alert-rgb {
   0%   { transform: translate(2px, 0); }
   25%  { transform: translate(-3px, 1px); }
   50%  { transform: translate(1px, -1px); }
@@ -227,13 +227,17 @@ body::after {
   height: 100%;
 }
 
+#mesh-canvas { cursor: pointer; }
+
+#mesh-canvas.clickable { cursor: pointer; }
+
 /* ---- Kill Feed ---- */
-#kill-feed-section {
+#event-feed-section {
   height: 170px;
   min-height: 170px;
 }
 
-#kill-feed {
+#event-feed {
   height: 100%;
   overflow-y: auto;
   padding: 6px 10px;
@@ -241,9 +245,9 @@ body::after {
   line-height: 1.8;
 }
 
-#kill-feed::-webkit-scrollbar { width: 4px; }
-#kill-feed::-webkit-scrollbar-track { background: var(--bg); }
-#kill-feed::-webkit-scrollbar-thumb { background: var(--border); }
+#event-feed::-webkit-scrollbar { width: 4px; }
+#event-feed::-webkit-scrollbar-track { background: var(--bg); }
+#event-feed::-webkit-scrollbar-thumb { background: var(--border); }
 
 .kill-entry {
   display: flex;
@@ -262,6 +266,19 @@ body::after {
 .kill-entry .cat   { color: var(--cyan); min-width: 110px; text-transform: uppercase; font-weight: bold; }
 .kill-entry .hash  { color: var(--dim); min-width: 100px; }
 .kill-entry .msg   { color: var(--white); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.mitre-tag {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  background: rgba(255,176,0,0.12);
+  border: 1px solid var(--amber-dim);
+  color: var(--amber);
+  letter-spacing: 1px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
 
 @keyframes feed-in {
   from { opacity: 0; transform: translateX(-8px); }
@@ -350,10 +367,10 @@ body::after {
 </head>
 <body>
 
-<!-- Glitch Overlay -->
-<div id="glitch-overlay">
-  <div class="glitch-text">[ ENFORCEMENT EXECUTED ]</div>
-  <div class="glitch-sub" id="glitch-detail"></div>
+<!-- Alert Overlay -->
+<div id="alert-overlay">
+  <div class="alert-text">[ ENFORCEMENT EXECUTED ]</div>
+  <div class="alert-sub" id="alert-detail"></div>
 </div>
 
 <!-- App Shell -->
@@ -362,8 +379,9 @@ body::after {
   <!-- HEADER -->
   <div id="header">
     <div class="identity">
-      <span class="id-label">SOVEREIGN NODE</span>
+      <span class="id-label" id="context-label">Node</span>
       <span class="id-value" id="node-id-display">NODE_1</span>
+      <span class="id-label" id="viewing-indicator" style="display:none;color:var(--amber);font-size:11px;margin-left:12px;letter-spacing:2px;"></span>
     </div>
     <div class="status-row">
       <div class="status-badge">
@@ -391,7 +409,7 @@ body::after {
     <!-- Mesh Overlay -->
     <div class="panel" id="mesh-panel">
       <div class="panel-header">
-        <span>TACTICAL MESH OVERLAY</span>
+        <span>Network Topology</span>
         <span class="pill" id="mesh-pill">TOPO: 1 NODES</span>
       </div>
       <div class="panel-body">
@@ -422,12 +440,12 @@ body::after {
   </div>
 
   <!-- Kill Feed -->
-  <div class="panel" id="kill-feed-section">
+  <div class="panel" id="event-feed-section">
     <div class="panel-header">
-      <span>SOVEREIGN AUDIT LOG // LIVE</span>
+      <span>Event Log</span>
       <span class="pill" id="feed-count">0 EVENTS</span>
     </div>
-    <div id="kill-feed"></div>
+    <div id="event-feed"></div>
   </div>
 
   <!-- Tick Bar -->
@@ -444,7 +462,7 @@ body::after {
 
 <script>
 /* ==========================================================================
-   FUI SOVEREIGN COMMAND DASHBOARD — Zero-dependency Vanilla JS
+   Neuro-Mesh Console — Zero-dependency Vanilla JS
    ========================================================================== */
 
 // ---- Constants ----
@@ -463,8 +481,8 @@ const state = {
   cpuLoad: 0,
   ramMb: 0,
   entropy: 0,
-  lastThreat: false,
-  threatFlag: false,
+  lastAlert: false,
+  alertFlag: false,
   wsLive: false,
   feedCount: 0,
   frameCount: 0,
@@ -473,12 +491,16 @@ const state = {
   edges: [],
   // Spectrogram history
   specHistory: [],
+  // Operator context — null = follow self node; string = viewing a specific peer
+  selectedNode: null,
 };
 
 // ---- DOM refs ----
 const $ = (s) => document.getElementById(s);
 const dom = {
   nodeId:       $('node-id-display'),
+  contextLabel: $('context-label'),
+  viewIndicator:$('viewing-indicator'),
   meshDot:      $('mesh-dot'),
   meshStatus:   $('mesh-status-label'),
   peerCount:    $('peer-count'),
@@ -488,13 +510,13 @@ const dom = {
   vitalsPill:   $('vitals-pill'),
   vitalsBody:   $('vitals-body'),
   feedCount:    $('feed-count'),
-  killFeed:     $('kill-feed'),
+  eventFeed:     $('event-feed'),
   tickClock:    $('tick-clock'),
   tickFrame:    $('tick-frame'),
   connDot:      $('conn-dot'),
   connLabel:    $('conn-label'),
-  glitch:       $('glitch-overlay'),
-  glitchDetail: $('glitch-detail'),
+  alertOverlay: $('alert-overlay'),
+  alertDetail: $('alert-detail'),
   meshCanvas:   $('mesh-canvas'),
   spectroCanvas:$('spectro-canvas'),
 };
@@ -522,7 +544,7 @@ function buildGauges() {
     </div>
     <div id="vitals-extra">
       <div class="vital-row"><span class="vkey">ENTROPY</span><span class="vval">${state.entropy.toFixed(4)}</span></div>
-      <div class="vital-row"><span class="vkey">THREAT</span><span class="vval" style="color:${state.threatFlag ? 'var(--red)' : 'var(--green)'}">${state.threatFlag ? 'ACTIVE' : 'NONE'}</span></div>
+      <div class="vital-row"><span class="vkey">ALERT</span><span class="vval" style="color:${state.alertFlag ? 'var(--red)' : 'var(--green)'}">${state.alertFlag ? 'ACTIVE' : 'NONE'}</span></div>
       <div class="vital-row"><span class="vkey">STATUS</span><span class="vval">${state.meshStatus}</span></div>
       <div class="vital-row"><span class="vkey">PEERS</span><span class="vval">${state.peers}</span></div>
     </div>
@@ -580,6 +602,27 @@ function initMeshCanvas() {
   const canvas = dom.meshCanvas;
   meshCtx = canvas.getContext('2d');
   resizeMesh();
+
+  // Click-to-select: hit-test each node and switch operator context
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const mx = (e.clientX - rect.left);
+    const my = (e.clientY - rect.top);
+
+    // Hit-test in reverse draw order (top-most first) with a generous radius
+    for (let i = state.nodes.length - 1; i >= 0; i--) {
+      const node = state.nodes[i];
+      const r = node.isSelf ? 12 : 8;
+      const hitR = r + 6; // generous hit area
+      const dx = mx - node.x;
+      const dy = my - node.y;
+      if (dx * dx + dy * dy <= hitR * hitR) {
+        switchNodeContext(node.id);
+        return;
+      }
+    }
+  });
 }
 
 function resizeMesh() {
@@ -657,6 +700,55 @@ function renameSelfNode(newId) {
 function markNodeThreat(nodeId) {
   const node = state.nodes.find(n => n.id === nodeId);
   if (node) node.threat = true;
+}
+
+function switchNodeContext(nodeId) {
+  // Deselect: clicking the already-selected node returns to self view
+  if (state.selectedNode === nodeId) {
+    state.selectedNode = null;
+    dom.contextLabel.textContent = 'Node';
+    dom.nodeId.textContent = state.nodeId;
+    dom.viewIndicator.style.display = 'none';
+    pushFeed('HEARTBEAT', `Context reset — following local node ${state.nodeId}`, '');
+    return;
+  }
+
+  state.selectedNode = nodeId;
+
+  // Self node vs remote peer — different header treatment
+  if (nodeId === state.nodeId) {
+    dom.contextLabel.textContent = 'Node';
+    dom.nodeId.textContent = state.nodeId;
+    dom.viewIndicator.style.display = 'none';
+    pushFeed('HEARTBEAT', `Context locked — monitoring local node ${nodeId}`, '');
+  } else {
+    dom.contextLabel.textContent = 'Viewing';
+    dom.nodeId.textContent = nodeId;
+    dom.viewIndicator.textContent = '[REMOTE]';
+    dom.viewIndicator.style.display = 'inline';
+    pushFeed('HEARTBEAT', `Context switched — now viewing ${nodeId}`, '');
+  }
+
+  // Reset spectrogram and vitals for the new context
+  state.specHistory = [];
+  state.cpuLoad = 0;
+  state.ramMb = 0;
+  state.entropy = 0;
+  state.alertFlag = false;
+  dom.vitalsPill.textContent = 'STABLE';
+  dom.vitalsPill.style.color = 'var(--green)';
+  dom.vitalsPill.style.borderColor = 'var(--cyan-dim)';
+  buildGauges();
+}
+
+function matchesSelectedNode(data) {
+  // No filter active — accept all telemetry
+  if (!state.selectedNode) return true;
+  // Match against all known node-ID fields
+  if (data.node === state.selectedNode) return true;
+  if (data.ID === state.selectedNode) return true;
+  if (data.node_id === state.selectedNode) return true;
+  return false;
 }
 
 function stepMeshForces() {
@@ -772,6 +864,18 @@ function drawMeshGraph() {
     ctx.font = 'bold 11px "Courier New", monospace';
     ctx.textAlign = 'center';
     ctx.fillText(node.id, node.x, node.y - r - 7);
+
+    // Selection ring — amber pulse on the operator-selected node
+    if (state.selectedNode && node.id === state.selectedNode) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+      ctx.strokeStyle = `rgba(255,176,0,${0.5 + pulse * 0.5})`;
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([4, 2]);
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, r + 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   // Crosshair on center
@@ -871,13 +975,18 @@ function drawSpectrogram() {
 }
 
 /* ==========================================================================
-   KILL FEED
+   Event Feed
    ========================================================================== */
-function pushFeed(category, message, hash) {
+function pushFeed(category, message, hash, mitreTags) {
   state.feedCount++;
   const now = new Date();
   const ts = now.toISOString().replace('T', ' ').slice(0, 19);
   const shortHash = hash ? hash.slice(0, 12) : '--';
+
+  let mitreHtml = '';
+  if (Array.isArray(mitreTags) && mitreTags.length > 0) {
+    mitreHtml = mitreTags.map(t => `<span class="mitre-tag">${escapeHtml(t)}</span>`).join('');
+  }
 
   const entry = document.createElement('div');
   entry.className = `kill-entry ${category}`;
@@ -885,15 +994,15 @@ function pushFeed(category, message, hash) {
     <span class="ts">${ts}</span>
     <span class="cat">[${category}]</span>
     <span class="hash">${shortHash}</span>
-    <span class="msg">${escapeHtml(message)}</span>
+    <span class="msg">${escapeHtml(message)}${mitreHtml}</span>
   `;
 
-  dom.killFeed.prepend(entry);
+  dom.eventFeed.prepend(entry);
   dom.feedCount.textContent = `${state.feedCount} EVENTS`;
 
   // Prune
-  while (dom.killFeed.children.length > MAX_FEED) {
-    dom.killFeed.removeChild(dom.killFeed.lastChild);
+  while (dom.eventFeed.children.length > MAX_FEED) {
+    dom.eventFeed.removeChild(dom.eventFeed.lastChild);
   }
 }
 
@@ -903,13 +1012,18 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+function getMitreTags(data) {
+  if (Array.isArray(data.mitre_attack)) return data.mitre_attack;
+  return [];
+}
+
 /* ==========================================================================
-   GLITCH TRIGGER
+   ALERT
    ========================================================================== */
-function triggerGlitch(detail) {
-  dom.glitchDetail.textContent = detail || 'THREAT MITIGATION ACTIVE';
-  dom.glitch.classList.add('active');
-  setTimeout(() => dom.glitch.classList.remove('active'), 500);
+function triggerAlert(detail) {
+  dom.alertDetail.textContent = detail || 'Mitigation Active';
+  dom.alert.classList.add('active');
+  setTimeout(() => dom.alert.classList.remove('active'), 500);
 }
 
 /* ==========================================================================
@@ -979,36 +1093,38 @@ function routeMessage(data) {
   switch (event) {
     case 'entropy_spike':
     case 'ebpf_entropy':
-      state.entropy = parseFloat(data.value) || 0;
-      if (state.entropy > 0.85) {
-        state.threatFlag = true;
-        dom.meshDot.classList.add('danger');
+      if (matchesSelectedNode(data)) {
+        state.entropy = parseFloat(data.value) || 0;
+        if (state.entropy > 0.85) {
+          state.alertFlag = true;
+          dom.meshDot.classList.add('danger');
+        }
+        pushSpectrogram(state.entropy);
       }
-      pushSpectrogram(state.entropy);
       pushFeed('ENTROPY',
-        `eBPF entropy spike: ${state.entropy.toFixed(3)} (threshold: ${data.threshold || 0.85})`,
-        data.hash || '');
+        `eBPF entropy spike: ${parseFloat(data.value || 0).toFixed(3)} (threshold: ${data.threshold || 0.85})`,
+        data.hash || '', getMitreTags(data));
       break;
 
     case 'lateral_movement':
-      state.threatFlag = true;
+      state.alertFlag = true;
       dom.meshDot.classList.add('danger');
       const srcIp = data.src_ip || '0.0.0.0';
       pushFeed('ENFORCEMENT',
         `Lateral movement detected — src: ${srcIp} pid: ${data.pid || '?'} comm: ${data.comm || '?'}`,
-        data.hash || '');
-      triggerGlitch(`LATERAL MOVE: ${srcIp}`);
+        data.hash || '', getMitreTags(data));
+      triggerAlert(`LATERAL MOVE: ${srcIp}`);
       // Mark source IP as threat node
       markNodeThreat(srcIp);
       break;
 
     case 'privilege_escalation':
-      state.threatFlag = true;
+      state.alertFlag = true;
       dom.meshDot.classList.add('danger');
       pushFeed('ENFORCEMENT',
         `Privilege escalation — uid:${data.uid || '?'} comm: ${data.comm || '?'} parent: ${data.parent_comm || '?'}`,
-        data.hash || '');
-      triggerGlitch(`PRIVESC: ${data.comm || 'UNKNOWN'}`);
+        data.hash || '', getMitreTags(data));
+      triggerAlert(`PRIVESC: ${data.comm || 'UNKNOWN'}`);
       break;
 
     case 'pbft_round_complete':
@@ -1019,13 +1135,13 @@ function routeMessage(data) {
       if (stage === 'EXECUTED') {
         pushFeed('PBFT',
           `Consensus EXECUTED — target: ${target} quorum: ${data.quorum || '?'}`,
-          data.hash || '');
-        triggerGlitch(`PBFT EXECUTED: ${target}`);
+          data.hash || '', getMitreTags(data));
+        triggerAlert(`PBFT EXECUTED: ${target}`);
         markNodeThreat(target);
       } else {
         pushFeed('PBFT',
           `PBFT ${stage} — target: ${target} quorum: ${data.quorum || '?'}`,
-          data.hash || '');
+          data.hash || '', getMitreTags(data));
       }
       // Update quorum display
       if (data.quorum) {
@@ -1036,35 +1152,36 @@ function routeMessage(data) {
 
     case 'heartbeat':
     case 'telemetry':
-      state.cpuLoad = parseFloat(data.cpu) || state.cpuLoad;
-      state.ramMb = parseInt(data.mem_mb) || parseInt(data.RAM_MB) || state.ramMb;
-
-      if (data.entropy !== undefined) {
-        state.entropy = parseFloat(data.entropy) || 0;
-        pushSpectrogram(state.entropy);
+      // Vitals & spectrogram — only update for the selected node context
+      if (matchesSelectedNode(data)) {
+        state.cpuLoad = parseFloat(data.cpu) || state.cpuLoad;
+        state.ramMb = parseInt(data.mem_mb) || parseInt(data.RAM_MB) || state.ramMb;
+        if (data.entropy !== undefined) {
+          state.entropy = parseFloat(data.entropy) || 0;
+          pushSpectrogram(state.entropy);
+        }
+        if (data.threat === 'CRITICAL') {
+          state.alertFlag = true;
+          dom.meshDot.classList.add('danger');
+        }
+        if (data.status === 'SELF_ISOLATED' || data.KERNEL_ANOMALY === 'TRUE') {
+          state.alertFlag = true;
+          dom.meshDot.classList.add('danger');
+        }
       }
-      if (data.threat === 'CRITICAL') {
-        state.threatFlag = true;
-        dom.meshDot.classList.add('danger');
-      }
+      // Global mesh topology — always updated regardless of selected node
       if (data.peers !== undefined) {
         state.peers = parseInt(data.peers);
         dom.peerCount.textContent = state.peers;
       }
-      // First heartbeat with a real node ID renames the center node
       if (data.node && !nodeIdLocked) {
         renameSelfNode(data.node);
         nodeIdLocked = true;
       }
-      // Render peer list from heartbeat (e.g. ["BRAVO","CHARLIE"])
       if (Array.isArray(data.peer_list)) {
         for (const pid of data.peer_list) {
           if (pid !== state.nodeId) upsertPeerNode(pid);
         }
-      }
-      if (data.status === 'SELF_ISOLATED' || data.KERNEL_THREAT === 'TRUE') {
-        state.threatFlag = true;
-        dom.meshDot.classList.add('danger');
       }
       if (data.node_id && data.node_id !== state.nodeId) upsertPeerNode(data.node_id);
       break;
@@ -1080,12 +1197,12 @@ function routeMessage(data) {
       break;
 
     case 'enforcement':
-      state.threatFlag = true;
+      state.alertFlag = true;
       dom.meshDot.classList.add('danger');
       pushFeed('ENFORCEMENT',
         `${data.action || 'MITIGATION'} — ${data.detail || 'enforcement executed'}`,
-        data.consensus_hash || '');
-      triggerGlitch(data.detail || 'ENFORCEMENT EXECUTED');
+        data.consensus_hash || '', getMitreTags(data));
+      triggerAlert(data.detail || 'ENFORCEMENT EXECUTED');
       if (data.target) markNodeThreat(data.target);
       break;
 
@@ -1095,15 +1212,18 @@ function routeMessage(data) {
         const nid = data.ID || data.node_id;
         if (nid !== state.nodeId) upsertPeerNode(nid);
       }
-      if (data.CPU_LOAD !== undefined) state.cpuLoad = parseFloat(data.CPU_LOAD);
-      if (data.RAM_MB !== undefined) state.ramMb = parseInt(data.RAM_MB);
-      if (data.KERNEL_THREAT === 'TRUE') {
-        state.threatFlag = true;
-        dom.meshDot.classList.add('danger');
-      }
-      if (data.STATUS === 'SELF_ISOLATED') {
-        state.meshStatus = 'ISOLATED';
-        dom.meshDot.classList.add('danger');
+      // Vitals only update for the selected node context
+      if (matchesSelectedNode(data)) {
+        if (data.CPU_LOAD !== undefined) state.cpuLoad = parseFloat(data.CPU_LOAD);
+        if (data.RAM_MB !== undefined) state.ramMb = parseInt(data.RAM_MB);
+        if (data.KERNEL_ANOMALY === 'TRUE') {
+          state.alertFlag = true;
+          dom.meshDot.classList.add('danger');
+        }
+        if (data.STATUS === 'SELF_ISOLATED') {
+          state.meshStatus = 'ISOLATED';
+          dom.meshDot.classList.add('danger');
+        }
       }
       break;
   }
@@ -1115,8 +1235,8 @@ function routeMessage(data) {
   }
 
   // Update mesh status
-  if (state.threatFlag) {
-    state.meshStatus = 'THREAT ACTIVE';
+  if (state.alertFlag) {
+    state.meshStatus = 'Alert Active';
     dom.meshStatus.textContent = state.meshStatus;
   } else if (state.peers > 0) {
     state.meshStatus = 'MESH OPERATIONAL';
@@ -1132,9 +1252,9 @@ function routeMessage(data) {
   dom.meshPill.textContent = `TOPO: ${state.nodes.length} NODES`;
 
   // Vitals pill
-  dom.vitalsPill.textContent = state.threatFlag ? 'THREAT' : 'STABLE';
-  dom.vitalsPill.style.color = state.threatFlag ? 'var(--red)' : 'var(--green)';
-  dom.vitalsPill.style.borderColor = state.threatFlag ? 'var(--red-dim)' : 'var(--cyan-dim)';
+  dom.vitalsPill.textContent = state.alertFlag ? 'ALERT' : 'STABLE';
+  dom.vitalsPill.style.color = state.alertFlag ? 'var(--red)' : 'var(--green)';
+  dom.vitalsPill.style.borderColor = state.alertFlag ? 'var(--red-dim)' : 'var(--cyan-dim)';
 }
 
 /* ==========================================================================
@@ -1163,7 +1283,7 @@ function renderLoop(ts) {
 
   // Mesh status dot
   dom.meshDot.className = 'status-dot' +
-    (state.threatFlag ? ' danger' : state.wsLive ? '' : ' warn');
+    (state.alertFlag ? ' danger' : state.wsLive ? '' : ' warn');
 
   animFrame = requestAnimationFrame(renderLoop);
 }
@@ -1202,6 +1322,8 @@ function startSimulation() {
           value: entropy,
           threshold: 0.85,
           verdict: entropy > 0.85 ? 'ANOMALY' : 'NOMINAL',
+          mitre_attack: entropy > 0.85 ? ['T1571'] : [],
+          node: simPeers[Math.floor(Math.random() * simPeers.length)],
         });
         break;
       case 1: // lateral movement
@@ -1210,7 +1332,8 @@ function startSimulation() {
           src_ip: '10.99.99.99',
           pid: 4200 + Math.floor(Math.random() * 100),
           comm: 'sshd',
-          verdict: 'THREAT',
+          verdict: 'ALERT',
+          mitre_attack: ['T1021', 'T1571'],
         });
         break;
       case 2: // heartbeat with peer data
@@ -1232,6 +1355,7 @@ function startSimulation() {
           comm: 'bash',
           parent_comm: 'nginx',
           verdict: 'CRITICAL',
+          mitre_attack: ['T1059'],
         });
         break;
       case 4: // PBFT round
@@ -1240,6 +1364,7 @@ function startSimulation() {
           target: simPeers[Math.floor(Math.random() * simPeers.length)],
           quorum: 4,
           stage: 'EXECUTED',
+          mitre_attack: ['T1059', 'T1021', 'T1571', 'T1090'],
         });
         break;
     }
@@ -1253,7 +1378,7 @@ function init() {
   initMeshCanvas();
   initSpectroCanvas();
   buildGauges();
-  pushFeed('HEARTBEAT', 'Sovereign SOC Command Center online', '');
+  pushFeed('HEARTBEAT', 'Neuro-Mesh Console ready', '');
 
   window.addEventListener('resize', onResize);
 

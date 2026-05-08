@@ -34,25 +34,25 @@ USOCK_OBJS = $(patsubst $(USOCK_DIR)/%.c,$(OBJ_DIR)/usockets/%.o,$(USOCK_SRCS))
 
 # ---- C++ agent sources ----
 AGENT_SRCS = main.cpp \
-             cell/SovereignCell.cpp \
+             cell/NodeAgent.cpp \
              cell/InferenceEngine.cpp \
              consensus/MeshNode.cpp \
-             jailer/SystemJailer.cpp \
-             jailer/MitigationEngine.cpp \
+             enforcer/PolicyEnforcer.cpp \
+             enforcer/MitigationEngine.cpp \
              crypto/CryptoCore.cpp \
              telemetry/AuditLogger.cpp \
              telemetry/TelemetryBridge.cpp
 
 AGENT_OBJS = $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(AGENT_SRCS))
 AGENT_TARGET = $(BIN_DIR)/neuro_agent
-SIM_TARGET = $(BIN_DIR)/simulate_threat
+SIM_TARGET = $(BIN_DIR)/inject_event
 CRYPTO_TEST_TARGET = $(BIN_DIR)/test_crypto
 
 all: directories kernel/sensor.skel.h $(AGENT_TARGET) tools
 
 directories:
 	@mkdir -p $(OBJ_DIR) $(BIN_DIR)
-	@mkdir -p $(OBJ_DIR)/cell $(OBJ_DIR)/consensus $(OBJ_DIR)/jailer
+	@mkdir -p $(OBJ_DIR)/cell $(OBJ_DIR)/consensus $(OBJ_DIR)/enforcer
 	@mkdir -p $(OBJ_DIR)/crypto $(OBJ_DIR)/telemetry
 	@mkdir -p $(OBJ_DIR)/usockets/eventing
 
@@ -73,15 +73,15 @@ $(OBJ_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# SovereignCell depends on the generated eBPF skeleton header
-$(OBJ_DIR)/cell/SovereignCell.o: kernel/sensor.skel.h
+# NodeAgent depends on the generated eBPF skeleton header
+$(OBJ_DIR)/cell/NodeAgent.o: kernel/sensor.skel.h
 
 # ---- Link neuro_agent ----
 $(AGENT_TARGET): $(USOCK_OBJS) $(AGENT_OBJS)
 	$(CXX) $(CXXFLAGS) $(USOCK_OBJS) $(AGENT_OBJS) -o $@ $(BPF_LIBS) $(SSL_LIBS) $(SECC_LIBS) $(ONNX_LIBS)
 
 # ---- Tools ----
-$(SIM_TARGET): tools/simulate_threat.cpp
+$(SIM_TARGET): tools/inject_event.cpp
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< -o $@
 

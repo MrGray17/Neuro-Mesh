@@ -1,7 +1,7 @@
 #include "consensus/MeshNode.hpp"
 #include "common/UniqueFD.hpp"
 #include "common/Base64.hpp"
-#include "jailer/MitigationEngine.hpp"
+#include "enforcer/MitigationEngine.hpp"
 #include "telemetry/TelemetryBridge.hpp"
 #include <iostream>
 #include <sstream>
@@ -18,14 +18,14 @@ namespace neuro_mesh {
 // =============================================================================
 
 MeshNode::MeshNode(const std::string& node_id,
-                   SystemJailer* jailer, MitigationEngine* mitigation,
+                   PolicyEnforcer* enforcer, MitigationEngine* mitigation,
                    TelemetryBridge* bridge)
     : m_node_id(node_id),
       m_udp_port(9999),
       m_tcp_port(0),
       m_running(false),
       m_pbft(1),   // start with n=1 (self), scale up via discovery
-      m_jailer(jailer),
+      m_enforcer(enforcer),
       m_mitigation(mitigation),
       m_bridge(bridge),
       m_journal("./journal_" + node_id + ".log")
@@ -33,7 +33,7 @@ MeshNode::MeshNode(const std::string& node_id,
     m_private_key = crypto::IdentityCore::generate_ed25519_key();
     m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
     m_public_key_b64 = base64_encode(m_public_key_pem);
-    std::cout << "[INFO] Node " << m_node_id << " generated Ed25519 Sovereign Identity." << std::endl;
+    std::cout << "[INFO] Node " << m_node_id << " generated Ed25519 Node Identity." << std::endl;
 
     // Register self so self-votes pass verification
     m_pbft.register_peer_key(m_node_id, m_public_key_pem);
@@ -547,11 +547,11 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
                   << " at " << sender_ip_copy << ":" << peer_tcp_port
                   << ". Quorum updated to n=" << peer_count() << "." << std::endl;
 
-        // Register key with PBFT and IP with jailer
+        // Register key with PBFT and IP with enforcer
         m_pbft.register_peer_key(peer_id_copy, peer_pem_copy);
         m_pbft.increment_peers();
 
-        if (m_jailer) m_jailer->register_peer_ip(peer_id_copy, sender_ip_copy);
+        if (m_enforcer) m_enforcer->register_peer_ip(peer_id_copy, sender_ip_copy);
 
         // Initiate PEX handshake to exchange peer lists (O(log N) discovery)
         // Called OUTSIDE the unique_lock to avoid self-deadlock on m_peers_mtx
@@ -585,7 +585,7 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
             m_pbft.register_peer_key(peer_id, peer_pem);
         }
 
-        if (m_jailer) m_jailer->register_peer_ip(peer_id, sender_ip);
+        if (m_enforcer) m_enforcer->register_peer_ip(peer_id, sender_ip);
 
         if (!is_new_peer) {
             auto now = std::chrono::steady_clock::now();
@@ -624,7 +624,8 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                     std::ignore = m_bridge->push_telemetry(
                         "{\"event\":\"pbft_round_complete\",\"stage\":\"COMMIT\","
                         "\"target\":\"" + incoming_msg.target_id + "\","
-                        "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + "}");
+                        "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
+                    "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
                 }
                 broadcast_pbft_stage("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
             }
@@ -636,7 +637,8 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                     std::ignore = m_bridge->push_telemetry(
                         "{\"event\":\"pbft_round_complete\",\"stage\":\"EXECUTED\","
                         "\"target\":\"" + incoming_msg.target_id + "\","
-                        "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + "}");
+                        "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
+                    "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
                 }
                 std::string ev = incoming_msg.evidence_json;
                 std::string tgt = incoming_msg.target_id;
@@ -659,7 +661,7 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
 // PBFT consensus helpers
 // =============================================================================
 
-void MeshNode::initiate_threat_consensus(const std::string& target_id, const std::string& evidence_json) {
+void MeshNode::initiate_consensus(const std::string& target_id, const std::string& evidence_json) {
     std::cout << "[DEFENSE] Initiating PBFT Consensus for target: " << target_id << std::endl;
     broadcast_pbft_stage("PRE_PREPARE", target_id, evidence_json);
 }
@@ -685,7 +687,8 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
                 std::ignore = m_bridge->push_telemetry(
                     "{\"event\":\"pbft_round_complete\",\"stage\":\"COMMIT\","
                     "\"target\":\"" + target_id + "\","
-                    "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + "}");
+                    "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
+                    "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
             }
             broadcast_pbft_stage("COMMIT", target_id, evidence_json);
         } else if (next_stage == PBFTStage::EXECUTED) {
@@ -696,7 +699,8 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
                 std::ignore = m_bridge->push_telemetry(
                     "{\"event\":\"pbft_round_complete\",\"stage\":\"EXECUTED\","
                     "\"target\":\"" + target_id + "\","
-                    "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + "}");
+                    "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
+                    "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
             }
             std::string ev = evidence_json;
             std::string tgt = target_id;

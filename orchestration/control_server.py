@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-# NEURO-MESH : OMNI-C2 ORCHESTRATOR (ABSOLUTE RESOLUTION)
+# Neuro-Mesh Control Plane
 # ============================================================
 import asyncio
 import websockets
@@ -11,7 +11,7 @@ import os
 import sys
 
 # Force all fatal Python crashes to a log file so we are never blind
-sys.stderr = open('c2_fatal_crash.log', 'w')
+sys.stderr = open('ctrl_fatal_crash.log', 'w')
 
 UDP_TELEMETRY_PORT = 9998
 HTTP_API_PORT = 5000
@@ -24,7 +24,7 @@ def add_log(msg):
     log_entry = f"[{time.strftime('%H:%M:%S')}] {msg}"
     logs.append(log_entry)
     if len(logs) > 50: logs.pop(0)
-    print(f"\033[1;36m[C2]\033[0m {log_entry}")
+    print(f"\033[1;36m[CTRL]\033[0m {log_entry}")
 
 def send_ipc_command(node_id, command):
     pid = node_id.replace("NODE_", "")
@@ -53,11 +53,11 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
                 "hostname": payload.get("HOST", "Edge_Node"),
                 "cpu_load": payload.get("CPU_LOAD", 0.0),
                 "ram_mb": payload.get("RAM_MB", 0),
-                "status": "COMPROMIS" if payload.get("STATUS") == "SELF_ISOLATED" else "STABLE",
+                "status": "FLAGGED" if payload.get("STATUS") == "SELF_ISOLATED" else "STABLE",
                 "last_seen": time.time()
             }
-            if payload.get("KERNEL_THREAT") == "TRUE":
-                add_log(f"ALERT: eBPF Kernel Threat verified on {nid}")
+            if payload.get("KERNEL_ANOMALY") == "TRUE":
+                add_log(f"ALERT: eBPF anomaly verified on {nid}")
                 send_ipc_command(nid, "CMD:ISOLATE")
 
 async def http_api_handler(reader, writer):
@@ -67,7 +67,7 @@ async def http_api_handler(reader, writer):
             data = {
                 "active_nodes": list(nodes_db.values()),
                 "logs": logs,
-                "system_status": "ONLINE" if not any(n['status'] == "COMPROMIS" for n in nodes_db.values()) else "THREAT"
+                "system_status": "ONLINE" if not any(n['status'] == "FLAGGED" for n in nodes_db.values()) else "ALERT"
             }
         response = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{json.dumps(data)}"
         writer.write(response.encode())
@@ -89,7 +89,7 @@ async def ws_handler(websocket, path="/"):
                 state = {
                     "active_nodes": list(nodes_db.values()),
                     "logs": logs,
-                    "system_status": "ONLINE" if not any(n['status'] == "COMPROMIS" for n in nodes_db.values()) else "THREAT"
+                    "system_status": "ONLINE" if not any(n['status'] == "FLAGGED" for n in nodes_db.values()) else "ALERT"
                 }
             await websocket.send(json.dumps(state))
             await asyncio.sleep(0.5)
@@ -99,7 +99,7 @@ async def ws_handler(websocket, path="/"):
         print(f"WS Handler Error: {e}", file=sys.stderr)
 
 async def main():
-    print("\033[1;32m🚀 Neuro-Mesh Omni-C2 Orchestrator Starting...\033[0m")
+    print("\033[1;32mNeuro-Mesh Control Plane Starting...\033[0m")
     loop = asyncio.get_running_loop()
     
     # 1. Telemetry Listener
@@ -112,7 +112,7 @@ async def main():
     await websockets.serve(ws_handler, "0.0.0.0", 8080)
     await websockets.serve(ws_handler, "0.0.0.0", 8081)
     
-    print("📡 Omni-Server Active. Listening on UDP:9998, HTTP:5000, WS:8080 & WS:8081")
+    print("Control Plane Active. Listening on UDP:9998, HTTP:5000, WS:8080 & WS:8081")
     await asyncio.Future()
 
 if __name__ == "__main__":

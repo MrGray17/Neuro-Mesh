@@ -1,5 +1,5 @@
 // ============================================================
-// NEURO-MESH : SOVEREIGN CELL (LOCK-FREE EDITION)
+// NEURO-MESH : NODE AGENT (LOCK-FREE EDITION)
 // ============================================================
 #pragma once
 #include <string>
@@ -12,7 +12,7 @@
 #include <condition_variable>
 #include "cell/InferenceEngine.hpp"
 #include "consensus/MeshNode.hpp"
-#include "jailer/SystemJailer.hpp"
+#include "enforcer/PolicyEnforcer.hpp"
 
 struct ring_buffer;
 struct sensor_bpf;
@@ -68,22 +68,22 @@ private:
     size_t m_drops = 0;
 };
 
-class SovereignCell {
+class NodeAgent {
 public:
     struct Result {
-        std::unique_ptr<SovereignCell> cell;
+        std::unique_ptr<NodeAgent> cell;
         std::string error;
     };
 
     static Result create(const std::string& node_id);
-    ~SovereignCell();
+    ~NodeAgent();
 
-    void run(std::atomic<bool>* shutdown_flag, std::atomic<bool>* vaccine_flag) noexcept;
+    void run(std::atomic<bool>* shutdown_flag, std::atomic<bool>* reset_flag) noexcept;
     void trigger_shutdown() noexcept;
-    void vaccinate() noexcept;
+    void reset_cell() noexcept;
 
 private:
-    explicit SovereignCell(std::string id);
+    explicit NodeAgent(std::string id);
     std::string load_and_attach_ebpf();
     static int handle_ringbuf_event(void *ctx, void *data, size_t size);
     
@@ -95,8 +95,8 @@ private:
 
     TelemetryQueue<KernelEventData> m_internal_queue;
 
-    ai::InferenceEngine m_brain;
-    SystemJailer m_jailer;
+    ai::InferenceEngine m_inference;
+    PolicyEnforcer m_enforcer;
     MeshNode m_mesh_node;
 
     sensor_bpf* m_skel = nullptr;

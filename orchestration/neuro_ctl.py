@@ -26,22 +26,20 @@ def send_ipc_command(command):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: ./neuro_ctl.py [vaccinate | inject | shutdown]")
+        print("Usage: ./neuro_ctl.py [reset | inject | shutdown]")
         sys.exit(1)
 
     action = sys.argv[1].lower()
 
-    if action == "vaccinate":
-        print("\033[1;32m[+] Delivering secure vaccine payload via IPC...\033[0m")
-        if send_ipc_command("CMD:VACCINATE"):
-            print("✅ Vaccine delivered. Target node will stabilize.")
+    if action == "reset":
+        print("\033[1;32m[+] Sending enforcement reset via IPC...\033[0m")
+        if send_ipc_command("CMD:RESET"):
+            print("Enforcement reset. Target node will stabilize.")
             
     elif action == "inject":
-        print("\033[1;33m[!] Simulating threat by triggering synthetic process...\033[0m")
-        # Instead of sending a signal, we spawn a process matching the eBPF trace pattern
-        # to properly test the kernel-to-AI pipeline natively.
+        print("\033[1;33m[!] Simulating event by triggering synthetic process...\033[0m")
         os.system("cp /bin/sleep /tmp/malicious_payload_x99 && /tmp/malicious_payload_x99 2 &")
-        print("✅ Threat injected into process tree.")
+        print("Event injected into process tree.")
         
     elif action == "shutdown":
         print("\033[1;35m[*] Sending graceful shutdown command to Agent...\033[0m")

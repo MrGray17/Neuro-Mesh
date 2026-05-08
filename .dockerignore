@@ -22,7 +22,7 @@ orchestration/__pycache__/
 trained_models/
 api.json
 api_tmp.json
-ia_commands.txt
+classifier_commands.txt
 
 # IDE / OS
 .vscode/
@@ -33,6 +33,6 @@ ia_commands.txt
 neuro_mesh_full_*.txt
 neuro_mesh_pure_code*.txt
 
-# Old dashboard (replaced by dashboard-fui)
+# Old dashboard (replaced by dashboard)
 dashboard-react/
 web/

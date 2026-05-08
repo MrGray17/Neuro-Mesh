@@ -23,7 +23,7 @@ struct TelemetryBridgeConfig {
 //                     to topic/telemetry subscribers under full sandbox:
 //                     chroot, nobody uid/gid, no-new-privs, seccomp-bpf.
 //
-// Usage from SystemJailer or main thread:
+// Usage from PolicyEnforcer or main thread:
 //   TelemetryBridge bridge({.websocket_port = 9000});
 //   bridge.spawn();
 //   bridge.push_telemetry(R"({"event":"anomaly","score":0.97})");

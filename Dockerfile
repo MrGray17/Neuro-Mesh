@@ -56,18 +56,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3t64 \
     libseccomp2 \
     ca-certificates \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Binaries
 COPY --from=builder /src/bin/neuro_agent /app/neuro_agent
-COPY --from=builder /src/bin/simulate_threat /app/simulate_threat
+COPY --from=builder /src/bin/inject_event /app/inject_event
 COPY --from=builder /src/obj/sensor.bpf.o /app/sensor.bpf.o
 
 # ONNX Runtime shared library
 COPY --from=builder /usr/local/lib/libonnxruntime.so.1.17.1 /usr/local/lib/
 RUN ldconfig
+
+# Attack script
+COPY --from=builder /src/tools/traffic_generator.py /app/traffic_generator.py
 
 # Trained model
 COPY --from=builder /src/isolation_forest.onnx /app/isolation_forest.onnx

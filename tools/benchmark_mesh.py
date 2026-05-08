@@ -2,7 +2,7 @@
 """Neuro-Mesh PBFT Consensus Benchmark Suite (Docker-aware).
 
 Measures:
-  Metric A — Latency: delta-t from simulate_threat injection to EXECUTED journal entry.
+  Metric A — Latency: delta-t from inject_event injection to EXECUTED journal entry.
   Metric B — Resources: CPU ticks and RSS memory delta during a consensus round.
 
 Requires agents to be running via docker-compose. Zero external dependencies.
@@ -77,10 +77,10 @@ def snapshot_all_stats():
     return stats
 
 
-def run_simulate_threat(node: str, target: str, event: str, verdict: str, tag: str = ""):
+def run_inject_event(node: str, target: str, event: str, verdict: str, tag: str = ""):
     """Inject a threat via IPC to a local daemon inside a running container."""
     cmd = ["docker", "exec", CONTAINERS[node],
-           "/app/simulate_threat",
+           "/app/inject_event",
            "--node", node, "--target", target,
            "--event", event, "--verdict", verdict]
     if tag:
@@ -117,8 +117,8 @@ def run_single_benchmark(run_id: int, target: str, event: str, verdict: str) -> 
     # Record injection time
     t_inject = time.time()
 
-    # Run simulate_threat in a fresh container with host networking
-    ok = run_simulate_threat(INJECTOR_NODE, target, event, verdict, tag=f"run{run_id}")
+    # Run inject_event in a fresh container with host networking
+    ok = run_inject_event(INJECTOR_NODE, target, event, verdict, tag=f"run{run_id}")
     if not ok:
         result["delta_ms"] = "SIM_FAILED"
         return result

@@ -14,7 +14,7 @@ def cleanup(sig, frame):
 
 signal.signal(signal.SIGINT, cleanup)
 
-print("[BOOT] Launching Sovereign Mesh...")
+print("[BOOT] Launching Neuro-Mesh...")
 for node_id in nodes:
     p = subprocess.Popen(["./bin/neuro_agent", node_id])
     processes.append(p)

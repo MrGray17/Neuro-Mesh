@@ -27,14 +27,13 @@ def api_data():
     except:
         return jsonify({"active_nodes": []})
 
-# WHY: Eradicated shell=True and Popen vulnerabilities. 
-# We explicitly call the hardened python module.
+# Uses explicit Python module invocation instead of shell=True.
 @app.route('/api/attack', methods=['POST'])
 def api_attack():
     try:
         # Strictly executing the Python binary without invoking a bash shell
         subprocess.run(["python3", "neuro_ctl.py", "inject"], check=True)
-        return jsonify({"status": "attack_launched", "message": "🔥 Attaque simulée en cours"})
+        return jsonify({"status": "attack_launched", "message": "Simulated event in progress"})
     except subprocess.CalledProcessError:
         return jsonify({"status": "error", "message": "Failed to launch attack."}), 500
 
@@ -52,9 +51,9 @@ def api_status():
     return jsonify({
         "c2_online": os.path.exists('api.json'),
         "websocket_port": 8081,
-        "dashboard_version": "4.0_SOVEREIGN"
+        "dashboard_version": "4.0"
     })
 
 if __name__ == '__main__':
-    print("🚀 NEURO-MESH Web Server démarré (Sanitized)")
+    print("Neuro-Mesh Web Server started")
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

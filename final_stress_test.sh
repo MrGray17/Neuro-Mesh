@@ -26,7 +26,7 @@ info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 cleanup() {
     say "Cleaning up..."
     pkill -f "neuro_agent" 2>/dev/null || true
-    pkill -f "simulate_threat" 2>/dev/null || true
+    pkill -f "inject_event" 2>/dev/null || true
     rm -f /tmp/neuro_mesh_*.sock "${LOG_DIR}"/*.log
     # Clean iptables rule we might have added
     iptables -D INPUT -s "${TARGET_IP}" -j DROP 2>/dev/null || true
@@ -103,8 +103,8 @@ pass "Pre-enforcement state clean — no existing rule for ${TARGET_IP}"
 # ---------------------------------------------------------------------------
 # Phase 3: Launch Threat Simulation
 # ---------------------------------------------------------------------------
-say "Phase 3: Launching threat simulation targeting ${TARGET_IP}..."
-"${BIN_DIR}/simulate_threat" "${TARGET_IP}" "${EVIDENCE}" > "${LOG_DIR}/simulator.log" 2>&1 &
+say "Phase 3: Launching event injection targeting ${TARGET_IP}..."
+"${BIN_DIR}/inject_event" "${TARGET_IP}" "${EVIDENCE}" > "${LOG_DIR}/simulator.log" 2>&1 &
 SIM_PID=$!
 
 # Wait for consensus to propagate

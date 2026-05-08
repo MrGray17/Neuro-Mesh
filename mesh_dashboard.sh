@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 1. NUKE: Kill any existing nodes and tmux sessions to ensure a clean slate
+# 1. CLEANUP: Kill any existing nodes and tmux sessions to ensure a clean slate
 killall neuro_agent 2>/dev/null
 tmux kill-session -t neuro_mesh 2>/dev/null
 
@@ -25,7 +25,7 @@ tmux send-keys -t 0 "./bin/neuro_agent NODE_1" C-m
 tmux send-keys -t 1 "./bin/neuro_agent NODE_2" C-m
 tmux send-keys -t 2 "./bin/neuro_agent NODE_3" C-m
 tmux send-keys -t 3 "./bin/neuro_agent NODE_4" C-m
-tmux send-keys -t 4 "echo '--- SOVEREIGN MESH ONLINE ---'; echo 'Ready for simulation.'" C-m
+tmux send-keys -t 4 "echo '--- Neuro-Mesh Online ---'; echo 'Ready for event injection.'" C-m
 
 # Attach to the session
 tmux attach-session -t $SESSION

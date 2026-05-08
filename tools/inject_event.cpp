@@ -10,7 +10,7 @@ static void print_usage(const char* prog) {
               << " --node <daemon_id> --target <target_id>"
               << " [--event <type>] [--verdict <severity>] [--tag <str>]\n"
               << "  --node     Local daemon to command via IPC (e.g., CHARLIE)\n"
-              << "  --target   Target node ID for threat consensus (e.g., ALPHA)\n"
+              << "  --target   Target node ID for consensus (e.g., ALPHA)\n"
               << "  --event    lateral_movement | privilege_escalation | entropy_spike"
               << " (default: lateral_movement)\n"
               << "  --verdict  THREAT | CRITICAL | ANOMALY (default: THREAT)\n"

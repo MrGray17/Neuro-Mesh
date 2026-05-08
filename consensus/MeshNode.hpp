@@ -11,7 +11,7 @@
 #include "consensus/PBFT.hpp"
 #include "crypto/CryptoCore.hpp"
 #include "common/StateJournal.hpp"
-#include "jailer/SystemJailer.hpp"
+#include "enforcer/PolicyEnforcer.hpp"
 
 namespace neuro_mesh {
 
@@ -36,13 +36,13 @@ public:
 
     // Constructor: starts with n=1 (self), scales up as peers are discovered.
     MeshNode(const std::string& node_id,
-             SystemJailer* jailer, MitigationEngine* mitigation,
+             PolicyEnforcer* enforcer, MitigationEngine* mitigation,
              TelemetryBridge* bridge = nullptr);
     ~MeshNode();
 
     void start();
     void stop();
-    void initiate_threat_consensus(const std::string& target_id, const std::string& evidence_json);
+    void initiate_consensus(const std::string& target_id, const std::string& evidence_json);
 
     int tcp_port() const { return m_tcp_port; }
     int peer_count() const;
@@ -94,7 +94,7 @@ private:
     std::unordered_map<std::string, PeerInfo> m_peers;
 
     // === Dependencies ===
-    SystemJailer* m_jailer;
+    PolicyEnforcer* m_enforcer;
     MitigationEngine* m_mitigation;
     TelemetryBridge* m_bridge;
     StateJournal m_journal;

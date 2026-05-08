@@ -1,4 +1,4 @@
-#include "jailer/SystemJailer.hpp"
+#include "enforcer/PolicyEnforcer.hpp"
 #include <iostream>
 #include <cstring>
 #include <sys/wait.h>
@@ -14,7 +14,7 @@ namespace neuro_mesh {
 // Static backend probe — cached once per process, immune to instance corruption
 // ---------------------------------------------------------------------------
 
-EnforcementBackend SystemJailer::available_backends() {
+EnforcementBackend PolicyEnforcer::available_backends() {
     static EnforcementBackend s_backends = []() {
         EnforcementBackend b = EnforcementBackend::NONE;
 
@@ -35,16 +35,16 @@ EnforcementBackend SystemJailer::available_backends() {
 // Construction
 // ---------------------------------------------------------------------------
 
-SystemJailer::SystemJailer() {
+PolicyEnforcer::PolicyEnforcer() {
     probe_backends();
 }
 
-SystemJailer::~SystemJailer() = default;
+PolicyEnforcer::~PolicyEnforcer() = default;
 
-void SystemJailer::probe_backends() {
+void PolicyEnforcer::probe_backends() {
     EnforcementBackend backends = available_backends();
 
-    std::cout << "[INIT] SystemJailer: Enforcement backends probed. Available: ";
+    std::cout << "[INIT] PolicyEnforcer: Enforcement backends probed. Available: ";
     if (backends == EnforcementBackend::NONE) {
         std::cout << "NONE (insufficient privileges — run as root)";
     } else {
@@ -60,21 +60,21 @@ void SystemJailer::probe_backends() {
 // IP validation
 // ---------------------------------------------------------------------------
 
-bool SystemJailer::is_valid_ipv4(const std::string& ip) {
+bool PolicyEnforcer::is_valid_ipv4(const std::string& ip) {
     struct in_addr addr;
     return inet_aton(ip.c_str(), &addr) != 0;
 }
 
-bool SystemJailer::is_valid_ipv6(const std::string& ip) {
+bool PolicyEnforcer::is_valid_ipv6(const std::string& ip) {
     struct in6_addr addr;
     return inet_pton(AF_INET6, ip.c_str(), &addr) == 1;
 }
 
-bool SystemJailer::is_valid_ip(const std::string& ip) {
+bool PolicyEnforcer::is_valid_ip(const std::string& ip) {
     return is_valid_ipv4(ip) || is_valid_ipv6(ip);
 }
 
-bool SystemJailer::is_loopback(const std::string& ip) {
+bool PolicyEnforcer::is_loopback(const std::string& ip) {
     if (!is_valid_ipv4(ip)) return false;
     struct in_addr addr;
     inet_aton(ip.c_str(), &addr);
@@ -85,7 +85,7 @@ bool SystemJailer::is_loopback(const std::string& ip) {
 // Fork+exec helpers
 // ---------------------------------------------------------------------------
 
-bool SystemJailer::fork_exec_wait(const char* path, const char* const* argv) {
+bool PolicyEnforcer::fork_exec_wait(const char* path, const char* const* argv) {
     pid_t pid = fork();
     if (pid == -1) return false;
 
@@ -101,7 +101,7 @@ bool SystemJailer::fork_exec_wait(const char* path, const char* const* argv) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-std::pair<bool, std::string> SystemJailer::fork_exec_capture(const char* path, const char* const* argv) {
+std::pair<bool, std::string> PolicyEnforcer::fork_exec_capture(const char* path, const char* const* argv) {
     int pipefd[2];
     if (pipe(pipefd) == -1) return {false, "pipe() failed"};
 
@@ -139,7 +139,7 @@ std::pair<bool, std::string> SystemJailer::fork_exec_capture(const char* path, c
 // Backend initialization
 // ---------------------------------------------------------------------------
 
-bool SystemJailer::ensure_ebpf_map() {
+bool PolicyEnforcer::ensure_ebpf_map() {
     const char* map_path = "/sys/fs/bpf/neuro_mesh/neuro_blocklist";
 
     int fd = bpf_obj_get(map_path);
@@ -163,7 +163,7 @@ bool SystemJailer::ensure_ebpf_map() {
     return true;
 }
 
-bool SystemJailer::ensure_nftables_table() {
+bool PolicyEnforcer::ensure_nftables_table() {
     if (access("/usr/sbin/nft", X_OK) != 0) return false;
 
     const char* add_table[] = { "/usr/sbin/nft", "add", "table", "ip", "neuro_mesh", nullptr };
@@ -180,27 +180,27 @@ bool SystemJailer::ensure_nftables_table() {
 // Safe list
 // ---------------------------------------------------------------------------
 
-bool SystemJailer::is_safe(const std::string& target_id) const {
+bool PolicyEnforcer::is_safe(const std::string& target_id) const {
     return m_safe_list.find(target_id) != m_safe_list.end();
 }
 
-void SystemJailer::add_safe_node(const std::string& node_id) {
+void PolicyEnforcer::add_safe_node(const std::string& node_id) {
     std::lock_guard<std::mutex> lock(m_mtx);
     m_safe_list.insert(node_id);
-    std::cout << "[JAILER] Safe-listed node: " << node_id << std::endl;
+    std::cout << "[ENFORCER] Safe-listed node: " << node_id << std::endl;
 }
 
 // ---------------------------------------------------------------------------
 // Peer IP mapping (thread-safe)
 // ---------------------------------------------------------------------------
 
-void SystemJailer::register_peer_ip(const std::string& node_id, const std::string& ip) {
+void PolicyEnforcer::register_peer_ip(const std::string& node_id, const std::string& ip) {
     if (node_id.empty() || !is_valid_ip(ip)) return;
     std::lock_guard<std::shared_mutex> lock(m_ip_map_mtx);
     m_peer_ip_map.insert_or_assign(node_id, ip);
 }
 
-std::string SystemJailer::resolve_target(const std::string& target) const {
+std::string PolicyEnforcer::resolve_target(const std::string& target) const {
     if (is_valid_ip(target)) return target;
 
     std::shared_lock<std::shared_mutex> lock(m_ip_map_mtx);
@@ -214,7 +214,7 @@ std::string SystemJailer::resolve_target(const std::string& target) const {
 // Enforcement backends
 // ---------------------------------------------------------------------------
 
-bool SystemJailer::apply_ebpf_drop(const std::string& ip) {
+bool PolicyEnforcer::apply_ebpf_drop(const std::string& ip) {
     if (!is_valid_ipv4(ip)) return false;
 
     const char* map_path = "/sys/fs/bpf/neuro_mesh/neuro_blocklist";
@@ -230,7 +230,7 @@ bool SystemJailer::apply_ebpf_drop(const std::string& ip) {
     return ret == 0;
 }
 
-bool SystemJailer::remove_ebpf_drop(const std::string& ip) {
+bool PolicyEnforcer::remove_ebpf_drop(const std::string& ip) {
     if (!is_valid_ipv4(ip)) return false;
     const char* map_path = "/sys/fs/bpf/neuro_mesh/neuro_blocklist";
     int map_fd = bpf_obj_get(map_path);
@@ -243,7 +243,7 @@ bool SystemJailer::remove_ebpf_drop(const std::string& ip) {
     return ret == 0;
 }
 
-bool SystemJailer::apply_nftables_drop(const std::string& ip) {
+bool PolicyEnforcer::apply_nftables_drop(const std::string& ip) {
     const char* args[] = {
         "/usr/sbin/nft",
         "add", "rule",
@@ -255,7 +255,7 @@ bool SystemJailer::apply_nftables_drop(const std::string& ip) {
     return fork_exec_wait("/usr/sbin/nft", args);
 }
 
-bool SystemJailer::remove_nftables_drop(const std::string& ip) {
+bool PolicyEnforcer::remove_nftables_drop(const std::string& ip) {
     const char* args[] = {
         "/usr/sbin/nft",
         "delete", "rule",
@@ -267,7 +267,7 @@ bool SystemJailer::remove_nftables_drop(const std::string& ip) {
     return fork_exec_wait("/usr/sbin/nft", args);
 }
 
-bool SystemJailer::apply_iptables_drop(const std::string& ip) {
+bool PolicyEnforcer::apply_iptables_drop(const std::string& ip) {
     const char* args[] = {
         "/usr/sbin/iptables",
         "-A", "INPUT",
@@ -278,7 +278,7 @@ bool SystemJailer::apply_iptables_drop(const std::string& ip) {
     return fork_exec_wait("/usr/sbin/iptables", args);
 }
 
-bool SystemJailer::remove_iptables_drop(const std::string& ip) {
+bool PolicyEnforcer::remove_iptables_drop(const std::string& ip) {
     const char* args[] = {
         "/usr/sbin/iptables",
         "-D", "INPUT",
@@ -293,7 +293,8 @@ bool SystemJailer::remove_iptables_drop(const std::string& ip) {
 // Raw IP blocking (no node-ID resolution) — used by MitigationEngine
 // ---------------------------------------------------------------------------
 
-bool SystemJailer::block_ip_address(const std::string& ip) {
+// D3FEND: D3-NTF (Network Traffic Filtering) — cascade through eBPF → nftables → iptables drop rules
+	bool PolicyEnforcer::block_ip_address(const std::string& ip) {
     if (!is_valid_ip(ip)) {
         std::cerr << "[ENFORCER] Invalid IP address: " << ip << std::endl;
         return false;
@@ -336,7 +337,7 @@ bool SystemJailer::block_ip_address(const std::string& ip) {
 // Core isolation pipeline
 // ---------------------------------------------------------------------------
 
-void SystemJailer::isolate_target(const std::string& target) {
+void PolicyEnforcer::isolate_target(const std::string& target) {
     std::lock_guard<std::mutex> lock(m_mtx);
 
     if (m_isolated_nodes.find(target) != m_isolated_nodes.end()) return;
@@ -399,7 +400,7 @@ void SystemJailer::isolate_target(const std::string& target) {
 // Release
 // ---------------------------------------------------------------------------
 
-void SystemJailer::release_target(const std::string& target) {
+void PolicyEnforcer::release_target(const std::string& target) {
     std::lock_guard<std::mutex> lock(m_mtx);
 
     if (m_isolated_nodes.erase(target) == 0) return;
@@ -416,31 +417,32 @@ void SystemJailer::release_target(const std::string& target) {
 }
 
 // ---------------------------------------------------------------------------
-// Process imprisonment
+// Process suspend_processment
 // ---------------------------------------------------------------------------
 
-void SystemJailer::imprison(uint32_t pid) {
+// D3FEND: D3-PT (Process Termination) — SIGSTOP halts compromised process for forensic triage
+void PolicyEnforcer::suspend_process(uint32_t pid) {
     std::lock_guard<std::mutex> lock(m_mtx);
-    if (m_jailed_pids.find(pid) != m_jailed_pids.end()) return;
+    if (m_suspended_pids.find(pid) != m_suspended_pids.end()) return;
 
-    m_jailed_pids.insert(pid);
-    std::cout << "[JAILER] Process " << pid << " imprisoned." << std::endl;
+    m_suspended_pids.insert(pid);
+    std::cout << "[ENFORCER] Process " << pid << " suspend_processed." << std::endl;
 
     if (kill(static_cast<pid_t>(pid), SIGSTOP) == 0) {
-        std::cout << "[JAILER] SIGSTOP delivered to PID " << pid << std::endl;
+        std::cout << "[ENFORCER] SIGSTOP delivered to PID " << pid << std::endl;
     } else {
-        std::cerr << "[JAILER] Failed to deliver SIGSTOP to PID " << pid << std::endl;
+        std::cerr << "[ENFORCER] Failed to deliver SIGSTOP to PID " << pid << std::endl;
     }
 }
 
-void SystemJailer::eradicate_threats() {
+void PolicyEnforcer::reset_enforcement() {
     std::lock_guard<std::mutex> lock(m_mtx);
-    std::cout << "[JAILER] Eradicating " << m_jailed_pids.size() << " jailed processes." << std::endl;
-    for (auto pid : m_jailed_pids) {
+    std::cout << "[ENFORCER] Eradicating " << m_suspended_pids.size() << " jailed processes." << std::endl;
+    for (auto pid : m_suspended_pids) {
         kill(static_cast<pid_t>(pid), SIGCONT);
         kill(static_cast<pid_t>(pid), SIGTERM);
     }
-    m_jailed_pids.clear();
+    m_suspended_pids.clear();
 }
 
 } // namespace neuro_mesh

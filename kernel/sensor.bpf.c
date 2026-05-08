@@ -60,12 +60,12 @@ int trace_execve(void *ctx) {
     event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
     if (!event) return 0;
 
-    // WHY: Cryptographically secure memory sanitization. Prevents uninitialized 
+    // WHY: Cryptographically secure memory sanitization. Prevents uninitialized
     // kernel stack memory from bleeding into user-space via the payload array.
     __builtin_memset(event, 0, sizeof(struct KernelEvent));
 
     event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->event_type = 1; 
+    event->event_type = 1;
 
     // WHY: Fail fast if the process is exiting or context is invalid.
     if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
@@ -75,9 +75,90 @@ int trace_execve(void *ctx) {
 
     // Safely read the first argument (binary path) into payload
     const char *pathname = NULL;
-    bpf_core_read(&pathname, sizeof(pathname), (void *)((char *)ctx + 16)); 
+    bpf_core_read(&pathname, sizeof(pathname), (void *)((char *)ctx + 16));
     if (pathname) {
         bpf_probe_read_user_str(&event->payload, sizeof(event->payload), pathname);
+    }
+
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+// Network sendto tracepoint args layout (x86_64):
+//   offset 16: fd (u32)      | offset 24: buff (u64 ptr)
+//   offset 32: len (u64)     | offset 40: flags (u32)
+//   offset 48: addr (u64 ptr) | offset 56: addr_len (u32)
+SEC("tracepoint/syscalls/sys_enter_sendto")
+int trace_sendto(void *ctx) {
+    struct KernelEvent *event;
+
+    event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
+    if (!event) return 0;
+
+    __builtin_memset(event, 0, sizeof(struct KernelEvent));
+
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->event_type = 2;  // network send
+
+    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
+        bpf_ringbuf_discard(event, 0);
+        return 0;
+    }
+
+    // Read the data buffer pointer and length
+    __u64 len = 0;
+    bpf_core_read(&len, sizeof(len), (void *)((char *)ctx + 32));
+    if (len > 0 && len <= sizeof(event->payload)) {
+        const char *buff = NULL;
+        bpf_core_read(&buff, sizeof(buff), (void *)((char *)ctx + 24));
+        if (buff) {
+            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), buff);
+        }
+    } else {
+        // Truncated read for large buffers — still captures entropy sample
+        const char *buff = NULL;
+        bpf_core_read(&buff, sizeof(buff), (void *)((char *)ctx + 24));
+        if (buff) {
+            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), buff);
+        }
+    }
+
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+// Network connect tracepoint args layout (x86_64):
+//   offset 16: fd (u32)   | offset 24: addr (u64 ptr)
+//   offset 32: addr_len (u32)
+SEC("tracepoint/syscalls/sys_enter_connect")
+int trace_connect(void *ctx) {
+    struct KernelEvent *event;
+
+    event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
+    if (!event) return 0;
+
+    __builtin_memset(event, 0, sizeof(struct KernelEvent));
+
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->event_type = 3;  // network connect
+
+    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
+        bpf_ringbuf_discard(event, 0);
+        return 0;
+    }
+
+    // Read sockaddr pointer and try to capture target info
+    __u32 addr_len = 0;
+    bpf_core_read(&addr_len, sizeof(addr_len), (void *)((char *)ctx + 32));
+    const char *addr_ptr = NULL;
+    bpf_core_read(&addr_ptr, sizeof(addr_ptr), (void *)((char *)ctx + 24));
+    if (addr_ptr && addr_len > 0 && addr_len <= sizeof(event->payload)) {
+        bpf_probe_read_user_str(&event->payload, sizeof(event->payload), addr_ptr);
+    } else if (addr_ptr && addr_len > sizeof(event->payload)) {
+        bpf_probe_read_user_str(&event->payload, sizeof(event->payload), addr_ptr);
+    } else {
+        // Fallback: write numeric info so ONNX has something to chew on
+        __builtin_memcpy(event->payload, "NET_CONNECT", 11);
     }
 
     bpf_ringbuf_submit(event, 0);

@@ -11,7 +11,7 @@ public:
     static void update_status(const std::string& node_id, const std::string& status, const std::string& target = "NONE") {
         // ARCHITECTURAL FIX: Cross-Process POSIX File Locking
         // We command the OS to grant an exclusive lock on the file descriptor 
-        // to prevent data corruption when 5 sovereign processes write simultaneously.
+        // to prevent data corruption when 5 node processes write simultaneously.
         
         int fd = open("web/mesh_status.json", O_WRONLY | O_CREAT | O_APPEND, 0666);
         if (fd == -1) {

@@ -1,5 +1,5 @@
-#include "jailer/MitigationEngine.hpp"
-#include "jailer/SystemJailer.hpp"
+#include "enforcer/MitigationEngine.hpp"
+#include "enforcer/PolicyEnforcer.hpp"
 #include "crypto/CryptoCore.hpp"
 
 #include <iostream>
@@ -18,8 +18,8 @@ namespace neuro_mesh {
 // Construction
 // =============================================================================
 
-MitigationEngine::MitigationEngine(SystemJailer* jailer)
-    : m_jailer(jailer)
+MitigationEngine::MitigationEngine(PolicyEnforcer* enforcer)
+    : m_enforcer(enforcer)
 {}
 
 // =============================================================================
@@ -140,15 +140,15 @@ bool MitigationEngine::terminate_process(uint32_t pid) {
 }
 
 // =============================================================================
-// IP blocking — delegates to SystemJailer enforcement cascade
+// IP blocking — delegates to PolicyEnforcer enforcement cascade
 // =============================================================================
 
 bool MitigationEngine::block_ip_address(const std::string& ip) {
-    if (!m_jailer) {
-        std::cerr << "[ENFORCEMENT] No jailer available to block IP " << ip << std::endl;
+    if (!m_enforcer) {
+        std::cerr << "[ENFORCEMENT] No enforcer available to block IP " << ip << std::endl;
         return false;
     }
-    return m_jailer->block_ip_address(ip);
+    return m_enforcer->block_ip_address(ip);
 }
 
 // =============================================================================
@@ -181,6 +181,8 @@ void MitigationEngine::log_enforcement(const std::string& action,
 // Core execution pipeline — called from MeshNode at PBFT EXECUTED stage
 // =============================================================================
 
+// D3FEND: Orchestrates D3-PT (Process Termination) and D3-NTF (Network Traffic Filtering)
+// based on PBFT consensus verdict. Parses evidence_json for pid/src_ip to dispatch.
 bool MitigationEngine::execute_response(const std::string& evidence_json,
                                          const std::string& target_id) {
     // Compute cryptographic hash of the consensus evidence for audit trail
@@ -241,10 +243,10 @@ bool MitigationEngine::execute_response(const std::string& evidence_json,
         }
     }
 
-    // ---- Node-level isolation (existing SystemJailer path) ----
+    // ---- Node-level isolation (existing PolicyEnforcer path) ----
     // Always isolate the target node at EXECUTED stage
-    if (m_jailer && !target_id.empty()) {
-        m_jailer->isolate_target(target_id);
+    if (m_enforcer && !target_id.empty()) {
+        m_enforcer->isolate_target(target_id);
         any_action = true;
     }
 

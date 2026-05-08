@@ -1,35 +1,34 @@
-#include "SystemJailer.hpp"
+#include "PolicyEnforcer.hpp"
 #include <iostream>
 #include <cstdlib>
 
 namespace neuro_mesh {
 
-SystemJailer::SystemJailer() {
-    std::cout << "[INIT] SystemJailer module loaded. Ready to enforce Layer 3 Deep Packet Inspection." << std::endl;
+PolicyEnforcer::PolicyEnforcer() {
+    std::cout << "[INIT] PolicyEnforcer module loaded. Ready to enforce Layer 3 packet inspection." << std::endl;
 }
 
-SystemJailer::~SystemJailer() = default;
+PolicyEnforcer::~PolicyEnforcer() = default;
 
-void SystemJailer::isolate_target(const std::string& target_id) {
+void PolicyEnforcer::isolate_target(const std::string& target_id) {
     std::lock_guard<std::mutex> lock(m_mtx);
-    
+
     if (m_isolated_nodes.find(target_id) != m_isolated_nodes.end()) {
-        return; 
+        return;
     }
 
-    std::cout << "[DEFENSE] SystemJailer activated. Neutralizing target: " << target_id << std::endl;
-    
-    // ARCHITECTURAL FIX: OS-Level Deep Packet Inspection
-    // We command the Linux kernel to inspect incoming UDP traffic on port 9999.
-    // If a packet contains the exact Sovereign Identity (e.g., "|NODE_5|"), it is destroyed before reaching user-space.
+    std::cout << "[ENFORCER] PolicyEnforcer activated. Isolating target: " << target_id << std::endl;
+
+    // OS-Level Deep Packet Inspection via iptables string matching.
+    // Packets containing the target node ID are dropped before reaching user-space.
     std::string cmd = "sudo iptables -A INPUT -p udp --dport 9999 -m string --algo bm --string \"|" + target_id + "|\" -j DROP";
     int result = std::system(cmd.c_str());
 
     if (result == 0) {
         m_isolated_nodes.insert(target_id);
-        std::cout << "[DEFENSE] Target " << target_id << " successfully isolated at the OS level." << std::endl;
+        std::cout << "[ENFORCER] Target " << target_id << " successfully isolated at the OS level." << std::endl;
     } else {
-        std::cerr << "[FATAL] Kernel execution failed. Target remains active." << std::endl;
+        std::cerr << "[ERROR] Kernel execution failed. Target remains active." << std::endl;
     }
 }
 

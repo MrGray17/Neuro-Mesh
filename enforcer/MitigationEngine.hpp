@@ -2,14 +2,15 @@
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <cstdint>
 
 namespace neuro_mesh {
 
-class SystemJailer;
+class PolicyEnforcer;
 
 class MitigationEngine {
 public:
-    explicit MitigationEngine(SystemJailer* jailer);
+    explicit MitigationEngine(PolicyEnforcer* jailer);
 
     // Consume a PBFT EXECUTED verdict and execute the appropriate response.
     // Parses evidence_json for event type, PID, and source IP.
@@ -27,13 +28,13 @@ private:
     // Validate PID before sending signal
     bool validate_pid(uint32_t pid) const;
 
-    // Block an IP through the enforcement cascade (delegates to SystemJailer)
+    // Block an IP through the enforcement cascade (delegates to PolicyEnforcer)
     bool block_ip_address(const std::string& ip);
 
     // Log enforcement action with timestamp and cryptographic consensus hash
     void log_enforcement(const std::string& action, const std::string& detail, const std::string& consensus_hash);
 
-    SystemJailer* m_jailer;
+    PolicyEnforcer* m_enforcer;
 };
 
 } // namespace neuro_mesh

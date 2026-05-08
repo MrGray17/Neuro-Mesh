@@ -22,10 +22,10 @@ inline bool operator&(EnforcementBackend a, EnforcementBackend b) {
     return (static_cast<uint8_t>(a) & static_cast<uint8_t>(b)) != 0;
 }
 
-class SystemJailer {
+class PolicyEnforcer {
 public:
-    SystemJailer();
-    ~SystemJailer();
+    PolicyEnforcer();
+    ~PolicyEnforcer();
 
     void register_peer_ip(const std::string& node_id, const std::string& ip);
     std::string resolve_target(const std::string& target) const;
@@ -39,8 +39,8 @@ public:
     // Returns true if at least one backend successfully applied the drop rule.
     bool block_ip_address(const std::string& ip);
 
-    void imprison(uint32_t pid);
-    void eradicate_threats();
+    void suspend_process(uint32_t pid);
+    void reset_enforcement();
     void release_target(const std::string& target);
     void add_safe_node(const std::string& node_id);
 
@@ -78,7 +78,7 @@ private:
     std::mutex m_mtx;
     std::set<std::string> m_isolated_nodes;
     std::set<std::string> m_safe_list;
-    std::set<uint32_t> m_jailed_pids;
+    std::set<uint32_t> m_suspended_pids;
 
     mutable std::shared_mutex m_ip_map_mtx;
     std::unordered_map<std::string, std::string> m_peer_ip_map;
