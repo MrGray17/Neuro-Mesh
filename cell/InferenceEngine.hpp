@@ -26,6 +26,16 @@ public:
         return m_last_score.load(std::memory_order_relaxed) < m_threshold ? "CRITICAL" : "NONE";
     }
 
+    // Decay the anomaly score toward 0 (normal) by `factor` each call.
+    // Called from heartbeat loop when no eBPF events arrive, preventing
+    // sticky CRITICAL state after the anomalous traffic stops.
+    void decay(float factor = 0.5f) noexcept {
+        float current = m_last_score.load(std::memory_order_relaxed);
+        if (current < 0.0f) {
+            m_last_score.store(current * (1.0f - factor), std::memory_order_relaxed);
+        }
+    }
+
 private:
     // Compute Shannon entropy without heap allocation (stack-based freq array)
     static double compute_entropy(const char* data, size_t len) noexcept;

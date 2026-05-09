@@ -493,6 +493,8 @@ const state = {
   specHistory: [],
   // Operator context — null = follow self node; string = viewing a specific peer
   selectedNode: null,
+  // Alert cooldown — tracks when entropy last spiked so the UI can auto-clear
+  lastAlertTime: 0,
 };
 
 // ---- DOM refs ----
@@ -913,14 +915,16 @@ function resizeSpectro() {
 }
 
 function pushSpectrogram(value) {
-  // Generate frequency-like bars from entropy value
+  // Power-law scaling: low values (0.001 idle) become ~0.13, spikes stay near 1.0.
+  // Scaling is used ONLY for bar height/visibility — colors use the raw value.
+  const scaled = Math.pow(value, 0.3);
   const bars = [];
   for (let i = 0; i < SPEC_BARS; i++) {
     const noise = (Math.sin(i * 0.3 + Date.now() * 0.001) * 0.15);
-    const base = value * (0.3 + 0.7 * (1 - Math.abs(i - SPEC_BARS/2) / (SPEC_BARS/2)));
+    const base = scaled * (0.3 + 0.7 * (1 - Math.abs(i - SPEC_BARS/2) / (SPEC_BARS/2)));
     bars.push(Math.max(0, Math.min(1, base + noise)));
   }
-  state.specHistory.push(bars);
+  state.specHistory.push({bars, raw: value});
   // Cap history
   const maxRows = Math.floor(specH / 3.5) || 60;
   while (state.specHistory.length > maxRows) state.specHistory.shift();
@@ -938,15 +942,18 @@ function drawSpectrogram() {
   const rows = state.specHistory.length;
 
   for (let row = 0; row < rows; row++) {
-    const bars = state.specHistory[rows - 1 - row]; // newest at bottom
+    const entry = state.specHistory[rows - 1 - row]; // newest at bottom
+    const {bars, raw} = (typeof entry === 'object' && entry.bars) ? entry : {bars: entry, raw: 0.5};
     const y = specH - (row + 1) * (barH + gap);
 
     for (let i = 0; i < SPEC_BARS; i++) {
       const val = bars[i];
+      // Color banding uses RAW entropy (before power-law scaling).
+      // Scaled val still drives alpha for brightness/visibility at low levels.
       let color;
-      if (val > 0.85)      color = `rgba(255,0,64,${0.4 + val * 0.6})`;
-      else if (val > 0.6)  color = `rgba(255,176,0,${0.3 + val * 0.5})`;
-      else                 color = `rgba(0,255,255,${0.15 + val * 0.4})`;
+      if (raw > 0.85)       color = `rgba(255,0,64,${0.4 + val * 0.6})`;
+      else if (raw > 0.5)   color = `rgba(255,176,0,${0.3 + val * 0.5})`;
+      else                  color = `rgba(0,255,255,${0.3 + val * 0.55})`;
 
       ctx.fillStyle = color;
       ctx.fillRect(i * barW, y, barW - gap, barH);
@@ -1094,6 +1101,7 @@ function routeMessage(data) {
         state.entropy = parseFloat(data.value) || 0;
         if (state.entropy > 0.85) {
           state.alertFlag = true;
+          state.lastAlertTime = Date.now();
           dom.meshDot.classList.add('danger');
         }
         pushSpectrogram(state.entropy);
@@ -1157,13 +1165,25 @@ function routeMessage(data) {
           state.entropy = parseFloat(data.entropy) || 0;
           pushSpectrogram(state.entropy);
         }
+        // Alert triggers
         if (data.threat === 'CRITICAL') {
           state.alertFlag = true;
+          state.lastAlertTime = Date.now();
           dom.meshDot.classList.add('danger');
         }
         if (data.status === 'SELF_ISOLATED' || data.KERNEL_ANOMALY === 'TRUE') {
           state.alertFlag = true;
+          state.lastAlertTime = Date.now();
           dom.meshDot.classList.add('danger');
+        }
+        // Cooldown: clear alert when entropy stays low for 10s
+        if (state.alertFlag && state.entropy < 0.2 &&
+            data.threat !== 'CRITICAL' && data.status !== 'SELF_ISOLATED' &&
+            data.KERNEL_ANOMALY !== 'TRUE') {
+          if (Date.now() - state.lastAlertTime > 10000) {
+            state.alertFlag = false;
+            dom.meshDot.classList.remove('danger');
+          }
         }
       }
       // Global mesh topology — always updated regardless of selected node

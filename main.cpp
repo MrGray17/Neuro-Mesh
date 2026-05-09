@@ -9,12 +9,15 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/sysinfo.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include "enforcer/PolicyEnforcer.hpp"
 #include "enforcer/MitigationEngine.hpp"
 #include "consensus/MeshNode.hpp"
 #include "telemetry/TelemetryBridge.hpp"
 #include "cell/InferenceEngine.hpp"
+#include "cell/NodeAgent.hpp"
 #include "common/UniqueFD.hpp"
 
 using namespace neuro_mesh;
@@ -24,6 +27,37 @@ std::atomic<bool> global_running{true};
 // Demo simulation mode: when set, heartbeat injects simulated telemetry for 10s.
 // Set by IPC INJECT, consumed by heartbeat_loop.
 std::atomic<int64_t> g_demo_until_us{0};
+
+// Read container memory from cgroups (v2 or v1), falling back to sysinfo.
+// sysinfo() reports host total RAM inside containers — cgroups give the true footprint.
+static long cgroup_memory_mb() {
+    // cgroup v2
+    FILE* f = std::fopen("/sys/fs/cgroup/memory.current", "r");
+    if (f) {
+        long bytes = 0;
+        if (std::fscanf(f, "%ld", &bytes) == 1) {
+            std::fclose(f);
+            return bytes / (1024 * 1024);
+        }
+        std::fclose(f);
+    }
+    // cgroup v1
+    f = std::fopen("/sys/fs/cgroup/memory/memory.usage_in_bytes", "r");
+    if (f) {
+        long bytes = 0;
+        if (std::fscanf(f, "%ld", &bytes) == 1) {
+            std::fclose(f);
+            return bytes / (1024 * 1024);
+        }
+        std::fclose(f);
+    }
+    // Fallback: host /proc/meminfo via sysinfo
+    struct sysinfo info;
+    if (sysinfo(&info) == 0) {
+        return (info.totalram - info.freeram) / (1024 * 1024);
+    }
+    return 0;
+}
 
 // Read /proc/net/dev and compute a network activity score (0.0–1.0)
 // based on the byte-rate delta between calls. Spikes during traffic floods.
@@ -67,6 +101,16 @@ static float network_entropy_score() {
     return std::min(1.0f, byte_rate / kMaxRate);
 }
 
+// Convert raw ONNX IsolationForest decision score to a 0.0–1.0 entropy value.
+// Score range: approx -0.2 (anomalous) to +0.2 (normal), threshold at -0.05.
+static float onnx_to_entropy(float score) {
+    constexpr float kThreshold = -0.05f;
+    constexpr float kMinScore = -0.2f;
+    if (score >= kThreshold) return 0.0f;
+    float t = (kThreshold - score) / (kThreshold - kMinScore);
+    return std::min(1.0f, t);
+}
+
 void signal_handler(int signum) {
     std::cout << "\n[SYS] Interrupt signal (" << signum << ") received. Initiating shutdown..." << std::endl;
     global_running = false;
@@ -77,8 +121,16 @@ void signal_handler(int signum) {
 // =============================================================================
 
 void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
-                    ai::InferenceEngine& inference, const std::string& node_id) {
+                    ai::InferenceEngine& inference, core::NodeAgent* ebpf,
+                    const std::string& node_id) {
     int seq = 0;
+    pid_t my_pid = getpid();  // filter eBPF events from our own traffic
+    // UDP socket for sending telemetry to control_server (127.0.0.1:9998)
+    int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in c2_addr{};
+    c2_addr.sin_family = AF_INET;
+    c2_addr.sin_port = htons(9998);
+    inet_pton(AF_INET, "127.0.0.1", &c2_addr.sin_addr);
     while (global_running) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
@@ -95,18 +147,36 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
         double loads[1] = {0.0};
         double cpu = (getloadavg(loads, 1) != -1) ? loads[0] : 0.0;
 
-        // Real RAM usage in MB
-        struct sysinfo mem_info;
-        long mem_mb = 0;
-        if (sysinfo(&mem_info) == 0) {
-            mem_mb = (mem_info.totalram - mem_info.freeram) / (1024 * 1024);
+        // Real RAM usage in MB (cgroup-aware for containers)
+        long mem_mb = cgroup_memory_mb();
+
+        // ---- eBPF sensor: drain ring buffer, run ONNX inference on kernel events ----
+        if (ebpf && ebpf->is_operational()) {
+            auto events = ebpf->poll_events();
+            if (events.empty()) {
+                // No new kernel events — decay the anomaly score toward normal.
+                // Prevents sticky CRITICAL state after anomalous traffic ceases.
+                inference.decay(0.3f);
+            } else {
+                for (const auto& ev : events) {
+                    // Skip events from our own PID (telemetry, P2P discovery)
+                    if (static_cast<pid_t>(ev.pid) == my_pid) continue;
+                    inference.analyze(std::string(ev.comm), std::string(ev.payload));
+                }
+            }
         }
 
-        float onnx_score = inference.last_score();
-        float net_score   = network_entropy_score();
-        // Blend: take the stronger signal so the spectrogram stays alive
-        float entropy = std::max(onnx_score, net_score);
-        const char* threat = inference.last_threat();
+        float onnx_score   = inference.last_score();
+        float onnx_entropy = onnx_to_entropy(onnx_score);
+        float net_score    = network_entropy_score();
+        float entropy = std::max(onnx_entropy, net_score);
+
+        // Threat determined by blended entropy, not sticky ONNX score alone.
+        // ONNX anomalies feed into entropy via onnx_to_entropy().
+        const char* threat;
+        if (entropy > 0.85f)      threat = "CRITICAL";
+        else if (entropy > 0.6f)  threat = "ALERT";
+        else                      threat = "NONE";
 
         // Demo simulation mode: override vitals for 10s after an IPC alert
         if (g_demo_until_us.load(std::memory_order_relaxed) > 0) {
@@ -152,8 +222,31 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
         if (result.is_err()) {
             std::cerr << "[HEARTBEAT] Bridge push failed: " << result.error() << std::endl;
         }
+
+        // Also send via UDP to control_server for cross-node aggregation
+        {
+            const char* k_anomaly = (strcmp(threat, "CRITICAL") == 0) ? "TRUE" : "FALSE";
+            const char* status   = (strcmp(threat, "CRITICAL") == 0) ? "SELF_ISOLATED" : "STABLE";
+            std::string mitre_arr;
+            if (strcmp(threat, "CRITICAL") == 0 || strcmp(threat, "ALERT") == 0)
+                mitre_arr = "[\"T1021\",\"T1571\",\"T1059\"]";
+            else if (entropy > 0.6f)
+                mitre_arr = "[\"T1571\"]";
+            else
+                mitre_arr = "[]";
+            std::string telem = "TELEMETRY:{\"ID\":\"" + node_id
+                + "\",\"RAM_MB\":" + std::to_string(mem_mb)
+                + ",\"CPU_LOAD\":" + std::to_string(cpu)
+                + ",\"entropy\":" + std::to_string(entropy)
+                + ",\"KERNEL_ANOMALY\":\"" + k_anomaly + "\""
+                + ",\"STATUS\":\"" + status + "\""
+                + ",\"mitre_attack\":" + mitre_arr + "}";
+            sendto(udp_sock, telem.c_str(), telem.length(), 0,
+                   (struct sockaddr*)&c2_addr, sizeof(c2_addr));
+        }
         ++seq;
     }
+    close(udp_sock);
 }
 
 // =============================================================================
@@ -295,11 +388,22 @@ int main(int argc, char* argv[]) {
         std::cerr << "[BOOT] Continuing without ML inference — using fallback." << std::endl;
     }
 
+    // ---- Stage 4.5: eBPF sensor (kernel tracepoints → ONNX inference) ----
+    std::unique_ptr<core::NodeAgent> ebpf;
+    auto ebpf_result = core::NodeAgent::create(node_id);
+    if (ebpf_result.error.empty()) {
+        ebpf = std::move(ebpf_result.agent);
+        std::cout << "[BOOT] eBPF sensor: OPERATIONAL (execve/sendto/connect probes)" << std::endl;
+    } else {
+        std::cerr << "[BOOT] eBPF sensor failed: " << ebpf_result.error
+                  << " — continuing with /proc/net/dev entropy only." << std::endl;
+    }
+
     // ---- Stage 5: Heartbeat (node vitals broadcast every 2s) ----
     std::thread heartbeat_thread;
     if (bridge.alive() && inference) {
         heartbeat_thread = std::thread(heartbeat_loop, std::ref(bridge), std::ref(mesh),
-                                       std::ref(*inference), node_id);
+                                       std::ref(*inference), ebpf.get(), node_id);
         std::cout << "[BOOT] Heartbeat pulse started (2s interval)." << std::endl;
     }
 

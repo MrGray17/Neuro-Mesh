@@ -127,6 +127,115 @@ int trace_sendto(void *ctx) {
     return 0;
 }
 
+// Network sendmsg tracepoint args layout (x86_64):
+//   offset 16: fd (u32)   | offset 24: msg (u64 ptr → struct msghdr)
+//   offset 32: flags (u32)
+SEC("tracepoint/syscalls/sys_enter_sendmsg")
+int trace_sendmsg(void *ctx) {
+    struct KernelEvent *event;
+    event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
+    if (!event) return 0;
+
+    __builtin_memset(event, 0, sizeof(struct KernelEvent));
+
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->event_type = 2;
+
+    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
+        bpf_ringbuf_discard(event, 0);
+        return 0;
+    }
+
+    // Read struct msghdr from userspace
+    struct msghdr {
+        void *msg_name;
+        __u32 msg_namelen;
+        __u32 _pad;
+        void *msg_iov;
+        __u64 msg_iovlen;
+        void *msg_control;
+        __u64 msg_controllen;
+        __u32 msg_flags;
+    } msg_hdr;
+
+    const struct msghdr *msg_ptr = NULL;
+    bpf_core_read(&msg_ptr, sizeof(msg_ptr), (void *)((char *)ctx + 24));
+    if (!msg_ptr) { bpf_ringbuf_discard(event, 0); return 0; }
+    bpf_probe_read_user(&msg_hdr, sizeof(msg_hdr), msg_ptr);
+
+    if (msg_hdr.msg_iovlen > 0 && msg_hdr.msg_iov) {
+        struct iovec {
+            void *iov_base;
+            __u64 iov_len;
+        } iov;
+        bpf_probe_read_user(&iov, sizeof(iov), msg_hdr.msg_iov);
+        __u64 len = iov.iov_len;
+        if (len > 0 && len <= sizeof(event->payload)) {
+            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), iov.iov_base);
+        } else if (len > sizeof(event->payload) && iov.iov_base) {
+            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), iov.iov_base);
+        }
+    }
+
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+// Network sendmmsg tracepoint args layout (x86_64):
+//   offset 16: fd (u32)   | offset 24: msgvec (u64 ptr → struct mmsghdr)
+//   offset 32: vlen (u32) | offset 40: flags (u32)
+SEC("tracepoint/syscalls/sys_enter_sendmmsg")
+int trace_sendmmsg(void *ctx) {
+    struct KernelEvent *event;
+    event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
+    if (!event) return 0;
+
+    __builtin_memset(event, 0, sizeof(struct KernelEvent));
+
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->event_type = 2;
+
+    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
+        bpf_ringbuf_discard(event, 0);
+        return 0;
+    }
+
+    // struct mmsghdr { struct msghdr msg_hdr; unsigned int msg_len; };
+    struct mmsghdr {
+        void *msg_name;
+        __u32 msg_namelen;
+        __u32 _pad;
+        void *msg_iov;
+        __u64 msg_iovlen;
+        void *msg_control;
+        __u64 msg_controllen;
+        __u32 msg_flags;
+        __u32 msg_len;
+    } mm;
+
+    const struct mmsghdr *mm_ptr = NULL;
+    bpf_core_read(&mm_ptr, sizeof(mm_ptr), (void *)((char *)ctx + 24));
+    if (!mm_ptr) { bpf_ringbuf_discard(event, 0); return 0; }
+    bpf_probe_read_user(&mm, sizeof(mm), mm_ptr);
+
+    if (mm.msg_iovlen > 0 && mm.msg_iov) {
+        struct iovec {
+            void *iov_base;
+            __u64 iov_len;
+        } iov;
+        bpf_probe_read_user(&iov, sizeof(iov), mm.msg_iov);
+        __u64 len = iov.iov_len;
+        if (len > 0 && len <= sizeof(event->payload)) {
+            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), iov.iov_base);
+        } else if (len > sizeof(event->payload) && iov.iov_base) {
+            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), iov.iov_base);
+        }
+    }
+
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
 // Network connect tracepoint args layout (x86_64):
 //   offset 16: fd (u32)   | offset 24: addr (u64 ptr)
 //   offset 32: addr_len (u32)

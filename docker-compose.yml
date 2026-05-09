@@ -11,15 +11,27 @@ services:
       - ./dashboard:/usr/share/nginx/html:ro
     restart: unless-stopped
 
-  # WebSocket bridge — exposes TelemetryBridge port 9000 to host.
-  # Host-networked containers bind inside the Docker VM; this proxy
+  # WebSocket bridge — proxies from Docker bridge to host-network control_server.
+  # Host-networked containers bind inside Docker's namespace; this proxy
   # forwards from the Docker bridge so the port is visible to WSL2/Windows.
   wsbridge:
     image: alpine/socat:latest
     container_name: neuro_wsbridge
     ports:
       - "9001:9001"
-    command: ["TCP-LISTEN:9001,fork,reuseaddr", "TCP:172.17.0.1:9000"]
+    command: ["TCP-LISTEN:9001,fork,reuseaddr", "TCP:172.18.0.1:9002"]
+    restart: unless-stopped
+    depends_on:
+      - control
+
+  # Control plane — aggregates UDP telemetry from all C++ nodes (port 9998, host net)
+  # and serves per-node WebSocket heartbeat events to wsbridge (port 9002, host net).
+  control:
+    build:
+      context: ./orchestration
+      dockerfile: Dockerfile
+    container_name: neuro_control
+    network_mode: host
     restart: unless-stopped
     depends_on:
       - alpha
