@@ -63,7 +63,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Network traffic generator for Neuro-Mesh eBPF validation")
     parser.add_argument("--target", required=True, help="Target IP address")
     parser.add_argument("--duration", type=int, default=15, help="Attack duration in seconds (default: 15)")
-    parser.add_argument("--threads", type=int, default=6, help="Worker threads (default: 6)")
+    parser.add_argument("--threads", type=int, default=3, help="Worker threads (default: 3)")
     parser.add_argument("--udp-ratio", type=float, default=0.6, help="Fraction of threads doing UDP flood (default: 0.6)")
     args = parser.parse_args()
 

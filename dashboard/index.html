@@ -545,8 +545,8 @@ function buildGauges() {
       <span class="gauge-value" style="color:${ramColor}">${state.ramMb} MB</span>
     </div>
     <div id="vitals-extra">
-      <div class="vital-row"><span class="vkey">ENTROPY</span><span class="vval">${state.entropy.toFixed(4)}</span></div>
-      <div class="vital-row"><span class="vkey">ALERT</span><span class="vval" style="color:${state.alertFlag ? 'var(--red)' : 'var(--green)'}">${state.alertFlag ? 'ACTIVE' : 'NONE'}</span></div>
+      <div class="vital-row"><span class="vkey">ENTROPY</span><span class="vval" style="color:${state.entropy > 0.65 ? 'var(--red)' : state.entropy > 0.6 ? 'var(--amber)' : 'var(--cyan)'}">${state.entropy.toFixed(4)}</span></div>
+      <div class="vital-row"><span class="vkey">THREAT</span><span class="vval" style="color:${state.alertFlag ? 'var(--red)' : 'var(--green)'}">${state.alertFlag ? 'CRITICAL' : 'NONE'}</span></div>
       <div class="vital-row"><span class="vkey">STATUS</span><span class="vval">${state.meshStatus}</span></div>
       <div class="vital-row"><span class="vkey">PEERS</span><span class="vval">${state.peers}</span></div>
     </div>
@@ -652,6 +652,8 @@ function seedMeshNodes() {
     vx: 0, vy: 0,
     isSelf: true,
     threat: false,
+    entropy: 0,
+    status: 'STABLE',
   }];
   state.edges = [];
 }
@@ -669,6 +671,8 @@ function upsertPeerNode(peerId) {
     vx: 0, vy: 0,
     isSelf: false,
     threat: false,
+    entropy: 0,
+    status: 'STABLE',
   });
   // Full-mesh (clique): connect new peer to every existing node
   for (const existing of state.nodes) {
@@ -700,8 +704,11 @@ function renameSelfNode(newId) {
 }
 
 function markNodeThreat(nodeId) {
-  const node = state.nodes.find(n => n.id === nodeId);
-  if (node) node.threat = true;
+  const node = state.nodes.find(n => n.id === nodeId || n.id.toUpperCase() === nodeId.toUpperCase());
+  if (node) {
+    node.threat = true;
+    node.status = 'FLAGGED';
+  }
 }
 
 function switchNodeContext(nodeId) {
@@ -744,10 +751,12 @@ function switchNodeContext(nodeId) {
 }
 
 function matchesSelectedNode(data) {
-  if (!state.selectedNode) return true;
-  const selected = state.selectedNode.toUpperCase();
+  // When no node is explicitly selected, follow the self node
+  const target = state.selectedNode || state.nodeId;
+  if (!target) return true;
+  const selected = target.toUpperCase();
   const incoming = (data.node || data.ID || data.node_id || '').toUpperCase();
-  return incoming.includes(selected);
+  return incoming === selected || incoming.includes(selected);
 }
 
 function stepMeshForces() {
@@ -839,35 +848,70 @@ function drawMeshGraph() {
     ctx.stroke();
   }
 
-  // Nodes
+  // Nodes — real-time threat visualization
+  const now = Date.now();
   for (const node of state.nodes) {
     const r = node.isSelf ? 12 : 8;
+    const isCompromised = node.threat ||
+                          node.status === 'FLAGGED' ||
+                          node.status === 'SELF_ISOLATED' ||
+                          node.entropy > 0.65;
 
-    // Glow
-    const glowColor = node.threat ? 'rgba(255,0,64,0.3)' : 'rgba(0,255,255,0.2)';
-    const glow = ctx.createRadialGradient(node.x, node.y, r * 0.5, node.x, node.y, r * 3);
+    // Pulsating glow for compromised nodes — shadowBlur oscillates 8–20px at ~3 Hz
+    let glowAlpha, glowRadius, coreColor, strokeColor, labelColor;
+    if (isCompromised) {
+      const pulse = 0.5 + 0.5 * Math.sin(now * 0.018);
+      glowAlpha  = 0.4 + pulse * 0.45;          // 0.40–0.85
+      glowRadius = r * (2.5 + pulse * 1.8);     // 2.5r–4.3r
+      coreColor  = '#ff0040';
+      strokeColor = `rgba(255,0,64,${0.8 + pulse * 0.2})`;
+      labelColor = '#ff4060';
+    } else {
+      glowAlpha  = 0.2;
+      glowRadius = r * 3;
+      coreColor  = node.isSelf ? '#00ffff' : '#004444';
+      strokeColor = node.isSelf ? '#00ffff' : '#008888';
+      labelColor = node.isSelf ? '#00ffff' : '#aaaaaa';
+    }
+
+    const glowColor = isCompromised
+      ? `rgba(255,0,64,${glowAlpha})`
+      : 'rgba(0,255,255,0.2)';
+    const glow = ctx.createRadialGradient(node.x, node.y, r * 0.5, node.x, node.y, glowRadius);
     glow.addColorStop(0, glowColor);
     glow.addColorStop(1, 'transparent');
     ctx.fillStyle = glow;
-    ctx.beginPath(); ctx.arc(node.x, node.y, r * 3, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(node.x, node.y, glowRadius, 0, Math.PI * 2); ctx.fill();
 
     // Core
-    ctx.fillStyle = node.threat ? '#ff0040' : node.isSelf ? '#00ffff' : '#004444';
+    ctx.fillStyle = coreColor;
     ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = node.threat ? '#ff0040' : node.isSelf ? '#00ffff' : '#008888';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = isCompromised ? 2 : 1.5;
     ctx.stroke();
 
+    // Threat ring — extra pulsating outline for compromised nodes
+    if (isCompromised) {
+      const ringPulse = 0.4 + 0.6 * Math.sin(now * 0.025);
+      ctx.strokeStyle = `rgba(255,0,64,${0.3 + ringPulse * 0.4})`;
+      ctx.lineWidth = 2.5 + ringPulse * 2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, r + 6 + ringPulse * 4, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     // Label
-    ctx.fillStyle = node.isSelf ? '#00ffff' : '#aaaaaa';
+    ctx.fillStyle = labelColor;
     ctx.font = 'bold 11px "Courier New", monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(node.id, node.x, node.y - r - 7);
+    ctx.fillText(node.id, node.x, node.y - r - 10);
 
     // Selection ring — amber pulse on the operator-selected node
     if (state.selectedNode && node.id === state.selectedNode) {
-      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
-      ctx.strokeStyle = `rgba(255,176,0,${0.5 + pulse * 0.5})`;
+      const selPulse = 0.5 + 0.5 * Math.sin(now * 0.005);
+      ctx.strokeStyle = `rgba(255,176,0,${0.5 + selPulse * 0.5})`;
       ctx.lineWidth = 2.5;
       ctx.setLineDash([4, 2]);
       ctx.beginPath();
@@ -951,7 +995,7 @@ function drawSpectrogram() {
       // Color banding uses RAW entropy (before power-law scaling).
       // Scaled val still drives alpha for brightness/visibility at low levels.
       let color;
-      if (raw > 0.85)       color = `rgba(255,0,64,${0.4 + val * 0.6})`;
+      if (raw > 0.65)       color = `rgba(255,0,64,${0.4 + val * 0.6})`;
       else if (raw > 0.5)   color = `rgba(255,176,0,${0.3 + val * 0.5})`;
       else                  color = `rgba(0,255,255,${0.3 + val * 0.55})`;
 
@@ -961,7 +1005,7 @@ function drawSpectrogram() {
   }
 
   // Threshold line
-  const threshY = specH * (1 - 0.85);
+  const threshY = specH * (1 - 0.65);
   ctx.strokeStyle = 'rgba(255,0,64,0.3)';
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 6]);
@@ -975,7 +1019,7 @@ function drawSpectrogram() {
   ctx.fillStyle = 'rgba(255,0,64,0.5)';
   ctx.font = 'bold 10px "Courier New", monospace';
   ctx.textAlign = 'right';
-  ctx.fillText('THRESH 0.85', specW - 4, threshY - 4);
+  ctx.fillText('THRESH 0.65', specW - 4, threshY - 4);
 }
 
 /* ==========================================================================
@@ -1099,7 +1143,7 @@ function routeMessage(data) {
     case 'ebpf_entropy':
       if (matchesSelectedNode(data)) {
         state.entropy = parseFloat(data.value) || 0;
-        if (state.entropy > 0.85) {
+        if (state.entropy > 0.65) {
           state.alertFlag = true;
           state.lastAlertTime = Date.now();
           dom.meshDot.classList.add('danger');
@@ -1107,7 +1151,7 @@ function routeMessage(data) {
         pushSpectrogram(state.entropy);
       }
       pushFeed('ENTROPY',
-        `eBPF entropy spike: ${parseFloat(data.value || 0).toFixed(3)} (threshold: ${data.threshold || 0.85})`,
+        `eBPF entropy spike: ${parseFloat(data.value || 0).toFixed(3)} (threshold: ${data.threshold || 0.65})`,
         data.hash || '', getMitreTags(data));
       break;
 
@@ -1186,6 +1230,16 @@ function routeMessage(data) {
           }
         }
       }
+
+      // Global alert — triggers for ANY node's threat, not just the selected one
+      if (data.threat === 'CRITICAL' || data.status === 'FLAGGED' ||
+          data.KERNEL_ANOMALY === 'TRUE' || parseFloat(data.entropy || 0) > 0.65) {
+        state.alertFlag = true;
+        state.lastAlertTime = Date.now();
+        dom.meshDot.classList.add('danger');
+      }
+      // Cooldown for global alert — clear if all nodes are nominal (checked in renderLoop)
+
       // Global mesh topology — always updated regardless of selected node
       if (data.peers !== undefined) {
         state.peers = parseInt(data.peers);
@@ -1201,6 +1255,32 @@ function routeMessage(data) {
         }
       }
       if (data.node_id && data.node_id !== state.nodeId) upsertPeerNode(data.node_id);
+      // Sync per-node threat state into topology canvas — maps every heartbeat to its node
+      {
+        const nid = (data.node || data.ID || '').toUpperCase();
+        const tn = state.nodes.find(n => n.id.toUpperCase() === nid);
+        if (tn) {
+          const wasThreat = tn.threat;
+          if (data.entropy !== undefined) tn.entropy = parseFloat(data.entropy) || 0;
+          if (data.status)               tn.status = data.status;
+          tn.threat = (data.threat === 'CRITICAL' ||
+                       data.status === 'FLAGGED' ||
+                       data.status === 'SELF_ISOLATED' ||
+                       data.KERNEL_ANOMALY === 'TRUE' ||
+                       tn.entropy > 0.65);
+          // Clear threat if entropy has subsided and status is nominal
+          if (tn.entropy < 0.2 && tn.status === 'STABLE' &&
+              data.threat !== 'CRITICAL' && data.KERNEL_ANOMALY !== 'TRUE') {
+            tn.threat = false;
+          }
+          // Feed entry on threat transition
+          if (tn.threat && !wasThreat) {
+            pushFeed('TOPO', 'Node ' + tn.id + ' marked RED — entropy=' + tn.entropy.toFixed(4) + ' status=' + tn.status, '', getMitreTags(data));
+          } else if (!tn.threat && wasThreat) {
+            pushFeed('TOPO', 'Node ' + tn.id + ' cleared — entropy=' + tn.entropy.toFixed(4), '', []);
+          }
+        }
+      }
       break;
 
     case 'discovery':
@@ -1249,6 +1329,15 @@ function routeMessage(data) {
   if (!nodeIdLocked) {
     if (data.ID && data.ID !== state.nodeId) renameSelfNode(data.ID);
     if (data.node && data.node !== state.nodeId) renameSelfNode(data.node);
+  }
+
+  // Global alert cooldown — clear only when ALL topology nodes are nominal
+  if (state.alertFlag) {
+    const anyThreat = state.nodes.some(n => n.threat);
+    if (!anyThreat && Date.now() - state.lastAlertTime > 10000) {
+      state.alertFlag = false;
+      dom.meshDot.classList.remove('danger');
+    }
   }
 
   // Update mesh status
@@ -1320,30 +1409,55 @@ let simInterval = null;
 
 function startSimulation() {
   if (simInterval) return;
-  const simPeers = ['NODE_2', 'NODE_3', 'NODE_4', 'NODE_5'];
+  const simPeers = ['ALPHA', 'BRAVO', 'CHARLIE', 'DELTA', 'ECHO'];
   let simSeq = 0;
   let peerIdx = 0;
 
   simInterval = setInterval(() => {
-    if (state.wsLive) return; // Don't simulate if WS is live
+    if (state.wsLive) {
+      clearInterval(simInterval);
+      simInterval = null;
+      dom.connLabel.textContent = 'WS: LIVE';
+      return;
+    }
+    dom.connLabel.textContent = 'SIMULATION';
 
     const seq = simSeq++;
-    const eventType = seq % 5;
+    const eventType = seq % 6;
 
     switch (eventType) {
-      case 0: // entropy spike
-        const entropy = 0.55 + Math.random() * 0.5;
+      case 0: { // entropy spike (keeps spectrogram active)
+        const e = 0.45 + Math.random() * 0.5;
         routeMessage({
-          event: 'entropy_spike',
+          event: 'ebpf_entropy',
           sensor: 'ebpf_entropy',
-          value: entropy,
-          threshold: 0.85,
-          verdict: entropy > 0.85 ? 'ANOMALY' : 'NOMINAL',
-          mitre_attack: entropy > 0.85 ? ['T1571'] : [],
+          value: e,
+          threshold: 0.65,
+          verdict: e > 0.65 ? 'ANOMALY' : 'NOMINAL',
+          mitre_attack: e > 0.65 ? ['T1571'] : [],
           node: simPeers[Math.floor(Math.random() * simPeers.length)],
         });
-        break;
-      case 1: // lateral movement
+      } break;
+      case 1: { // heartbeat with full fields — populates topology + vitals + feed
+        const peer = simPeers[peerIdx % simPeers.length];
+        peerIdx++;
+        const otherPeers = simPeers.filter(p => p !== peer);
+        routeMessage({
+          event: 'heartbeat',
+          node: peer,
+          ID: peer,
+          cpu: 0.05 + Math.random() * 0.15,
+          mem_mb: 40 + Math.floor(Math.random() * 60),
+          peers: 4,
+          entropy: 0.01 + Math.random() * 0.08,
+          threat: 'NOMINAL',
+          status: 'STABLE',
+          KERNEL_ANOMALY: 'FALSE',
+          mitre_attack: [],
+          peer_list: otherPeers,
+        });
+      } break;
+      case 2: { // lateral movement
         routeMessage({
           event: 'lateral_movement',
           src_ip: '10.99.99.99',
@@ -1352,20 +1466,27 @@ function startSimulation() {
           verdict: 'ALERT',
           mitre_attack: ['T1021', 'T1571'],
         });
-        break;
-      case 2: // heartbeat with peer data
-        const peer = simPeers[peerIdx % simPeers.length];
-        peerIdx++;
+      } break;
+      case 3: { // compromised node heartbeat — triggers red topology + feed entries
+        const target = simPeers[Math.floor(Math.random() * simPeers.length)];
+        const otherPeers = simPeers.filter(p => p !== target);
+        const hiEntropy = 0.72 + Math.random() * 0.2;
         routeMessage({
           event: 'heartbeat',
-          node: peer,
-          cpu: 0.1 + Math.random() * 0.3,
-          mem_mb: 40 + Math.floor(Math.random() * 60),
-          peers: 1 + Math.floor(Math.random() * 4),
-          uptime_s: seq * 2,
+          node: target,
+          ID: target,
+          cpu: 0.7 + Math.random() * 0.3,
+          mem_mb: 120 + Math.floor(Math.random() * 180),
+          peers: 4,
+          entropy: hiEntropy,
+          threat: 'CRITICAL',
+          status: 'FLAGGED',
+          KERNEL_ANOMALY: 'TRUE',
+          mitre_attack: ['T1021', 'T1571', 'T1059'],
+          peer_list: otherPeers,
         });
-        break;
-      case 3: // privilege escalation
+      } break;
+      case 4: { // privilege escalation
         routeMessage({
           event: 'privilege_escalation',
           uid: 0,
@@ -1374,8 +1495,9 @@ function startSimulation() {
           verdict: 'CRITICAL',
           mitre_attack: ['T1059'],
         });
-        break;
-      case 4: // PBFT round
+      } break;
+
+      case 5: { // PBFT round
         routeMessage({
           event: 'pbft_round_complete',
           target: simPeers[Math.floor(Math.random() * simPeers.length)],
@@ -1383,7 +1505,7 @@ function startSimulation() {
           stage: 'EXECUTED',
           mitre_attack: ['T1059', 'T1021', 'T1571', 'T1090'],
         });
-        break;
+      } break;
     }
   }, 1500);
 }

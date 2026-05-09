@@ -61,7 +61,17 @@ $(OBJ_DIR)/sensor.bpf.o: kernel/sensor.bpf.c
 	$(BPF_CC) $(BPF_CFLAGS) -c $< -o $@
 
 kernel/sensor.skel.h: $(OBJ_DIR)/sensor.bpf.o
-	bpftool gen skeleton $< > $@
+	@if command -v bpftool >/dev/null 2>&1; then \
+		bpftool gen skeleton $< > $@.tmp 2>/dev/null && mv $@.tmp $@ || \
+		( rm -f $@.tmp; \
+		  if [ ! -s $@ ]; then \
+		    echo "WARNING: bpftool failed — using pre-generated $@"; \
+		    touch $@; \
+		  fi ); \
+	else \
+		echo "WARNING: bpftool not found — using pre-generated sensor.skel.h if available"; \
+		if [ ! -f $@ ]; then touch $@; fi; \
+	fi
 
 # ---- uSockets C compilation ----
 $(OBJ_DIR)/usockets/%.o: $(USOCK_DIR)/%.c

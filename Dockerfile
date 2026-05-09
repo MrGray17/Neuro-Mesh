@@ -43,7 +43,7 @@ RUN python3 tools/train_iforest.py --output isolation_forest.onnx --samples 1000
 
 # Layer 5: Full source + build (changes frequently — last layer)
 COPY . .
-RUN rm -rf bin && mkdir -p obj && make obj/sensor.bpf.o && touch kernel/sensor.skel.h && make
+RUN rm -rf bin && mkdir -p obj && make
 
 # ============================================================
 # Stage 2: Runtime

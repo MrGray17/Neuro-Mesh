@@ -143,9 +143,16 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
         }
         peer_list_json += "]";
 
-        // Real CPU load (1-min average)
+        // Real CPU load (1-min average, normalized to 0.0–1.0 by core count)
         double loads[1] = {0.0};
-        double cpu = (getloadavg(loads, 1) != -1) ? loads[0] : 0.0;
+        double cpu = 0.0;
+        if (getloadavg(loads, 1) != -1) {
+            long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+            if (nproc > 0)
+                cpu = loads[0] / static_cast<double>(nproc);
+            else
+                cpu = loads[0];
+        }
 
         // Real RAM usage in MB (cgroup-aware for containers)
         long mem_mb = cgroup_memory_mb();
@@ -174,9 +181,26 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
         // Threat determined by blended entropy, not sticky ONNX score alone.
         // ONNX anomalies feed into entropy via onnx_to_entropy().
         const char* threat;
-        if (entropy > 0.85f)      threat = "CRITICAL";
+        if (entropy > 0.65f)      threat = "CRITICAL";
         else if (entropy > 0.6f)  threat = "ALERT";
         else                      threat = "NONE";
+
+        // Decentralized enforcement: self-initiate PBFT consensus on sustained anomaly.
+        // 30s cooldown prevents spamming rounds every heartbeat.
+        if (entropy > 0.65f && mesh.peer_count() > 0) {
+            static int64_t s_last_consensus_us = 0;
+            auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (now_us - s_last_consensus_us > 30'000'000) {
+                s_last_consensus_us = now_us;
+                std::string evidence = "{\"entropy\":" + std::to_string(entropy)
+                                     + ",\"node\":\"" + node_id + "\""
+                                     + ",\"source\":\"self_detected\"}";
+                std::cout << "[DECENTRALIZED] Self-initiating PBFT consensus (entropy="
+                          << entropy << ")" << std::endl;
+                mesh.initiate_consensus(node_id, evidence);
+            }
+        }
 
         // Demo simulation mode: override vitals for 10s after an IPC alert
         if (g_demo_until_us.load(std::memory_order_relaxed) > 0) {
@@ -322,8 +346,25 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                     const char* ack = "ACK:INJECT\n";
                     write(client_fd, ack, strlen(ack));
                 }
-            } else if (cmd == "CMD:ISOLATE") {
-                std::cout << "[IPC] ISOLATE command acknowledged (requires consensus)." << std::endl;
+            } else if (cmd.rfind("CMD:ISOLATE ", 0) == 0) {
+                // Format: CMD:ISOLATE <target> <evidence_json>
+                std::string payload = cmd.substr(strlen("CMD:ISOLATE "));
+                size_t space = payload.find(' ');
+                if (space != std::string::npos) {
+                    std::string isolate_target = payload.substr(0, space);
+                    std::string evidence = payload.substr(space + 1);
+                    std::cout << "[IPC] ISOLATE: initiating PBFT consensus against "
+                              << isolate_target << std::endl;
+                    mesh.initiate_consensus(isolate_target, evidence);
+
+                    // Demo simulation: inject synthetic telemetry for 10s
+                    auto demo_end = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count() + 10'000'000;
+                    g_demo_until_us.store(demo_end, std::memory_order_relaxed);
+
+                    const char* ack = "ACK:ISOLATE\n";
+                    write(client_fd, ack, strlen(ack));
+                }
             } else if (cmd == "CMD:RESET") {
                 jailer.reset_enforcement();
                 std::cout << "[IPC] Enforcement reset." << std::endl;

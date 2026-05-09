@@ -19,7 +19,7 @@ nodes_db = {}
 db_lock = asyncio.Lock()
 logs = []
 
-# Per-node cooldown state: tracks when entropy last spiked above 0.85.
+# Per-node cooldown state: tracks when entropy last spiked above 0.65.
 # If entropy stays below 0.2 for COOLDOWN_SECONDS, status auto-resets to STABLE.
 COOLDOWN_SECONDS = 10
 _cooldown = {}  # nid → {"last_spike": timestamp, "was_flagged": bool}
@@ -60,7 +60,7 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
             now = time.time()
             cd = _cooldown.get(nid, {"last_spike": 0.0, "was_flagged": False})
 
-            if entropy > 0.85:
+            if entropy > 0.65:
                 cd["last_spike"] = now
                 cd["was_flagged"] = True
             elif entropy < 0.2 and cd["was_flagged"]:
@@ -73,9 +73,9 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
             _cooldown[nid] = cd
 
             # Resolve final status
-            if anomaly == "TRUE" and entropy > 0.85:
+            if anomaly == "TRUE" and entropy > 0.65:
                 status = "FLAGGED"
-            elif reported_status == "SELF_ISOLATED" and entropy > 0.85:
+            elif reported_status == "SELF_ISOLATED" and entropy > 0.65:
                 status = "FLAGGED"
             else:
                 status = "STABLE"
@@ -91,9 +91,8 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
                 "mitre_attack": payload.get("mitre_attack", []),
                 "last_seen": now
             }
-            if anomaly == "TRUE" and entropy > 0.85:
+            if anomaly == "TRUE" and entropy > 0.65:
                 add_log(f"ALERT: eBPF anomaly verified on {nid}")
-                send_ipc_command(nid, "CMD:ISOLATE")
 
 async def http_api_handler(reader, writer):
     try:
@@ -149,14 +148,14 @@ async def ws_handler(websocket, path="/"):
                         match = re.search(r'on (\S+)', log_msg)
                         nid = match.group(1) if match else "UNKNOWN"
                         real_entropy = nodes_db.get(nid, {}).get("entropy", 0.0)
-                        if real_entropy > 0.85:
+                        if real_entropy > 0.65:
                             await websocket.send(json.dumps({
                                 "event": "ebpf_entropy",
                                 "sensor": "ebpf_entropy",
                                 "ID": nid,
                                 "node": nid,
                                 "value": real_entropy,
-                                "threshold": 0.85,
+                                "threshold": 0.65,
                                 "mitre_attack": ["T1059", "T1021", "T1571"]
                             }))
 
