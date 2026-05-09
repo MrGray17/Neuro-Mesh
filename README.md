@@ -37,10 +37,10 @@
                             │ WebSocket :9000
 ┌───────────────────────────▼──────────────────────────────────────┐
 │                  PYTHON CONTROL PLANE                              │
-│   control_server.py (WebSocket hub)  ·  bridge_api.py (REST)     │
-│   anomaly_classifier.py  ·  web_server.py (static)                │
+│   control_server.py (WS :9002)  ·  ws_proxy.py (:9001→:9002)     │
+│   anomaly_classifier.py       ·  web_server.py (static)          │
 └───────────────────────────┬──────────────────────────────────────┘
-                            │ IPC (Unix domain sockets)
+                            │ UDP telemetry :9998 + IPC sockets
 ┌───────────────────────────▼──────────────────────────────────────┐
 │                       C++20 Mesh Nodes                              │
 │                                                                    │
@@ -130,26 +130,27 @@ python3 orchestration/mesh_manager.py
 ### Docker Compose
 
 ```bash
-# Build and launch 3-node mesh (ALPHA, BRAVO, CHARLIE)
-docker-compose up -d
+# Build and launch 5-node mesh (ALPHA, BRAVO, CHARLIE, DELTA, ECHO) + control plane + dashboard
+docker compose up -d
 
-# Verify
-docker-compose ps
+# Verify mesh formed (should show 5 nodes)
+docker compose ps
 docker logs neuro_alpha
 
-# Inject an event
-docker run --rm --network=host \
-  --entrypoint /app/inject_event neuro_mesh:titan \
-  --target ALPHA --event lateral_movement --verdict THREAT
+# Open dashboard
+open http://localhost:8080
 
-# Run benchmark suite
-python3 tools/benchmark_mesh.py --runs 3
+# Inject a single-node compromise (10s demo telemetry)
+docker exec neuro_charlie /app/inject_event --node CHARLIE --target ALPHA --event entropy_spike --verdict CRITICAL
+
+# Run full-mesh traffic flood (triggers eBPF entropy on all nodes)
+docker exec neuro_charlie python3 /app/traffic_generator.py --target 127.0.0.1 --duration 15 --threads 8
 
 # Tear down
-docker-compose down
+docker compose down
 ```
 
-Each container runs with `privileged: true` and `network_mode: host` for eBPF/XDP map access and UDP broadcast discovery.
+Each C++ node container runs with `privileged: true` and `network_mode: host` for eBPF/XDP map access and UDP broadcast discovery.
 
 ---
 
@@ -216,23 +217,46 @@ MitigationEngine extends enforcement with process termination (seccomp-whitelist
 
 ---
 
-## Event Injection
+## Event Injection & Traffic Generation
+
+### Single-node injection (IPC)
 
 ```bash
-# Basic injection
-./bin/inject_event --target ALPHA --event lateral_movement --verdict THREAT
+# Make a single node report CRITICAL telemetry for 10 seconds
+./bin/inject_event --node CHARLIE --target ALPHA --event entropy_spike --verdict CRITICAL
 
-# With unique tag (prevents PBFT round collision in benchmarks)
-./bin/inject_event --target ALPHA --event privilege_escalation --verdict CRITICAL --tag run1
-
-# Available flags
---target    Target node ID (required)
---event     lateral_movement | privilege_escalation | entropy_spike
---verdict   THREAT | CRITICAL | ANOMALY
---tag       Unique identifier for benchmark iteration
+# Or via docker exec
+docker exec neuro_charlie /app/inject_event --node CHARLIE --target ALPHA --event lateral_movement --verdict THREAT
 ```
 
-The injector runs as a temporary peer, generates an ephemeral Ed25519 identity, participates in mesh discovery, and injects a PBFT consensus round before exiting.
+| Flag | Description |
+|------|-------------|
+| `--node` | Local daemon to command via IPC (required) |
+| `--target` | Target node ID for PBFT consensus (required) |
+| `--event` | `lateral_movement` \| `privilege_escalation` \| `entropy_spike` (default: `lateral_movement`) |
+| `--verdict` | `THREAT` \| `CRITICAL` \| `ANOMALY` (default: `THREAT`) |
+| `--tag` | Unique identifier for benchmark iteration |
+
+The injector sends `CMD:INJECT` over the node's Unix domain socket (`/tmp/neuro_mesh_{id}.sock`). The receiving node overrides its telemetry (CPU 85%, entropy 0.98) for 10 seconds and initiates a PBFT consensus round against the target.
+
+### Full-mesh traffic flood
+
+```bash
+# Multi-threaded UDP flood + TCP port scan — triggers eBPF entropy on all nodes
+python3 tools/traffic_generator.py --target 127.0.0.1 --duration 15 --threads 8
+
+# Inside a container
+docker exec neuro_charlie python3 /app/traffic_generator.py --target 127.0.0.1 --duration 15 --threads 8
+```
+
+| Flag | Description |
+|------|-------------|
+| `--target` | Target IP address (required) |
+| `--duration` | Attack duration in seconds (default: 15) |
+| `--threads` | Worker threads — higher = more entropy (default: 3) |
+| `--udp-ratio` | Fraction of threads doing UDP flood (default: 0.6) |
+
+Uses `network_mode: host` — all nodes share `/proc/net/dev`, so a flood to `127.0.0.1` triggers entropy on the entire mesh. Use `inject_event` for single-node targeting.
 
 ---
 
@@ -259,8 +283,9 @@ Control plane commands are delivered over Unix domain sockets at `/tmp/neuro_mes
 
 | Command | Action |
 |---------|--------|
-| `CMD:ISOLATE` | Acknowledged (isolation requires PBFT consensus) |
-| `CMD:RESET` | Resets enforcement state for all suspended processes |
+| `CMD:INJECT` | Injects synthetic CRITICAL telemetry for 10s + initiates PBFT consensus against target |
+| `CMD:ISOLATE` | Initiates PBFT consensus against target + injects synthetic telemetry for 10s |
+| `CMD:RESET` | Resets enforcement state for all suspended processes and removes blocklist entries |
 | `CMD:SHUTDOWN` | Graceful node shutdown |
 
 ---
