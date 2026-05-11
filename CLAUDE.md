@@ -17,28 +17,29 @@ make clean && make
 # Launch 5 nodes via Python process manager
 python3 orchestration/mesh_manager.py
 
-# Full demo (C2 + 3 agents + React dashboard)
-./start_demo.sh
+# Docker Compose (decentralized — no control plane needed)
+docker compose -f /home/yazid/neuro_mesh/docker-compose.yml build --no-cache
+docker compose -f /home/yazid/neuro_mesh/docker-compose.yml up -d
+docker compose -f /home/yazid/neuro_mesh/docker-compose.yml down
 
-# Event injection (triggers PBFT consensus targeting NODE_5)
-./bin/inject_event
+# Dashboard
+open http://localhost:8080
 
-# Crypto unit tests
-./bin/test_crypto
+# Event injection
+docker exec neuro_charlie /app/inject_event --node CHARLIE --target ALPHA --event entropy_spike --verdict CRITICAL
 
-# React dashboard (standalone dev)
-cd dashboard-react && npm start
+# Traffic flood
+docker exec neuro_charlie python3 /app/traffic_generator.py --target 127.0.0.1 --duration 15 --threads 8
 
-# Individual Python services
-python3 orchestration/control_server.py
+# Individual services (optional / legacy)
+python3 orchestration/control_server.py        # Legacy: centralized aggregator
 python3 orchestration/anomaly_classifier.py
-python3 orchestration/bridge_api.py
-python3 orchestration/web_server.py
+python3 orchestration/ws_proxy.py              # Stateless WS proxy
 ```
 
 ## Architecture
 
-Neuro-Mesh is a distributed P2P security mesh. C++20 nodes use eBPF to detect kernel-level anomalies, run a PBFT consensus protocol over UDP to verify events, then execute network isolation against compromised peers.
+Neuro-Mesh is a decentralized P2P security mesh. C++20 nodes use eBPF to detect kernel-level anomalies, run a PBFT consensus protocol over UDP to verify events, then execute network isolation against compromised peers. Nodes gossip telemetry directly to each other — no central control plane. Any node can serve the dashboard.
 
 ### Data Flow
 
@@ -49,7 +50,8 @@ eBPF kernel probe (kernel/sensor.bpf.c)
       → MeshNode (consensus/) UDP broadcast PBFT voting
         → PBFTConsensus (consensus/PBFT.hpp) multi-hop state machine
           → PolicyEnforcer (enforcer/) iptables isolation
-            → AuditLogger (telemetry/) UDP telemetry to Control Plane
+            → Telemetry gossip (TELEMETRY|node_id|json) to all peers
+              → Each peer's TelemetryBridge broadcasts full mesh view via WebSocket
 ```
 
 ### Directory Map
@@ -58,14 +60,14 @@ eBPF kernel probe (kernel/sensor.bpf.c)
 |-----------|---------|-------|
 | `kernel/` | eBPF probes | `sensor.bpf.c`, `neuro_bpf.c` (XDP filter), `vmlinux.h`, `sensor.skel.h` (generated) |
 | `cell/` | Node intelligence | `NodeAgent.hpp/.cpp` (agent core), `InferenceEngine.hpp/.cpp` (entropy anomaly detection) |
-| `consensus/` | P2P + PBFT | `MeshNode.hpp/.cpp` (UDP mesh), `PBFT.hpp` (header-only BFT state machine) |
+| `consensus/` | P2P + PBFT + gossip | `MeshNode.hpp/.cpp` (UDP mesh, telemetry gossip), `PBFT.hpp` (header-only BFT state machine) |
 | `crypto/` | Ed25519 identity | `CryptoCore.hpp/.cpp` (keygen, sign, verify via OpenSSL EVP) |
 | `enforcer/` | Policy enforcement | `PolicyEnforcer.hpp/.cpp` (iptables + eBPF blocklist + process suspension), `MitigationEngine.hpp/.cpp` |
-| `telemetry/` | Structured logging | `AuditLogger.hpp/.cpp` (UDP JSON), `TelemetryExporter.hpp` (POSIX-locked file writes) |
-| `orchestration/` | Python control plane | `control_server.py`, `anomaly_classifier.py`, `bridge_api.py`, `web_server.py`, `neuro_ctl.py`, `mesh_manager.py` |
+| `telemetry/` | Structured logging + WS bridge | `TelemetryBridge.hpp/.cpp` (uWebSockets sandboxed child process), `AuditLogger.hpp/.cpp` (UDP JSON), `TelemetryExporter.hpp` |
+| `orchestration/` | Python tools (optional) | `control_server.py` (legacy aggregator), `anomaly_classifier.py`, `ws_proxy.py` (stateless WS proxy), `mesh_manager.py` |
 | `tools/` | Test/sim utilities | `inject_event.cpp`, `test_crypto.cpp`, `traffic_generator.py`, `benchmark_mesh.py` |
-| `dashboard-react/` | React SOC dashboard | KPI cards, topology graph, agent table, event logs, time-series charts |
-| `main.cpp` | Entry point | Initializes PolicyEnforcer + MeshNode + InferenceEngine, idles on signal loop |
+| `dashboard/` | Vanilla JS dashboard | Zero-dependency HTML/CSS/JS with Canvas + WebSocket |
+| `main.cpp` | Entry point | Initializes PolicyEnforcer + MeshNode + InferenceEngine, runs heartbeat with telemetry gossip |
 | `common/` | Shared utilities | `UniqueFD.hpp` (RAII file descriptor), `Result.hpp` (Result<T,E> error propagation) |
 | `_archive_old/` | Archived experiments | 46 old files (monolithic client, ML models, standalone HTML dashboard, etc.) |
 
@@ -81,7 +83,10 @@ eBPF kernel probe (kernel/sensor.bpf.c)
 - **Binary-safe crypto** — `CryptoCore` uses `data.data()`/`data.size()` instead of `c_str()`, preventing null-byte truncation in signatures.
 - **RAII file descriptors** — `UniqueFD` wraps raw socket FDs; `AuditLogger` uses it for the static telemetry socket.
 - **Continuous eBPF drain** — `NodeAgent::telemetry_loop()` drains the ring buffer in a tight `while(ring_buffer__poll()>0)` loop before analysis, preventing kernel-side event loss.
-- **IPC socket** — `main.cpp` creates a Unix domain socket at `/tmp/neuro_mesh_{id}.sock` for control plane command delivery (ISOLATE, RESET, SHUTDOWN).
+- **IPC socket** — `main.cpp` creates a Unix domain socket at `/tmp/neuro_mesh_{id}.sock` for command delivery (INJECT, ISOLATE, RESET, SHUTDOWN).
 - **POSIX file locking** in `TelemetryExporter` prevents corrupted JSON when multiple processes write to `web/mesh_status.json`.
 - **`-I.` in CXXFLAGS** — All includes are project-root-relative (e.g., `#include "crypto/CryptoCore.hpp"`).
 - **eBPF skeleton** is auto-generated by `bpftool gen skeleton` during `make`, placed at `kernel/sensor.skel.h`.
+- **Telemetry gossip** — Each node unicasts its telemetry JSON to all known peers on the discovery port (UDP 9998). Peers push received telemetry to their local TelemetryBridge. Dashboard connects to ANY node and sees the full mesh.
+- **Unique WebSocket ports** — Each node binds a different TelemetryBridge port (ALPHA=9000, BRAVO=9001, CHARLIE=9002, DELTA=9003, ECHO=9004) to avoid host-network conflicts.
+- **Stateless wsbridge** — `ws_proxy.py` tries all 5 node backends with failover. It's a network bridge for Docker/WSL2 (the browser can't reach host-network ports directly). In real deployments, the browser connects directly to node IPs.

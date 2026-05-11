@@ -466,7 +466,17 @@ body::after {
    ========================================================================== */
 
 // ---- Constants ----
-const WS_URL      = 'ws://localhost:9001';
+// Each node runs its own TelemetryBridge on a unique port.
+// The dashboard connects to ANY node — if one goes down, it fails over to the next.
+const WS_URLS = [
+  'ws://localhost:9000',  // ALPHA
+  'ws://localhost:9001',  // wsbridge (Docker) / BRAVO (native)
+  'ws://localhost:9010',  // BRAVO (Docker)
+  'ws://localhost:9020',  // CHARLIE
+  'ws://localhost:9030',  // DELTA
+  'ws://localhost:9040',  // ECHO
+];
+let wsUrlIndex = 0;
 const MAX_FEED    = 200;
 const SPEC_BARS   = 64;
 const ENTROPY_MAX = 1.0;
@@ -654,6 +664,7 @@ function seedMeshNodes() {
     threat: false,
     entropy: 0,
     status: 'STABLE',
+    flaggedAt: 0,
   }];
   state.edges = [];
 }
@@ -673,6 +684,7 @@ function upsertPeerNode(peerId) {
     threat: false,
     entropy: 0,
     status: 'STABLE',
+    flaggedAt: 0,
   });
   // Full-mesh (clique): connect new peer to every existing node
   for (const existing of state.nodes) {
@@ -704,10 +716,15 @@ function renameSelfNode(newId) {
 }
 
 function markNodeThreat(nodeId) {
+  if (!nodeId || nodeId === '0.0.0.0') return;
+  if (!state.nodes.find(n => n.id === nodeId || n.id.toUpperCase() === nodeId.toUpperCase())) {
+    upsertPeerNode(nodeId);
+  }
   const node = state.nodes.find(n => n.id === nodeId || n.id.toUpperCase() === nodeId.toUpperCase());
   if (node) {
     node.threat = true;
     node.status = 'FLAGGED';
+    node.flaggedAt = Date.now();
   }
 }
 
@@ -1084,7 +1101,8 @@ let wsReconnectMs = 1000;
 function wsConnect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-  try { ws = new WebSocket(WS_URL); } catch (e) {
+  const url = WS_URLS[wsUrlIndex];
+  try { ws = new WebSocket(url); } catch (e) {
     scheduleReconnect();
     return;
   }
@@ -1093,7 +1111,7 @@ function wsConnect() {
     state.wsLive = true;
     wsReconnectMs = 1000;
     dom.connDot.classList.add('live');
-    dom.connLabel.textContent = 'WS: LIVE';
+    dom.connLabel.textContent = 'WS: LIVE (' + url.replace('ws://localhost:', 'N') + ')';
     // Subscribe to telemetry topic
     try { ws.send(JSON.stringify({ action: 'subscribe', topic: 'telemetry' })); } catch(e) {}
     pushFeed('HEARTBEAT', 'WebSocket connected — telemetry stream active', '');
@@ -1111,6 +1129,8 @@ function wsConnect() {
   ws.onclose = () => {
     state.wsLive = false;
     dom.connDot.classList.remove('live');
+    // Try next node on disconnect (failover)
+    wsUrlIndex = (wsUrlIndex + 1) % WS_URLS.length;
     dom.connLabel.textContent = 'WS: RECONNECTING';
     scheduleReconnect();
   };
@@ -1263,21 +1283,30 @@ function routeMessage(data) {
           const wasThreat = tn.threat;
           if (data.entropy !== undefined) tn.entropy = parseFloat(data.entropy) || 0;
           if (data.status)               tn.status = data.status;
-          tn.threat = (data.threat === 'CRITICAL' ||
-                       data.status === 'FLAGGED' ||
-                       data.status === 'SELF_ISOLATED' ||
-                       data.KERNEL_ANOMALY === 'TRUE' ||
-                       tn.entropy > 0.65);
+          // Preserve explicit flagging from PBFT/enforcement — don't let
+          // heartbeat data.threat="NONE" overwrite a FLAGGED node.
+          const flagged = (tn.status === 'FLAGGED' || tn.status === 'SELF_ISOLATED');
+          if (flagged) {
+            tn.threat = true;
+            // Start cooldown on first heartbeat that confirms the flag
+            if (!tn.flaggedAt) tn.flaggedAt = Date.now();
+            // Auto-clear after 12s
+            if (Date.now() - tn.flaggedAt > 12000) {
+              tn.threat = false;
+              tn.status = 'STABLE';
+              tn.flaggedAt = 0;
+            }
+          } else {
+            tn.threat = (data.threat === 'CRITICAL' ||
+                         data.status === 'FLAGGED' ||
+                         data.status === 'SELF_ISOLATED' ||
+                         data.KERNEL_ANOMALY === 'TRUE' ||
+                         tn.entropy > 0.65);
+          }
           // Clear threat if entropy has subsided and status is nominal
-          if (tn.entropy < 0.2 && tn.status === 'STABLE' &&
+          if (!flagged && tn.entropy < 0.2 && tn.status === 'STABLE' &&
               data.threat !== 'CRITICAL' && data.KERNEL_ANOMALY !== 'TRUE') {
             tn.threat = false;
-          }
-          // Feed entry on threat transition
-          if (tn.threat && !wasThreat) {
-            pushFeed('TOPO', 'Node ' + tn.id + ' marked RED — entropy=' + tn.entropy.toFixed(4) + ' status=' + tn.status, '', getMitreTags(data));
-          } else if (!tn.threat && wasThreat) {
-            pushFeed('TOPO', 'Node ' + tn.id + ' cleared — entropy=' + tn.entropy.toFixed(4), '', []);
           }
         }
       }

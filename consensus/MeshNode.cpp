@@ -181,6 +181,21 @@ void MeshNode::send_udp_discovery(const std::string& payload) {
     close(sockfd);
 }
 
+void MeshNode::send_udp_unicast(const std::string& ip, int port, const std::string& payload) {
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) return;
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    inet_aton(ip.c_str(), &addr.sin_addr);
+
+    sendto(sockfd, payload.c_str(), payload.length(), 0,
+           (struct sockaddr*)&addr, sizeof(addr));
+
+    close(sockfd);
+}
+
 // =============================================================================
 // PBFT Consensus UDP listener (port 9999)
 // =============================================================================
@@ -221,6 +236,15 @@ void MeshNode::p2p_listener_loop() {
             close(disc_sock);
             disc_sock = -1;
         } else {
+            // Drain any leftover UDP packets from previous container runs.
+            // Without this, stale beacons with old timestamps can poison discovery.
+            struct timeval drain_tv;
+            drain_tv.tv_sec = 1;
+            drain_tv.tv_usec = 0;
+            setsockopt(disc_sock, SOL_SOCKET, SO_RCVTIMEO, &drain_tv, sizeof(drain_tv));
+            char junk[4096];
+            while (recvfrom(disc_sock, junk, sizeof(junk), 0, nullptr, nullptr) > 0) {}
+            // Restore the normal timeout
             struct timeval dtv;
             dtv.tv_sec = 1;
             dtv.tv_usec = 0;
@@ -240,14 +264,23 @@ void MeshNode::p2p_listener_loop() {
             process_message(std::string(buffer), inet_ntoa(cliaddr.sin_addr));
         }
 
-        // Poll discovery socket
+        // Poll discovery socket — drain ALL queued datagrams, not just one.
+        // Combined DISCOVERY + TELEMETRY traffic exceeds 1 msg/sec, so a
+        // single recvfrom() per iteration creates unbounded backlog.
         if (disc_sock >= 0) {
-            struct sockaddr_in daddr{};
-            socklen_t dlen = sizeof(daddr);
-            int dn = recvfrom(disc_sock, buffer, sizeof(buffer) - 1, 0, (struct sockaddr*)&daddr, &dlen);
-            if (dn > 0) {
+            for (;;) {
+                struct sockaddr_in daddr{};
+                socklen_t dlen = sizeof(daddr);
+                int dn = recvfrom(disc_sock, buffer, sizeof(buffer) - 1,
+                                  MSG_DONTWAIT, (struct sockaddr*)&daddr, &dlen);
+                if (dn <= 0) break;
                 buffer[dn] = '\0';
-                process_discovery_beacon(std::string(buffer), inet_ntoa(daddr.sin_addr));
+                std::string dmsg(buffer);
+                if (dmsg.rfind("TELEMETRY|", 0) == 0) {
+                    process_telemetry_gossip(dmsg, inet_ntoa(daddr.sin_addr));
+                } else {
+                    process_discovery_beacon(dmsg, inet_ntoa(daddr.sin_addr));
+                }
             }
         }
     }
@@ -560,6 +593,88 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
 }
 
 // =============================================================================
+// Telemetry Gossip — decentralizes the control plane
+// =============================================================================
+
+void MeshNode::gossip_telemetry(const std::string& telemetry_json) {
+    // Store own telemetry
+    {
+        std::lock_guard<std::mutex> lock(m_telemetry_mtx);
+        m_own_telemetry = telemetry_json;
+    }
+
+    // Build gossip message: TELEMETRY|<node_id>|<json>
+    std::string msg = "TELEMETRY|" + m_node_id + "|" + telemetry_json;
+
+    // Broadcast on discovery port — all nodes share this port via SO_REUSEADDR.
+    // Broadcast delivers to ALL bound sockets; unicast would hit only one.
+    send_udp_discovery(msg);
+
+    // Also push own telemetry to local bridge so dashboard sees this node
+    if (m_bridge) {
+        (void)m_bridge->push_telemetry(telemetry_json);
+    }
+}
+
+void MeshNode::gossip_event_json(const std::string& json) {
+    // Broadcast arbitrary event JSON to all peers via discovery.
+    // Unlike gossip_telemetry, this does NOT overwrite m_own_telemetry.
+    // Format: TELEMETRY|<m_node_id>|<json>
+    std::string msg = "TELEMETRY|" + m_node_id + "|" + json;
+    send_udp_discovery(msg);
+
+    // Also push to local bridge so locally-connected dashboards see it
+    if (m_bridge) {
+        (void)m_bridge->push_telemetry(json);
+    }
+}
+
+void MeshNode::process_telemetry_gossip(const std::string& msg, const std::string& /*sender_ip*/) {
+    // Format: TELEMETRY|<node_id>|<json>
+    auto tokens = split_string(msg, '|');
+    if (tokens.size() < 3 || tokens[0] != "TELEMETRY") return;
+
+    const std::string& peer_id = tokens[1];
+    if (peer_id == m_node_id) return;
+
+    // Reconstruct the JSON (may contain | characters)
+    std::string json = msg.substr(tokens[0].size() + 1 + tokens[1].size() + 1);
+
+    // Store peer telemetry
+    {
+        std::lock_guard<std::mutex> lock(m_telemetry_mtx);
+        m_peer_telemetry[peer_id] = json;
+    }
+
+    // Push to local bridge so dashboard sees this peer
+    if (m_bridge) {
+        (void)m_bridge->push_telemetry(json);
+    }
+}
+
+std::string MeshNode::get_mesh_telemetry() const {
+    std::lock_guard<std::mutex> lock(m_telemetry_mtx);
+    std::string result = "[";
+    bool first = true;
+
+    // Own telemetry first
+    if (!m_own_telemetry.empty()) {
+        result += m_own_telemetry;
+        first = false;
+    }
+
+    // Peer telemetry
+    for (const auto& [id, json] : m_peer_telemetry) {
+        if (!first) result += ",";
+        result += json;
+        first = false;
+    }
+
+    result += "]";
+    return result;
+}
+
+// =============================================================================
 // Message processing (consensus port)
 // =============================================================================
 
@@ -639,6 +754,18 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                         "\"target\":\"" + incoming_msg.target_id + "\","
                         "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
                     "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
+                    // Push a synthetic heartbeat for the target so the dashboard
+                    // marks it red via the standard heartbeat threat path.
+                    std::ignore = m_bridge->push_telemetry(
+                        "{\"event\":\"heartbeat\","
+                        "\"node\":\"" + incoming_msg.target_id + "\","
+                        "\"threat\":\"CRITICAL\","
+                        "\"status\":\"FLAGGED\","
+                        "\"entropy\":0.98,"
+                        "\"cpu\":85.5,"
+                        "\"mem_mb\":512,"
+                        "\"peers\":0,"
+                        "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\"]}");
                 }
                 std::string ev = incoming_msg.evidence_json;
                 std::string tgt = incoming_msg.target_id;

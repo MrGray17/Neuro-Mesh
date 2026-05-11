@@ -26,16 +26,7 @@ for ENV_DIR in "neuro-mesh-env" "ia_env" "neuro-env" "venv"; do
     fi
 done
 
-echo -e "\n${YELLOW}[3] Launching Control Plane...${NC}"
-$PY_CMD orchestration/control_server.py > ctrl_logs.txt 2>&1 &
-sleep 2
-
-if ! pgrep -f "control_server.py" > /dev/null; then
-    echo -e "\n${RED}[ERROR] The Control Plane crashed instantly on boot.${NC}"
-    cat ctrl_logs.txt
-    exit 1
-fi
-echo -e "${GREEN}[+] Control Plane is stable and bound to ports.${NC}"
+echo -e "\n${YELLOW}[3] Launching Mesh Nodes (decentralized — no control plane needed)...${NC}"
 
 echo -e "\n${YELLOW}[4] Deploying Sharded Edge Agents...${NC}"
 for i in {1..3}; do

@@ -44,6 +44,11 @@ public:
     void stop();
     void initiate_consensus(const std::string& target_id, const std::string& evidence_json);
 
+    // Telemetry gossip — each node shares its vitals so any node can serve the dashboard
+    void gossip_telemetry(const std::string& telemetry_json);
+    void gossip_event_json(const std::string& json);  // broadcast arbitrary event to all peers' bridges
+    std::string get_mesh_telemetry() const;  // aggregated JSON of all known node telemetry
+
     int tcp_port() const { return m_tcp_port; }
     int peer_count() const;
     std::vector<std::string> get_active_peer_ids() const;
@@ -58,9 +63,11 @@ private:
     // === Messaging ===
     void process_message(const std::string& msg, const std::string& sender_ip);
     void process_discovery_beacon(const std::string& msg, const std::string& sender_ip);
+    void process_telemetry_gossip(const std::string& msg, const std::string& sender_ip);
     void broadcast_pbft_stage(const std::string& stage_str, const std::string& target_id, const std::string& evidence_json);
     void send_udp_broadcast(const std::string& payload);
     void send_udp_discovery(const std::string& payload);
+    void send_udp_unicast(const std::string& ip, int port, const std::string& payload);
 
     // === Discovery / PEX ===
     void send_discovery_beacon();
@@ -102,6 +109,11 @@ private:
     // === Legacy peer tracking (for ANNOUNCE protocol compatibility) ===
     std::mutex m_peer_mtx;
     std::set<std::string> m_known_peer_ips;
+
+    // === Telemetry gossip state ===
+    mutable std::mutex m_telemetry_mtx;
+    std::string m_own_telemetry;
+    std::unordered_map<std::string, std::string> m_peer_telemetry;  // node_id -> last JSON
 };
 
 } // namespace neuro_mesh

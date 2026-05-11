@@ -125,12 +125,6 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
                     const std::string& node_id) {
     int seq = 0;
     pid_t my_pid = getpid();  // filter eBPF events from our own traffic
-    // UDP socket for sending telemetry to control_server (127.0.0.1:9998)
-    int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in c2_addr{};
-    c2_addr.sin_family = AF_INET;
-    c2_addr.sin_port = htons(9998);
-    inet_pton(AF_INET, "127.0.0.1", &c2_addr.sin_addr);
     while (global_running) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
@@ -187,10 +181,13 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
 
         // Decentralized enforcement: self-initiate PBFT consensus on sustained anomaly.
         // 30s cooldown prevents spamming rounds every heartbeat.
-        if (entropy > 0.65f && mesh.peer_count() > 0) {
+        if (entropy > 0.65f && mesh.peer_count() > 1) {
             static int64_t s_last_consensus_us = 0;
+            static bool s_first = true;
             auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
+            // 30-second grace period on first call (prevents startup self-isolation)
+            if (s_first) { s_last_consensus_us = now_us; s_first = false; }
             if (now_us - s_last_consensus_us > 30'000'000) {
                 s_last_consensus_us = now_us;
                 std::string evidence = "{\"entropy\":" + std::to_string(entropy)
@@ -242,42 +239,19 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
                          + ",\"threat\":\"" + threat + "\""
                          + "," + mitre_tags + "}";
 
-        auto result = bridge.push_telemetry(json);
-        if (result.is_err()) {
-            std::cerr << "[HEARTBEAT] Bridge push failed: " << result.error() << std::endl;
-        }
+        // Gossip telemetry to all peers — each node aggregates the full mesh view.
+        // The dashboard can connect to ANY node and see the entire network.
+        mesh.gossip_telemetry(json);
 
-        // Also send via UDP to control_server for cross-node aggregation
-        {
-            const char* k_anomaly = (strcmp(threat, "CRITICAL") == 0) ? "TRUE" : "FALSE";
-            const char* status   = (strcmp(threat, "CRITICAL") == 0) ? "SELF_ISOLATED" : "STABLE";
-            std::string mitre_arr;
-            if (strcmp(threat, "CRITICAL") == 0 || strcmp(threat, "ALERT") == 0)
-                mitre_arr = "[\"T1021\",\"T1571\",\"T1059\"]";
-            else if (entropy > 0.6f)
-                mitre_arr = "[\"T1571\"]";
-            else
-                mitre_arr = "[]";
-            std::string telem = "TELEMETRY:{\"ID\":\"" + node_id
-                + "\",\"RAM_MB\":" + std::to_string(mem_mb)
-                + ",\"CPU_LOAD\":" + std::to_string(cpu)
-                + ",\"entropy\":" + std::to_string(entropy)
-                + ",\"KERNEL_ANOMALY\":\"" + k_anomaly + "\""
-                + ",\"STATUS\":\"" + status + "\""
-                + ",\"mitre_attack\":" + mitre_arr + "}";
-            sendto(udp_sock, telem.c_str(), telem.length(), 0,
-                   (struct sockaddr*)&c2_addr, sizeof(c2_addr));
-        }
         ++seq;
     }
-    close(udp_sock);
 }
 
 // =============================================================================
 // IPC listener — accepts commands from Python C2 server over Unix domain socket
 // =============================================================================
 
-void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshNode& mesh) {
+void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshNode& mesh, TelemetryBridge& bridge) {
     std::string socket_path = "/tmp/neuro_mesh_" + node_id.substr(node_id.find('_') + 1) + ".sock";
     unlink(socket_path.c_str());
 
@@ -301,7 +275,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
         return;
     }
 
-    std::cout << "[IPC] Listening for C2 commands on " << socket_path << std::endl;
+    std::cout << "[IPC] Listening for commands on " << socket_path << std::endl;
 
     struct timeval tv;
     tv.tv_sec = 1;
@@ -338,10 +312,22 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                               << inject_target << std::endl;
                     mesh.initiate_consensus(inject_target, evidence);
 
-                    // Demo simulation: inject synthetic telemetry for 10s
-                    auto demo_end = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count() + 10'000'000;
-                    g_demo_until_us.store(demo_end, std::memory_order_relaxed);
+                    // Broadcast synthetic telemetry for the target so the
+                    // dashboard marks it red regardless of which node's
+                    // bridge it's connected to.
+                    std::string fake_tel =
+                        "{\"event\":\"heartbeat\","
+                        "\"node\":\"" + inject_target + "\","
+                        "\"threat\":\"CRITICAL\","
+                        "\"status\":\"FLAGGED\","
+                        "\"entropy\":0.98,"
+                        "\"cpu\":85.5,"
+                        "\"mem_mb\":512,"
+                        "\"peers\":" + std::to_string(mesh.peer_count()) + ","
+                        "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\"]}";
+                    bridge.push_telemetry(fake_tel);
+                    // Gossip to all peers so every node's bridge sees it
+                    mesh.gossip_event_json(fake_tel);
 
                     const char* ack = "ACK:INJECT\n";
                     write(client_fd, ack, strlen(ack));
@@ -357,10 +343,19 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                               << isolate_target << std::endl;
                     mesh.initiate_consensus(isolate_target, evidence);
 
-                    // Demo simulation: inject synthetic telemetry for 10s
-                    auto demo_end = std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count() + 10'000'000;
-                    g_demo_until_us.store(demo_end, std::memory_order_relaxed);
+                    // Broadcast synthetic telemetry for the target
+                    std::string fake_tel =
+                        "{\"event\":\"heartbeat\","
+                        "\"node\":\"" + isolate_target + "\","
+                        "\"threat\":\"CRITICAL\","
+                        "\"status\":\"FLAGGED\","
+                        "\"entropy\":0.98,"
+                        "\"cpu\":85.5,"
+                        "\"mem_mb\":512,"
+                        "\"peers\":" + std::to_string(mesh.peer_count()) + ","
+                        "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\"]}";
+                    bridge.push_telemetry(fake_tel);
+                    mesh.gossip_event_json(fake_tel);
 
                     const char* ack = "ACK:ISOLATE\n";
                     write(client_fd, ack, strlen(ack));
@@ -401,7 +396,14 @@ int main(int argc, char* argv[]) {
     MitigationEngine mitigation(&jailer);
 
     // ---- Stage 2: Telemetry bridge (privilege-separated child process) ----
-    TelemetryBridge bridge({.websocket_port = 9000});
+    // Each node gets a unique WebSocket port to avoid host-network conflicts.
+    // wsbridge uses port 9001, so nodes use 9000 + offset to stay clear.
+    int ws_port = 9000;
+    if (node_id == "BRAVO")      ws_port = 9010;
+    else if (node_id == "CHARLIE") ws_port = 9020;
+    else if (node_id == "DELTA")  ws_port = 9030;
+    else if (node_id == "ECHO")   ws_port = 9040;
+    TelemetryBridge bridge({.websocket_port = static_cast<uint16_t>(ws_port)});
     auto spawn_result = bridge.spawn();
     if (spawn_result.is_err()) {
         std::cerr << "[BOOT] TelemetryBridge spawn failed: "
@@ -410,7 +412,7 @@ int main(int argc, char* argv[]) {
                   << std::endl;
     } else {
         std::cout << "[BOOT] TelemetryBridge child spawned (pid="
-                  << bridge.child_pid() << "). WebSocket on :9000."
+                  << bridge.child_pid() << "). WebSocket on :" << ws_port << "."
                   << std::endl;
     }
 
@@ -452,7 +454,7 @@ int main(int argc, char* argv[]) {
     mesh.start();
 
     // ---- Stage 7: IPC listener for C2 commands ----
-    std::thread ipc_thread(ipc_listener_loop, node_id, std::ref(jailer), std::ref(mesh));
+    std::thread ipc_thread(ipc_listener_loop, node_id, std::ref(jailer), std::ref(mesh), std::ref(bridge));
 
     std::cout << "[BOOT] System fully operational. Awaiting P2P telemetry..." << std::endl;
 
