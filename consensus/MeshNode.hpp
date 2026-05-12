@@ -31,8 +31,9 @@ class MeshNode {
 public:
     static constexpr int DISCOVERY_UDP_PORT = 9998;
     static constexpr int TCP_PORT_START    = 10000;
-    static constexpr int HEARTBEAT_SEC     = 5;
-    static constexpr int LIVENESS_SEC      = 30;
+    static constexpr int HEARTBEAT_SEC          = 5;
+    static constexpr int LIVENESS_SEC           = 30;
+    static constexpr int CONSENSUS_COOLDOWN_SEC = 30;
 
     // Constructor: starts with n=1 (self), scales up as peers are discovered.
     MeshNode(const std::string& node_id,
@@ -52,6 +53,9 @@ public:
     int tcp_port() const { return m_tcp_port; }
     int peer_count() const;
     std::vector<std::string> get_active_peer_ids() const;
+
+    // TOFU key management — unpin a peer's key to allow rotation (manual intervention)
+    void unpin_peer_key(const std::string& node_id);
 
 private:
     // === Threads ===
@@ -114,6 +118,10 @@ private:
     mutable std::mutex m_telemetry_mtx;
     std::string m_own_telemetry;
     std::unordered_map<std::string, std::string> m_peer_telemetry;  // node_id -> last JSON
+
+    // === Consensus rate limiting ===
+    mutable std::mutex m_cooldown_mtx;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_last_consensus;
 };
 
 } // namespace neuro_mesh

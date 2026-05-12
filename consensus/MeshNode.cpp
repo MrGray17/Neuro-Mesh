@@ -566,11 +566,11 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
             it->second.last_heartbeat = steady_clock::now();
             it->second.ip = sender_ip;        // update IP (may change)
             it->second.tcp_port = peer_tcp_port;
-            // Update key if the peer re-announces with a new identity (e.g. simulator restarts)
-            if (!peer_pem.empty()) {
-                it->second.public_key_pem = peer_pem;
-                it->second.verified = true;
-                m_pbft.register_peer_key(peer_id, peer_pem);
+            // TOFU key pinning: reject key changes for verified peers.
+            // A key change requires manual unpin_peer_key() first.
+            if (!peer_pem.empty() && it->second.public_key_pem != peer_pem) {
+                std::cerr << "[SECURITY] TOFU key change REJECTED for " << peer_id
+                          << " — use unpin_peer_key() to allow rotation." << std::endl;
             }
         }
     }  // m_peers_mtx RELEASED — safe to call perform_pex_handshake now
@@ -789,6 +789,22 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
 // =============================================================================
 
 void MeshNode::initiate_consensus(const std::string& target_id, const std::string& evidence_json) {
+    // Rate limiting: enforce cooldown per target to prevent consensus flood
+    {
+        std::lock_guard<std::mutex> lock(m_cooldown_mtx);
+        auto now = std::chrono::steady_clock::now();
+        auto it = m_last_consensus.find(target_id);
+        if (it != m_last_consensus.end()) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count();
+            if (elapsed < CONSENSUS_COOLDOWN_SEC) {
+                std::cerr << "[DEFENSE] Consensus rate-limited for " << target_id
+                          << " (" << (CONSENSUS_COOLDOWN_SEC - elapsed) << "s cooldown remaining)" << std::endl;
+                return;
+            }
+        }
+        m_last_consensus[target_id] = now;
+    }
+
     std::cout << "[DEFENSE] Initiating PBFT Consensus for target: " << target_id << std::endl;
     broadcast_pbft_stage("PRE_PREPARE", target_id, evidence_json);
 }
@@ -885,6 +901,23 @@ void MeshNode::prune_stale_peers() {
         std::cout << "[NETWORK] Pruned stale peer " << id
                   << ". Quorum updated to n=" << n_after << "." << std::endl;
     }
+}
+
+// =============================================================================
+// TOFU Key Management — unpin a peer's key for legitimate rotation
+// =============================================================================
+
+void MeshNode::unpin_peer_key(const std::string& node_id) {
+    std::unique_lock<std::shared_mutex> lock(m_peers_mtx);
+    auto it = m_peers.find(node_id);
+    if (it == m_peers.end()) {
+        std::cerr << "[SECURITY] unpin_peer_key: unknown peer " << node_id << std::endl;
+        return;
+    }
+    it->second.public_key_pem.clear();
+    it->second.verified = false;
+    std::cout << "[SECURITY] Key unpinned for " << node_id
+              << " — next beacon will accept new key." << std::endl;
 }
 
 // =============================================================================
