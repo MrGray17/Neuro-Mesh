@@ -57,6 +57,9 @@ public:
     // TOFU key management — unpin a peer's key to allow rotation (manual intervention)
     void unpin_peer_key(const std::string& node_id);
 
+    // Attack detection — true when this node is the target of a recent PBFT round
+    bool is_targeted_recently() const;
+
 private:
     // === Threads ===
     void p2p_listener_loop();        // PBFT consensus (UDP :9999)
@@ -99,6 +102,7 @@ private:
     std::thread m_tcp_thread;
     std::thread m_liveness_thread;
     std::chrono::steady_clock::time_point m_last_announce_time;
+    std::chrono::steady_clock::time_point m_last_targeted_at;  // last PBFT round targeting self
 
     // === Peer registry (thread-safe) ===
     mutable std::shared_mutex m_peers_mtx;

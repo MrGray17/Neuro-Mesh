@@ -568,9 +568,16 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
             it->second.tcp_port = peer_tcp_port;
             // TOFU key pinning: reject key changes for verified peers.
             // A key change requires manual unpin_peer_key() first.
-            if (!peer_pem.empty() && it->second.public_key_pem != peer_pem) {
+            // Skip check if stored key is empty — PEX handshake may have
+            // created the peer entry before the first signed beacon arrived.
+            if (!peer_pem.empty() && !it->second.public_key_pem.empty()
+                && it->second.public_key_pem != peer_pem) {
                 std::cerr << "[SECURITY] TOFU key change REJECTED for " << peer_id
                           << " — use unpin_peer_key() to allow rotation." << std::endl;
+            } else if (!peer_pem.empty() && it->second.public_key_pem.empty()) {
+                // First signed beacon for a peer discovered via PEX — accept key
+                it->second.public_key_pem = peer_pem;
+                it->second.verified = true;
             }
         }
     }  // m_peers_mtx RELEASED — safe to call perform_pex_handshake now
@@ -721,6 +728,12 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
         }
         P2PMessage incoming_msg{tokens[1], tokens[2], tokens[3], tokens[4], decoded_sig};
         if (incoming_msg.sender_id == m_node_id) return;
+
+        // Mark when this node is the target of a PBFT round — heartbeat uses
+        // this to report genuinely elevated entropy, not synthetic telemetry.
+        if (incoming_msg.target_id == m_node_id) {
+            m_last_targeted_at = std::chrono::steady_clock::now();
+        }
 
         std::cout << "[PBFT] Received " << incoming_msg.stage_str << " from " << incoming_msg.sender_id
                   << " targeting " << incoming_msg.target_id << std::endl;
@@ -901,6 +914,16 @@ void MeshNode::prune_stale_peers() {
         std::cout << "[NETWORK] Pruned stale peer " << id
                   << ". Quorum updated to n=" << n_after << "." << std::endl;
     }
+}
+
+// =============================================================================
+// Attack Detection — true while this node is the target of a recent PBFT round
+// =============================================================================
+
+bool MeshNode::is_targeted_recently() const {
+    if (m_last_targeted_at == std::chrono::steady_clock::time_point{}) return false;
+    auto elapsed = std::chrono::steady_clock::now() - m_last_targeted_at;
+    return std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() < 12;
 }
 
 // =============================================================================

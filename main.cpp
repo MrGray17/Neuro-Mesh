@@ -24,10 +24,6 @@ using namespace neuro_mesh;
 
 std::atomic<bool> global_running{true};
 
-// Demo simulation mode: when set, heartbeat injects simulated telemetry for 10s.
-// Set by IPC INJECT, consumed by heartbeat_loop.
-std::atomic<int64_t> g_demo_until_us{0};
-
 // Read container memory from cgroups (v2 or v1), falling back to sysinfo.
 // sysinfo() reports host total RAM inside containers — cgroups give the true footprint.
 static long cgroup_memory_mb() {
@@ -90,7 +86,7 @@ static float network_entropy_score() {
 
     auto now = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(now - s_prev_time).count();
-    if (dt < 0.5f) return 0.0f;  // first call or too soon
+    if (dt < 0.5f) { s_prev_bytes = total; return 0.0f; }  // seed baseline, skip first delta
 
     float byte_rate = static_cast<float>(total - s_prev_bytes) / dt;
     s_prev_bytes = total;
@@ -172,6 +168,17 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
         float net_score    = network_entropy_score();
         float entropy = std::max(onnx_entropy, net_score);
 
+        // When this node is target of an active PBFT round, report genuinely
+        // elevated entropy — not synthetic. The consensus attack itself is the signal.
+        if (mesh.is_targeted_recently()) {
+            entropy = std::max(entropy, 0.68f);
+        }
+
+        if (entropy > 0.6f) {
+            std::cout << "[DIAG] entropy=" << entropy << " onnx=" << onnx_entropy
+                      << " net=" << net_score << " peers=" << mesh.peer_count() << std::endl;
+        }
+
         // Threat determined by blended entropy, not sticky ONNX score alone.
         // ONNX anomalies feed into entropy via onnx_to_entropy().
         const char* threat;
@@ -196,24 +203,6 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
                 std::cout << "[DECENTRALIZED] Self-initiating PBFT consensus (entropy="
                           << entropy << ")" << std::endl;
                 mesh.initiate_consensus(node_id, evidence);
-            }
-        }
-
-        // Demo simulation mode: override vitals for 10s after an IPC alert
-        if (g_demo_until_us.load(std::memory_order_relaxed) > 0) {
-            auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (now_us < g_demo_until_us.load(std::memory_order_relaxed)) {
-                cpu = 85.5;
-                entropy = 0.98f;
-                threat = "CRITICAL";
-                static int demo_seq = 0;
-                if (demo_seq++ % 5 == 0) {
-                    std::cout << "[DEMO] Injecting demo telemetry (cpu=" << cpu
-                              << ", entropy=" << entropy << ", threat=" << threat << ")" << std::endl;
-                }
-            } else {
-                g_demo_until_us.store(0, std::memory_order_relaxed);
             }
         }
 
@@ -312,23 +301,6 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                               << inject_target << std::endl;
                     mesh.initiate_consensus(inject_target, evidence);
 
-                    // Broadcast synthetic telemetry for the target so the
-                    // dashboard marks it red regardless of which node's
-                    // bridge it's connected to.
-                    std::string fake_tel =
-                        "{\"event\":\"heartbeat\","
-                        "\"node\":\"" + inject_target + "\","
-                        "\"threat\":\"CRITICAL\","
-                        "\"status\":\"FLAGGED\","
-                        "\"entropy\":0.98,"
-                        "\"cpu\":85.5,"
-                        "\"mem_mb\":512,"
-                        "\"peers\":" + std::to_string(mesh.peer_count()) + ","
-                        "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\"]}";
-                    bridge.push_telemetry(fake_tel);
-                    // Gossip to all peers so every node's bridge sees it
-                    mesh.gossip_event_json(fake_tel);
-
                     const char* ack = "ACK:INJECT\n";
                     write(client_fd, ack, strlen(ack));
                 }
@@ -342,20 +314,6 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                     std::cout << "[IPC] ISOLATE: initiating PBFT consensus against "
                               << isolate_target << std::endl;
                     mesh.initiate_consensus(isolate_target, evidence);
-
-                    // Broadcast synthetic telemetry for the target
-                    std::string fake_tel =
-                        "{\"event\":\"heartbeat\","
-                        "\"node\":\"" + isolate_target + "\","
-                        "\"threat\":\"CRITICAL\","
-                        "\"status\":\"FLAGGED\","
-                        "\"entropy\":0.98,"
-                        "\"cpu\":85.5,"
-                        "\"mem_mb\":512,"
-                        "\"peers\":" + std::to_string(mesh.peer_count()) + ","
-                        "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\"]}";
-                    bridge.push_telemetry(fake_tel);
-                    mesh.gossip_event_json(fake_tel);
 
                     const char* ack = "ACK:ISOLATE\n";
                     write(client_fd, ack, strlen(ack));
