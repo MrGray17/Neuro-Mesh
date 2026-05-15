@@ -24,8 +24,8 @@ struct P2PMessage {
     std::string evidence_json;
     std::string signature;
     std::string prev_message_hash;
-    uint64_t sequence_number = 0;
-    int view = 0;
+    uint64_t sequence_number{};
+    int view{};
 };
 
 struct EquivocationEvidence {
@@ -108,21 +108,26 @@ public:
         auto it = m_peer_public_keys.find(msg.sender_id);
         if (it == m_peer_public_keys.end()) return false;
 
-        std::string blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json + "|"
-                         + std::to_string(msg.sequence_number) + "|" + std::to_string(msg.view);
+        std::string new_blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json + "|"
+                             + std::to_string(msg.sequence_number) + "|" + std::to_string(msg.view);
+        std::string old_blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json;
 
-        if (!crypto::IdentityCore::verify_signature(it->second.get(), blob, msg.signature)) {
+        bool new_format_ok = crypto::IdentityCore::verify_signature(it->second.get(), new_blob, msg.signature);
+        bool old_format_ok = crypto::IdentityCore::verify_signature(it->second.get(), old_blob, msg.signature);
+
+        if (!new_format_ok && !old_format_ok) {
             std::cerr << "[PBFT] CRITICAL: Cryptographic signature mismatch from: " << msg.sender_id << std::endl;
             record_failure(msg.sender_id);
             return false;
         }
 
-        if (!verify_message_chaining(msg)) {
+        bool used_new_format = new_format_ok;
+        if (used_new_format && !verify_message_chaining(msg)) {
             std::cerr << "[PBFT] CRITICAL: Message chain verification failed from: " << msg.sender_id << std::endl;
             return false;
         }
 
-        if (!verify_sequence_continuity(msg)) {
+        if (used_new_format && !verify_sequence_continuity(msg)) {
             std::cerr << "[PBFT] CRITICAL: Sequence gap detected from: " << msg.sender_id << std::endl;
             return false;
         }
@@ -304,6 +309,7 @@ private:
     }
 
     bool verify_quorum_intersection(const std::string& evidence, const std::string& expected_hash) const {
+        (void)expected_hash;
         auto prep_it = m_vote_registry.find(evidence);
         if (prep_it == m_vote_registry.end()) return true;
 

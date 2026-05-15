@@ -27,11 +27,11 @@ MeshNode::MeshNode(const std::string& node_id,
       m_tcp_port(0),
       m_running(false),
       m_pbft(1),   // start with n=1 (self), scale up via discovery
+      m_sequence_number(0),
       m_enforcer(enforcer),
       m_mitigation(mitigation),
       m_bridge(bridge),
-      m_journal("./journal_" + node_id + ".log"),
-      m_sequence_number(0)
+      m_journal("./journal_" + node_id + ".log")
 {
     m_private_key = crypto::IdentityCore::generate_ed25519_key();
     m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
