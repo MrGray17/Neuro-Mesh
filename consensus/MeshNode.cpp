@@ -10,6 +10,8 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
+#include <random>
+#include <thread>
 
 namespace neuro_mesh {
 
@@ -28,7 +30,8 @@ MeshNode::MeshNode(const std::string& node_id,
       m_enforcer(enforcer),
       m_mitigation(mitigation),
       m_bridge(bridge),
-      m_journal("./journal_" + node_id + ".log")
+      m_journal("./journal_" + node_id + ".log"),
+      m_sequence_number(0)
 {
     m_private_key = crypto::IdentityCore::generate_ed25519_key();
     m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
@@ -38,6 +41,11 @@ MeshNode::MeshNode(const std::string& node_id,
     // Register self so self-votes pass verification
     m_pbft.register_peer_key(m_node_id, m_public_key_pem);
 
+    // Enable enhanced PBFT features: identity, private key for signing, message chaining
+    m_pbft.set_my_identity(m_node_id);
+    m_pbft.set_private_key(std::move(m_private_key));
+
+    std::cout << "[DEFENSE] Elite PBFT initialized with equivocation detection and timing obfuscation." << std::endl;
     std::cout << "[JOURNAL] Initialized. Last seq: " << m_journal.last_seq() << std::endl;
 }
 
@@ -146,6 +154,11 @@ void MeshNode::discovery_beacon_loop() {
 // =============================================================================
 
 void MeshNode::send_udp_broadcast(const std::string& payload) {
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(10, 80);
+    std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) return;
 
@@ -164,6 +177,11 @@ void MeshNode::send_udp_broadcast(const std::string& payload) {
 }
 
 void MeshNode::send_udp_discovery(const std::string& payload) {
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(5, 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) return;
 
@@ -182,6 +200,11 @@ void MeshNode::send_udp_discovery(const std::string& payload) {
 }
 
 void MeshNode::send_udp_unicast(const std::string& ip, int port, const std::string& payload) {
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(15, 100);
+    std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) return;
 
@@ -793,13 +816,14 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
             announce_identity();
         }
     }
-    else if (cmd == "VOTE" && tokens.size() >= 6) {
-        // Input validation: reject malformed PBFT messages before crypto processing
+    else if (cmd == "VOTE" && tokens.size() >= 7) {
         const std::string& stage_str    = tokens[1];
         const std::string& sender_id    = tokens[2];
-        const std::string& target_id    = tokens[3];
-        const std::string& evidence_raw = tokens[4];
-        const std::string& sig_b64      = tokens[5];
+        const std::string& seq_str      = tokens[3];
+        const std::string& view_str     = tokens[4];
+        const std::string& target_id    = tokens[5];
+        const std::string& evidence_raw = tokens[6];
+        const std::string& sig_b64      = tokens[7];
 
         if (stage_str.empty() || sender_id.empty() || target_id.empty()) return;
         if (sender_id.size() > 64 || target_id.size() > 64) return;
@@ -807,12 +831,22 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
         if (evidence_raw[0] != '{') return;
         if (stage_str != "PRE_PREPARE" && stage_str != "PREPARE" && stage_str != "COMMIT") return;
 
+        uint64_t seq = 0;
+        int view = 0;
+        try {
+            seq = std::stoull(seq_str);
+            view = std::stoi(view_str);
+        } catch (...) {
+            std::cerr << "[PBFT] Invalid seq/view from " << sender_id << std::endl;
+            return;
+        }
+
         std::string decoded_sig = base64_decode(sig_b64);
         if (decoded_sig.empty()) {
             std::cerr << "[PBFT] Failed to decode signature from " << sender_id << std::endl;
             return;
         }
-        P2PMessage incoming_msg{stage_str, sender_id, target_id, evidence_raw, decoded_sig};
+        P2PMessage incoming_msg{stage_str, sender_id, target_id, evidence_raw, decoded_sig, "", seq, view};
         if (incoming_msg.sender_id == m_node_id) return;
 
         // Mark when this node is the target of a PBFT round
@@ -906,21 +940,36 @@ void MeshNode::initiate_consensus(const std::string& target_id, const std::strin
 }
 
 void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::string& target_id, const std::string& evidence_json) {
-    std::string signed_blob = stage_str + "|" + target_id + "|" + evidence_json;
-    std::string signature = crypto::IdentityCore::sign_payload(m_private_key.get(), signed_blob);
+    uint64_t seq = ++m_sequence_number;
+    int view = m_pbft.current_view();
+
+    std::string prev_hash = m_pbft.get_chain_state_hash();
+
+    P2PMessage msg;
+    msg.stage_str = stage_str;
+    msg.sender_id = m_node_id;
+    msg.target_id = target_id;
+    msg.evidence_json = evidence_json;
+    msg.sequence_number = seq;
+    msg.view = view;
+    msg.prev_message_hash = prev_hash;
+
+    std::string signature = m_pbft.sign_message(msg);
     std::string encoded_sig = base64_encode(signature);
-    std::string payload = "VOTE|" + stage_str + "|" + m_node_id + "|" + target_id + "|" + evidence_json + "|" + encoded_sig;
+
+    std::string payload = "VOTE|" + stage_str + "|" + m_node_id + "|" + std::to_string(seq) + "|" +
+                          std::to_string(view) + "|" + target_id + "|" + evidence_json + "|" + encoded_sig;
     send_udp_broadcast(payload);
 
-    P2PMessage self_msg{stage_str, m_node_id, target_id, evidence_json, signature};
+    P2PMessage self_msg{stage_str, m_node_id, target_id, evidence_json, signature, prev_hash, seq, view};
     if (m_pbft.verify_message(self_msg)) {
         PBFTStage next_stage = m_pbft.advance_state(self_msg);
 
         if (next_stage == PBFTStage::PREPARE) {
-            std::cout << "[PBFT] -> Advanced to PREPARE, broadcasting..." << std::endl;
+            std::cout << "[PBFT] -> Advanced to PREPARE (seq=" << seq << "), broadcasting..." << std::endl;
             broadcast_pbft_stage("PREPARE", target_id, evidence_json);
         } else if (next_stage == PBFTStage::COMMIT) {
-            std::cout << "[PBFT] -> Advanced to COMMIT, broadcasting..." << std::endl;
+            std::cout << "[PBFT] -> Advanced to COMMIT (seq=" << seq << "), broadcasting..." << std::endl;
             m_journal.append("COMMIT", target_id, evidence_json);
             if (m_bridge) {
                 std::ignore = m_bridge->push_telemetry(
@@ -932,7 +981,7 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
             broadcast_pbft_stage("COMMIT", target_id, evidence_json);
         } else if (next_stage == PBFTStage::EXECUTED) {
             std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << target_id
-                      << " — executing MitigationEngine response." << std::endl;
+                      << " (seq=" << seq << ") — executing MitigationEngine response." << std::endl;
             m_journal.append("EXECUTED", target_id, evidence_json);
             if (m_bridge) {
                 std::ignore = m_bridge->push_telemetry(

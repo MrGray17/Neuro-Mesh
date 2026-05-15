@@ -96,6 +96,7 @@ private:
     std::string m_public_key_pem;
     std::string m_public_key_b64;  // base64-encoded for discovery beacons
     PBFTConsensus m_pbft;
+    uint64_t m_sequence_number{0};
 
     // === Thread handles ===
     std::thread m_listener_thread;
