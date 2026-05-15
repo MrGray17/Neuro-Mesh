@@ -47,8 +47,13 @@ inline std::string base64_decode(const std::string& data) {
     std::string out;
     out.reserve((data.size() / 4) * 3);
     int val = 0, valb = -8;
+    bool has_error = false;
     for (char c : data) {
-        if (c == '=' || static_cast<size_t>(c) >= 128 || lookup[static_cast<size_t>(c)] == -1) continue;
+        if (c == '=') break;  // padding reached, stop processing
+        if (static_cast<size_t>(c) >= 128 || lookup[static_cast<size_t>(c)] == -1) {
+            has_error = true;  // malformed input — reject entire payload
+            continue;
+        }
         val = (val << 6) + lookup[static_cast<size_t>(c)];
         valb += 6;
         if (valb >= 0) {
@@ -56,6 +61,7 @@ inline std::string base64_decode(const std::string& data) {
             valb -= 8;
         }
     }
+    if (has_error) return {};
     return out;
 }
 

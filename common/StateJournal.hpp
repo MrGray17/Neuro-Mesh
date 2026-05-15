@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include "crypto/CryptoCore.hpp"
 
 namespace neuro_mesh {
 
@@ -39,8 +40,11 @@ public:
     {
         uint64_t seq = m_seq.fetch_add(1, std::memory_order_relaxed) + 1;
 
-        // SHA-256 hash from evidence (inline to avoid circular include)
-        std::string hash = hash_evidence(evidence_json);
+        // Cryptographic SHA-256 audit hash — enables forensic verification
+        std::string hash = crypto::IdentityCore::sha256_hex(evidence_json);
+        if (hash.empty()) {
+            hash = std::string(64, '0');  // fallback on crypto failure
+        }
 
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -54,6 +58,29 @@ public:
                          + ",\"hash\":\"" + hash + "\"}\n";
 
         std::lock_guard<std::mutex> lock(m_write_mtx);
+
+        // Atomic log rotation using flock() - prevents TOCTOU race
+        {
+            int lock_fd = ::open(m_path.c_str(), O_RDWR);
+            if (lock_fd >= 0) {
+                struct flock fl;
+                fl.l_type = F_WRLCK;
+                fl.l_whence = SEEK_SET;
+                fl.l_start = 0;
+                fl.l_len = 0;
+
+                if (fcntl(lock_fd, F_SETLK, &fl) == 0) {
+                    struct stat st;
+                    if (fstat(lock_fd, &st) == 0 && st.st_size > 10 * 1024 * 1024) {
+                        std::string backup = m_path + ".1";
+                        ::rename(m_path.c_str(), backup.c_str());
+                    }
+                    fl.l_type = F_UNLCK;
+                    fcntl(lock_fd, F_SETLK, &fl);
+                }
+                close(lock_fd);
+            }
+        }
 
         int fd = ::open(m_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd < 0) return seq;
@@ -86,19 +113,6 @@ private:
         return val;
     }
 
-    // Inline SHA-256 via shell-out to avoid coupling to crypto headers.
-    // For header-only simplicity we use a deterministic fingerprint.
-    static std::string hash_evidence(const std::string& data) {
-        // Use std::hash as a fast fingerprint (not cryptographic but unique per payload).
-        // Full SHA-256 would require including CryptoCore.hpp which creates a circular dep.
-        // The hash is for audit correlation, not security — the Ed25519 signature on
-        // PBFT messages already provides cryptographic integrity.
-        std::hash<std::string> hasher;
-        uint64_t h = hasher(data);
-        char buf[17];
-        snprintf(buf, sizeof(buf), "%016lx", static_cast<unsigned long>(h));
-        return {buf};
-    }
 
     std::string m_path;
     std::atomic<uint64_t> m_seq;

@@ -108,7 +108,15 @@ public:
     }
 
     int peer_count() const { return m_total_nodes; }
-    int quorum_size() const { return (2 * m_total_nodes + 2) / 3; }  // PBFT: 2f+1 = ceil(2n/3)
+    int quorum_size() const { return (2 * std::max(1, m_total_nodes) + 2) / 3; }  // PBFT: 2f+1 = ceil(2n/3)
+
+    // ---- Dynamic quorum limitations ----
+    // WARNING: Dynamic quorum changes during active PBFT rounds can cause consistency issues.
+    // If peers join/leave mid-round, the quorum threshold may shift, potentially allowing
+    // a lower threshold to be met by votes collected under the previous threshold.
+    // Mitigation: The implementation uses max(1, n) to prevent division-by-zero and
+    // increments/decrements atomically. For production use, consider view-change protocol
+    // or round invalidation when peer count changes mid-round.
 
     // ---- Dynamic quorum management ----
     void set_peer_count(int n) {

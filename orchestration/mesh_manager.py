@@ -3,7 +3,7 @@ import time
 import signal
 import sys
 
-nodes = ["NODE_1", "NODE_2", "NODE_3", "NODE_4", "NODE_5"]
+nodes = ["ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO"]
 processes = []
 
 def cleanup(sig, frame):

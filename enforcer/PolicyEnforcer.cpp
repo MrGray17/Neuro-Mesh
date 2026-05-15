@@ -62,7 +62,13 @@ void PolicyEnforcer::probe_backends() {
 
 bool PolicyEnforcer::is_valid_ipv4(const std::string& ip) {
     struct in_addr addr;
-    return inet_aton(ip.c_str(), &addr) != 0;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) return false;
+
+    // Round-trip through inet_ntop to reject non-standard formats
+    // that inet_aton would accept: "1.2.3" (→1.2.0.3), "0x7f000001", "2130706433", etc.
+    char buf[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &addr, buf, sizeof(buf)) == nullptr) return false;
+    return ip == std::string(buf);
 }
 
 bool PolicyEnforcer::is_valid_ipv6(const std::string& ip) {
@@ -75,10 +81,10 @@ bool PolicyEnforcer::is_valid_ip(const std::string& ip) {
 }
 
 bool PolicyEnforcer::is_loopback(const std::string& ip) {
-    if (!is_valid_ipv4(ip)) return false;
     struct in_addr addr;
-    inet_aton(ip.c_str(), &addr);
-    return (ntohl(addr.s_addr) >> 24) == 127;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) return false;
+    // Check 127.0.0.0/8 range (all loopback addresses)
+    return (ntohl(addr.s_addr) & 0xFF000000) == 0x7F000000;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +300,7 @@ bool PolicyEnforcer::remove_iptables_drop(const std::string& ip) {
 // ---------------------------------------------------------------------------
 
 // D3FEND: D3-NTF (Network Traffic Filtering) — cascade through eBPF → nftables → iptables drop rules
-	bool PolicyEnforcer::block_ip_address(const std::string& ip) {
+bool PolicyEnforcer::block_ip_address(const std::string& ip) {
     if (!is_valid_ip(ip)) {
         std::cerr << "[ENFORCER] Invalid IP address: " << ip << std::endl;
         return false;
@@ -417,7 +423,7 @@ void PolicyEnforcer::release_target(const std::string& target) {
 }
 
 // ---------------------------------------------------------------------------
-// Process suspend_processment
+// Process Suspension
 // ---------------------------------------------------------------------------
 
 // D3FEND: D3-PT (Process Termination) — SIGSTOP halts compromised process for forensic triage
@@ -426,7 +432,7 @@ void PolicyEnforcer::suspend_process(uint32_t pid) {
     if (m_suspended_pids.find(pid) != m_suspended_pids.end()) return;
 
     m_suspended_pids.insert(pid);
-    std::cout << "[ENFORCER] Process " << pid << " suspend_processed." << std::endl;
+    std::cout << "[ENFORCER] Process " << pid << " suspended." << std::endl;
 
     if (kill(static_cast<pid_t>(pid), SIGSTOP) == 0) {
         std::cout << "[ENFORCER] SIGSTOP delivered to PID " << pid << std::endl;

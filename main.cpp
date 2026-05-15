@@ -117,8 +117,9 @@ void signal_handler(int signum) {
 // =============================================================================
 
 void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
-                    ai::InferenceEngine& inference, core::NodeAgent* ebpf,
+                    ai::InferenceEngine* inference, core::NodeAgent* ebpf,
                     const std::string& node_id) {
+    (void)bridge;
     int seq = 0;
     pid_t my_pid = getpid();  // filter eBPF events from our own traffic
     while (global_running) {
@@ -148,22 +149,22 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
         long mem_mb = cgroup_memory_mb();
 
         // ---- eBPF sensor: drain ring buffer, run ONNX inference on kernel events ----
-        if (ebpf && ebpf->is_operational()) {
+        if (inference && ebpf && ebpf->is_operational()) {
             auto events = ebpf->poll_events();
             if (events.empty()) {
                 // No new kernel events — decay the anomaly score toward normal.
                 // Prevents sticky CRITICAL state after anomalous traffic ceases.
-                inference.decay(0.3f);
+                inference->decay(0.3f);
             } else {
                 for (const auto& ev : events) {
                     // Skip events from our own PID (telemetry, P2P discovery)
                     if (static_cast<pid_t>(ev.pid) == my_pid) continue;
-                    inference.analyze(std::string(ev.comm), std::string(ev.payload));
+                    inference->analyze(std::string(ev.comm), std::string(ev.payload));
                 }
             }
         }
 
-        float onnx_score   = inference.last_score();
+        float onnx_score   = inference ? inference->last_score() : 0.0f;
         float onnx_entropy = onnx_to_entropy(onnx_score);
         float net_score    = network_entropy_score();
         float entropy = std::max(onnx_entropy, net_score);
@@ -241,6 +242,7 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
 // =============================================================================
 
 void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshNode& mesh, TelemetryBridge& bridge) {
+    (void)bridge;
     std::string socket_path = "/tmp/neuro_mesh_" + node_id.substr(node_id.find('_') + 1) + ".sock";
     unlink(socket_path.c_str());
 
@@ -282,6 +284,24 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
 
         int client_fd = accept(server_fd.get(), nullptr, nullptr);
         if (client_fd < 0) continue;
+
+        // SO_PEERCRED authentication — only root or our own UID may send commands
+        struct ucred cred {};
+        socklen_t cred_len = sizeof(cred);
+        if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
+            if (cred.uid != 0 && cred.uid != getuid()) {
+                std::cerr << "[IPC] REJECTED: command from uid=" << cred.uid
+                          << " pid=" << cred.pid << " (not authorized)" << std::endl;
+                const char* reject = "REJECT:AUTH\n";
+                write(client_fd, reject, strlen(reject));
+                close(client_fd);
+                continue;
+            }
+        } else {
+            std::cerr << "[IPC] REJECTED: could not obtain peer credentials" << std::endl;
+            close(client_fd);
+            continue;
+        }
 
         char buf[256];
         ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
@@ -340,7 +360,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    std::string node_id = "NODE_1";
+    std::string node_id = "ALPHA";
     if (argc > 1) {
         node_id = argv[1];
     }
@@ -355,12 +375,30 @@ int main(int argc, char* argv[]) {
 
     // ---- Stage 2: Telemetry bridge (privilege-separated child process) ----
     // Each node gets a unique WebSocket port to avoid host-network conflicts.
-    // wsbridge uses port 9001, so nodes use 9000 + offset to stay clear.
+    // Supports NEURO_WS_PORT env var for override, otherwise auto-assign.
     int ws_port = 9000;
-    if (node_id == "BRAVO")      ws_port = 9010;
+    const char* env_ws_port = std::getenv("NEURO_WS_PORT");
+    if (env_ws_port) {
+        char* end;
+        long port_val = std::strtol(env_ws_port, &end, 10);
+        if (*end == '\0' && port_val > 0 && port_val < 65536) {
+            ws_port = static_cast<int>(port_val);
+            std::cout << "[BOOT] WebSocket port overridden by NEURO_WS_PORT: " << ws_port << std::endl;
+        } else {
+            std::cerr << "[BOOT] WARNING: invalid NEURO_WS_PORT='" << env_ws_port
+                      << "', using auto-config" << std::endl;
+        }
+    } else if (node_id == "ALPHA")   ws_port = 9000;
+    else if (node_id == "BRAVO")  ws_port = 9010;
     else if (node_id == "CHARLIE") ws_port = 9020;
     else if (node_id == "DELTA")  ws_port = 9030;
     else if (node_id == "ECHO")   ws_port = 9040;
+    else if (node_id == "NODE_1") ws_port = 9000;
+    else if (node_id == "NODE_2") ws_port = 9010;
+    else if (node_id == "NODE_3") ws_port = 9020;
+    else if (node_id == "NODE_4") ws_port = 9030;
+    else if (node_id == "NODE_5") ws_port = 9040;
+
     TelemetryBridge bridge({.websocket_port = static_cast<uint16_t>(ws_port)});
     auto spawn_result = bridge.spawn();
     if (spawn_result.is_err()) {
@@ -401,11 +439,13 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- Stage 5: Heartbeat (node vitals broadcast every 2s) ----
+    // Runs even without ONNX — network entropy from /proc/net/dev is always available.
     std::thread heartbeat_thread;
-    if (bridge.alive() && inference) {
+    if (bridge.alive()) {
         heartbeat_thread = std::thread(heartbeat_loop, std::ref(bridge), std::ref(mesh),
-                                       std::ref(*inference), ebpf.get(), node_id);
-        std::cout << "[BOOT] Heartbeat pulse started (2s interval)." << std::endl;
+                                       inference.get(), ebpf.get(), node_id);
+        std::cout << "[BOOT] Heartbeat pulse started (2s interval)."
+                  << (inference ? "" : " No ONNX — network entropy only.") << std::endl;
     }
 
     // ---- Stage 6: P2P listener ----

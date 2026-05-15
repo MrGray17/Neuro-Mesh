@@ -36,10 +36,10 @@ public:
         }
     }
 
-private:
-    // Compute Shannon entropy without heap allocation (stack-based freq array)
+    // Static utility for testing - compute Shannon entropy
     static double compute_entropy(const char* data, size_t len) noexcept;
 
+private:
     // Extract 5 features into the pre-allocated m_input buffer
     void extract_features(const std::string& comm, const std::string& payload) noexcept;
 

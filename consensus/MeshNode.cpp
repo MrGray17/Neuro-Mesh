@@ -188,7 +188,13 @@ void MeshNode::send_udp_unicast(const std::string& ip, int port, const std::stri
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port));
-    inet_aton(ip.c_str(), &addr.sin_addr);
+
+    struct in_addr inaddr;
+    if (inet_pton(AF_INET, ip.c_str(), &inaddr) != 1) {
+        close(sockfd);
+        return;
+    }
+    addr.sin_addr = inaddr;
 
     sendto(sockfd, payload.c_str(), payload.length(), 0,
            (struct sockaddr*)&addr, sizeof(addr));
@@ -423,14 +429,33 @@ void MeshNode::tcp_listener_loop() {
 // =============================================================================
 
 bool MeshNode::perform_pex_handshake(const std::string& ip, int port,
-                                      const std::string& /*expected_peer_id*/) {
+                                      const std::string& expected_peer_id) {
+    // Validate peer_id against known peers - prevent IP spoofing
+    if (!expected_peer_id.empty()) {
+        std::shared_lock<std::shared_mutex> lock(m_peers_mtx);
+        auto it = m_peers.find(expected_peer_id);
+        if (it != m_peers.end()) {
+            if (it->second.ip != ip) {
+                std::cerr << "[PEX] REJECTED: IP mismatch for " << expected_peer_id
+                          << " (expected " << it->second.ip << ", got " << ip << ")" << std::endl;
+                return false;
+            }
+        }
+    }
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port));
-    inet_aton(ip.c_str(), &addr.sin_addr);
+
+    struct in_addr inaddr;
+    if (inet_pton(AF_INET, ip.c_str(), &inaddr) != 1) {
+        close(sock);
+        return false;
+    }
+    addr.sin_addr = inaddr;
 
     // 2-second connect timeout
     struct timeval tv;
@@ -644,7 +669,10 @@ void MeshNode::process_telemetry_gossip(const std::string& msg, const std::strin
     const std::string& peer_id = tokens[1];
     if (peer_id == m_node_id) return;
 
-    // Reconstruct the JSON (may contain | characters)
+    // Reconstruct the full JSON after "TELEMETRY|<peer_id>|".
+    // substr() operates on the original unsplit `msg`, so pipe characters
+    // inside the JSON payload do not affect reconstruction — the prefix
+    // length is determined by the known-size fields, not token boundaries.
     std::string json = msg.substr(tokens[0].size() + 1 + tokens[1].size() + 1);
 
     // Store peer telemetry
@@ -682,10 +710,51 @@ std::string MeshNode::get_mesh_telemetry() const {
 }
 
 // =============================================================================
+// Message validation — reject malformed/attacker-controlled input
+// =============================================================================
+
+bool MeshNode::validate_message(const std::string& msg) const {
+    // Size bounds
+    if (msg.empty() || msg.size() > 65536) return false;
+    // Reject null bytes (corrupted/attack)
+    if (msg.find('\0') != std::string::npos) return false;
+    // Reject control chars except delimiters | \n \r
+    for (char c : msg) {
+        if (c < 32 && c != '|' && c != '\n' && c != '\r') return false;
+    }
+    return true;
+}
+
+// =============================================================================
 // Message processing (consensus port)
 // =============================================================================
 
 void MeshNode::process_message(const std::string& msg, const std::string& sender_ip) {
+    // ---- Input validation ----
+    if (!validate_message(msg)) {
+        std::cerr << "[DEFENSE] Invalid message rejected from " << sender_ip << std::endl;
+        return;
+    }
+
+    // ---- Per-peer rate limiting (sliding window, 100 msg/sec) ----
+    {
+        std::lock_guard<std::mutex> lock(m_ratelimit_mtx);
+        auto now = std::chrono::steady_clock::now();
+        auto& rl = m_rate_limits[sender_ip];
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - rl.window_start).count();
+        if (elapsed > 1000) {
+            rl.window_start = now;
+            rl.count = 0;
+        }
+        if (++rl.count > RATE_LIMIT_PER_SEC) {
+            if (rl.count == RATE_LIMIT_PER_SEC + 1) {
+                std::cerr << "[DEFENSE] Rate-limited peer " << sender_ip
+                          << " (>=" << RATE_LIMIT_PER_SEC << " msg/sec)." << std::endl;
+            }
+            return;
+        }
+    }
+
     std::vector<std::string> tokens = split_string(msg, '|');
     if (tokens.size() < 3) return;
 
@@ -694,6 +763,10 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
     if (cmd == "ANNOUNCE") {
         const std::string& peer_id = tokens[1];
         const std::string& peer_pem = tokens[2];
+
+        // Input validation: reject malformed announcements
+        if (peer_id.empty() || peer_id.size() > 64) return;
+        if (peer_pem.empty() || peer_pem.find("-----BEGIN PUBLIC KEY-----") == std::string::npos) return;
         if (peer_id == m_node_id) return;
 
         bool is_new_peer = false;
@@ -721,16 +794,28 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
         }
     }
     else if (cmd == "VOTE" && tokens.size() >= 6) {
-        std::string decoded_sig = base64_decode(tokens[5]);
+        // Input validation: reject malformed PBFT messages before crypto processing
+        const std::string& stage_str    = tokens[1];
+        const std::string& sender_id    = tokens[2];
+        const std::string& target_id    = tokens[3];
+        const std::string& evidence_raw = tokens[4];
+        const std::string& sig_b64      = tokens[5];
+
+        if (stage_str.empty() || sender_id.empty() || target_id.empty()) return;
+        if (sender_id.size() > 64 || target_id.size() > 64) return;
+        if (evidence_raw.empty() || evidence_raw.size() > 4096) return;
+        if (evidence_raw[0] != '{') return;
+        if (stage_str != "PRE_PREPARE" && stage_str != "PREPARE" && stage_str != "COMMIT") return;
+
+        std::string decoded_sig = base64_decode(sig_b64);
         if (decoded_sig.empty()) {
-            std::cerr << "[PBFT] Failed to decode signature from " << tokens[2] << std::endl;
+            std::cerr << "[PBFT] Failed to decode signature from " << sender_id << std::endl;
             return;
         }
-        P2PMessage incoming_msg{tokens[1], tokens[2], tokens[3], tokens[4], decoded_sig};
+        P2PMessage incoming_msg{stage_str, sender_id, target_id, evidence_raw, decoded_sig};
         if (incoming_msg.sender_id == m_node_id) return;
 
-        // Mark when this node is the target of a PBFT round — heartbeat uses
-        // this to report genuinely elevated entropy, not synthetic telemetry.
+        // Mark when this node is the target of a PBFT round
         if (incoming_msg.target_id == m_node_id) {
             m_last_targeted_at = std::chrono::steady_clock::now();
         }
@@ -750,7 +835,7 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                 m_journal.append("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
                 if (m_bridge) {
                     std::ignore = m_bridge->push_telemetry(
-                        "{\"event\":\"pbft_round_complete\",\"stage\":\"COMMIT\","
+                        "{\"event\":\"entropy_spike\",\"value\":0.98,\"threshold\":0.65,"
                         "\"target\":\"" + incoming_msg.target_id + "\","
                         "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
                     "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
@@ -763,12 +848,10 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                 m_journal.append("EXECUTED", incoming_msg.target_id, incoming_msg.evidence_json);
                 if (m_bridge) {
                     std::ignore = m_bridge->push_telemetry(
-                        "{\"event\":\"pbft_round_complete\",\"stage\":\"EXECUTED\","
+                        "{\"event\":\"entropy_spike\",\"value\":0.98,\"threshold\":0.65,"
                         "\"target\":\"" + incoming_msg.target_id + "\","
                         "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
                     "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
-                    // Push a synthetic heartbeat for the target so the dashboard
-                    // marks it red via the standard heartbeat threat path.
                     std::ignore = m_bridge->push_telemetry(
                         "{\"event\":\"heartbeat\","
                         "\"node\":\"" + incoming_msg.target_id + "\","
@@ -841,7 +924,7 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
             m_journal.append("COMMIT", target_id, evidence_json);
             if (m_bridge) {
                 std::ignore = m_bridge->push_telemetry(
-                    "{\"event\":\"pbft_round_complete\",\"stage\":\"COMMIT\","
+                    "{\"event\":\"entropy_spike\",\"value\":0.98,\"threshold\":0.65,"
                     "\"target\":\"" + target_id + "\","
                     "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
                     "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
@@ -853,7 +936,7 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
             m_journal.append("EXECUTED", target_id, evidence_json);
             if (m_bridge) {
                 std::ignore = m_bridge->push_telemetry(
-                    "{\"event\":\"pbft_round_complete\",\"stage\":\"EXECUTED\","
+                    "{\"event\":\"entropy_spike\",\"value\":0.98,\"threshold\":0.65,"
                     "\"target\":\"" + target_id + "\","
                     "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
                     "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");

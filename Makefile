@@ -99,7 +99,27 @@ $(CRYPTO_TEST_TARGET): tools/test_crypto.cpp $(OBJ_DIR)/crypto/CryptoCore.o
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS)
 
-tools: $(SIM_TARGET) $(CRYPTO_TEST_TARGET)
+PBFT_TEST_TARGET = $(BIN_DIR)/test_pbft
+$(PBFT_TEST_TARGET): tools/test_pbft.cpp $(OBJ_DIR)/crypto/CryptoCore.o
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS)
+
+ENFORCER_TEST_TARGET = $(BIN_DIR)/test_enforcer
+$(ENFORCER_TEST_TARGET): tools/test_enforcer.cpp $(OBJ_DIR)/enforcer/PolicyEnforcer.o $(OBJ_DIR)/crypto/CryptoCore.o
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/enforcer/PolicyEnforcer.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(BPF_LIBS)
+
+MESHNODE_TEST_TARGET = $(BIN_DIR)/test_meshnode
+$(MESHNODE_TEST_TARGET): tools/test_meshnode.cpp $(OBJ_DIR)/consensus/MeshNode.o $(OBJ_DIR)/enforcer/PolicyEnforcer.o $(OBJ_DIR)/enforcer/MitigationEngine.o $(OBJ_DIR)/telemetry/TelemetryBridge.o $(OBJ_DIR)/crypto/CryptoCore.o $(USOCK_OBJS)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(USOCK_OBJS) $(OBJ_DIR)/consensus/MeshNode.o $(OBJ_DIR)/enforcer/PolicyEnforcer.o $(OBJ_DIR)/enforcer/MitigationEngine.o $(OBJ_DIR)/telemetry/TelemetryBridge.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(BPF_LIBS) $(SECC_LIBS)
+
+INFERENCE_TEST_TARGET = $(BIN_DIR)/test_inference
+$(INFERENCE_TEST_TARGET): tools/test_inference.cpp $(OBJ_DIR)/cell/InferenceEngine.o
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/cell/InferenceEngine.o -o $@ $(ONNX_LIBS)
+
+tools: $(SIM_TARGET) $(CRYPTO_TEST_TARGET) $(PBFT_TEST_TARGET) $(ENFORCER_TEST_TARGET) $(MESHNODE_TEST_TARGET) $(INFERENCE_TEST_TARGET)
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR) kernel/sensor.skel.h

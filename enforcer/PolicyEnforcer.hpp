@@ -44,18 +44,19 @@ public:
     void release_target(const std::string& target);
     void add_safe_node(const std::string& node_id);
 
+    // IP validation utilities (stateless, safe for external use)
+    static bool is_loopback(const std::string& ip);
+    static bool is_valid_ipv4(const std::string& ip);
+    static bool is_valid_ipv6(const std::string& ip);
+    static bool is_valid_ip(const std::string& ip);
+    bool is_safe(const std::string& target_id) const;
+
 private:
     // Returns process-wide available backends (probed once, static — immune to instance corruption)
     static EnforcementBackend available_backends();
 
     // Init-time capability probe + logging
     static void probe_backends();
-
-    bool is_safe(const std::string& target_id) const;
-    static bool is_loopback(const std::string& ip);
-    static bool is_valid_ipv4(const std::string& ip);
-    static bool is_valid_ipv6(const std::string& ip);
-    static bool is_valid_ip(const std::string& ip);
 
     // Backend initialization (idempotent, called at probe time)
     static bool ensure_ebpf_map();

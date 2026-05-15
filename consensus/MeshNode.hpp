@@ -60,6 +60,9 @@ public:
     // Attack detection — true when this node is the target of a recent PBFT round
     bool is_targeted_recently() const;
 
+    // Utility — split string by delimiter (public for testing)
+    std::vector<std::string> split_string(const std::string& str, char delimiter);
+
 private:
     // === Threads ===
     void p2p_listener_loop();        // PBFT consensus (UDP :9999)
@@ -69,6 +72,7 @@ private:
 
     // === Messaging ===
     void process_message(const std::string& msg, const std::string& sender_ip);
+    bool validate_message(const std::string& msg) const;
     void process_discovery_beacon(const std::string& msg, const std::string& sender_ip);
     void process_telemetry_gossip(const std::string& msg, const std::string& sender_ip);
     void broadcast_pbft_stage(const std::string& stage_str, const std::string& target_id, const std::string& evidence_json);
@@ -80,10 +84,7 @@ private:
     void send_discovery_beacon();
     void announce_identity();
     bool perform_pex_handshake(const std::string& ip, int port, const std::string& expected_peer_id);
-    void add_verified_peer(const std::string& node_id, const std::string& ip,
-                           int tcp_port, const std::string& public_key_pem);
     void prune_stale_peers();
-    std::vector<std::string> split_string(const std::string& str, char delimiter);
 
     // === Identity ===
     std::string m_node_id;
@@ -126,6 +127,15 @@ private:
     // === Consensus rate limiting ===
     mutable std::mutex m_cooldown_mtx;
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_last_consensus;
+
+    // === Per-peer UDP message rate limiting ===
+    struct RateLimitState {
+        int count = 0;
+        std::chrono::steady_clock::time_point window_start;
+    };
+    mutable std::mutex m_ratelimit_mtx;
+    std::unordered_map<std::string, RateLimitState> m_rate_limits;
+    static constexpr int RATE_LIMIT_PER_SEC = 100;
 };
 
 } // namespace neuro_mesh

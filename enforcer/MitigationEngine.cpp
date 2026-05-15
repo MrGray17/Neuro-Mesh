@@ -42,9 +42,17 @@ std::string MitigationEngine::extract_str(std::string_view json, std::string_vie
     if (val_start >= json.size() || json[val_start] != '"') return {};
     ++val_start; // skip opening quote
 
-    // Find closing quote
-    size_t val_end = json.find('"', val_start);
-    if (val_end == std::string_view::npos) return {};
+    // Find closing quote, skipping over escaped quotes (\")
+    size_t val_end = val_start;
+    while (val_end < json.size()) {
+        if (json[val_end] == '"') break;
+        if (json[val_end] == '\\' && val_end + 1 < json.size()) {
+            val_end += 2;  // skip the escaped character
+        } else {
+            ++val_end;
+        }
+    }
+    if (val_end >= json.size()) return {};
 
     return std::string(json.substr(val_start, val_end - val_start));
 }
