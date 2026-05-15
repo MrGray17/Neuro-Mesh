@@ -1,0 +1,18 @@
+apiVersion: v2
+name: neuro-mesh
+description: A production-grade Byzantine Fault Tolerant security mesh for Kubernetes
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - security
+  - bft
+  - p2p
+  - consensus
+  - byzantine
+  - distributed-systems
+maintainers:
+  - name: Neuro-Mesh Team
+    email: team@neuro-mesh.io
+sources:
+  - https://github.com/MrGray17/Neuro-Mesh

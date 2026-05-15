@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: neuro-mesh
+  labels:
+    name: neuro-mesh
+    security.neural-mesh.io: enabled
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: neuro-mesh-sa
+  namespace: neuro-mesh
+  labels:
+    app: neuro-mesh
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: neuro-mesh-role
+  namespace: neuro-mesh
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: neuro-mesh-rolebinding
+  namespace: neuro-mesh
+subjects:
+- kind: ServiceAccount
+  name: neuro-mesh-sa
+  namespace: neuro-mesh
+roleRef:
+  kind: Role
+  name: neuro-mesh-role
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,156 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: neuro-mesh-node
+  namespace: neuro-mesh
+  labels:
+    app: neuro-mesh
+    component: node
+spec:
+  serviceName: neuro-mesh-headless
+  replicas: 5
+  selector:
+    matchLabels:
+      app: neuro-mesh
+      component: node
+  template:
+    metadata:
+      labels:
+        app: neuro-mesh
+        component: node
+    spec:
+      serviceAccountName: neuro-mesh-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        fsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: neuro-mesh
+        image: neuro-mesh/neuro-agent:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NEURO_WS_PORT
+          value: "9000"
+        - name: NEURO_UDP_DISCOVERY
+          value: "9998"
+        - name: NEURO_UDP_CONSENSUS
+          value: "9999"
+        - name: NEURO_KEY_MANAGER
+          value: "HSM"
+        ports:
+        - name: ws
+          containerPort: 9000
+          protocol: TCP
+        - name: discovery
+          containerPort: 9998
+          protocol: UDP
+        - name: consensus
+          containerPort: 9999
+          protocol: UDP
+        volumeMounts:
+        - name: config
+          mountPath: /config
+        - name: secrets
+          mountPath: /secrets
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: audit
+          mountPath: /var/log/neuro-mesh
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - nc -z localhost 9000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - nc -z localhost 9999
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: config
+        configMap:
+          name: neuro-mesh-config
+      - name: secrets
+        secret:
+          secretName: neuro-mesh-secrets
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 100Mi
+      - name: audit
+        emptyDir:
+          medium: Memory
+          sizeLimit: 50Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neuro-mesh-headless
+  namespace: neuro-mesh
+spec:
+  clusterIP: None
+  selector:
+    app: neuro-mesh
+    component: node
+  ports:
+  - name: ws
+    port: 9000
+    targetPort: 9000
+  - name: discovery
+    port: 9998
+    targetPort: 9998
+    protocol: UDP
+  - name: consensus
+    port: 9999
+    targetPort: 9999
+    protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neuro-mesh-lb
+  namespace: neuro-mesh
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+spec:
+  type: LoadBalancer
+  selector:
+    app: neuro-mesh
+    component: node
+  ports:
+  - name: ws
+    port: 9000
+    targetPort: 9000
+  - name: metrics
+    port: 9090
+    targetPort: 9090
