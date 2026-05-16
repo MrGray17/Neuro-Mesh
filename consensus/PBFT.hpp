@@ -42,6 +42,8 @@ public:
     static constexpr int VIEW_CHANGE_TIMEOUT_SEC = 30;
     static constexpr int ROUND_TTL_SEC = 120;
     static constexpr int MAX_SEQUENCE_GAP = 100;
+    static constexpr int RATE_LIMIT_WINDOW_SEC = 10;
+    static constexpr int MAX_PRE_PREPARE_PER_WINDOW = 5;
 
 private:
     struct ConsensusRound {
@@ -140,6 +142,17 @@ public:
         std::lock_guard<std::mutex> lock(m_mtx);
 
         cleanup_stale_rounds();
+
+        // Rate limit: throttle PRE_PREPARE floods per sender
+        if (msg.stage_str == "PRE_PREPARE") {
+            if (!check_rate_limit(msg.sender_id)) {
+                std::cerr << "[PBFT] RATE LIMITED: " << msg.sender_id
+                          << " exceeded " << MAX_PRE_PREPARE_PER_WINDOW
+                          << " PRE_PREPARE per " << RATE_LIMIT_WINDOW_SEC << "s" << std::endl;
+                record_failure(msg.sender_id);
+                return PBFTStage::IDLE;
+            }
+        }
 
         auto msg_hash = compute_message_hash(msg);
         detect_equivocation(msg, msg_hash);
@@ -387,6 +400,26 @@ private:
         trust.trust_score = std::min(1.0, trust.trust_score + 0.05);
     }
 
+    bool check_rate_limit(const std::string& sender_id) {
+        auto now = std::chrono::steady_clock::now();
+        auto& timestamps = m_rate_limits[sender_id];
+
+        timestamps.erase(
+            std::remove_if(timestamps.begin(), timestamps.end(),
+                [&](const auto& ts) {
+                    return std::chrono::duration_cast<std::chrono::seconds>(now - ts).count() >= RATE_LIMIT_WINDOW_SEC;
+                }),
+            timestamps.end()
+        );
+
+        if (timestamps.size() >= MAX_PRE_PREPARE_PER_WINDOW) {
+            return false;
+        }
+
+        timestamps.push_back(now);
+        return true;
+    }
+
     void cleanup_stale_rounds() {
         auto now = std::chrono::steady_clock::now();
         for (auto it = m_rounds.begin(); it != m_rounds.end(); ) {
@@ -419,6 +452,7 @@ private:
     std::unordered_map<std::string, NodeTrustScore> m_node_trust;
     std::unordered_map<std::string, std::map<uint64_t, std::string>> m_message_history;
     std::map<std::string, EquivocationEvidence> m_equivocation_history;
+    std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> m_rate_limits;
 };
 
 } // namespace neuro_mesh

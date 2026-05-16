@@ -74,6 +74,10 @@ public:
     static bool try_parse_int(const std::string& s, int& out) noexcept;
     static bool try_parse_long(const std::string& s, int64_t& out) noexcept;
 
+    // Alert webhook — POST JSON to configured endpoint on isolation
+    static void notify_webhook(const std::string& url, const std::string& target_id,
+                                const std::string& evidence_json, int quorum, int64_t timestamp_us);
+
 private:
     // === Threads ===
     void p2p_listener_loop();        // PBFT consensus (UDP :9999 + TLS)
@@ -144,6 +148,7 @@ private:
     MitigationEngine* m_mitigation;
     TelemetryBridge* m_bridge;
     StateJournal m_journal;
+    std::string m_webhook_url;
 
     // === TOFU: Trust-On-First-Use for ANNOUNCE key pinning + TLS cert pinning ===
     struct TOFUEntry {

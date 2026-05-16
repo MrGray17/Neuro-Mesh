@@ -10,6 +10,8 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
+#include <cstdlib>
+#include <sys/wait.h>
 #include <random>
 #include <thread>
 #include <fstream>
@@ -34,8 +36,16 @@ MeshNode::MeshNode(const std::string& node_id,
       m_enforcer(enforcer),
       m_mitigation(mitigation),
       m_bridge(bridge),
-      m_journal("./journal_" + node_id + ".log")
+      m_journal("./journal_" + node_id + ".log"),
+      m_webhook_url([]() {
+          const char* env = std::getenv("NEURO_WEBHOOK_URL");
+          return env ? std::string(env) : "";
+      }())
 {
+    if (!m_webhook_url.empty()) {
+        std::cout << "[ALERT] Webhook endpoint: " << m_webhook_url << std::endl;
+    }
+
     m_private_key = crypto::IdentityCore::generate_ed25519_key();
     m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
     m_public_key_b64 = base64_encode(m_public_key_pem);
@@ -1064,9 +1074,23 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                 broadcast_pbft_stage("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
             }
             else if (next_stage == PBFTStage::EXECUTED) {
+                auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
                 std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << incoming_msg.target_id
                           << " — executing MitigationEngine response." << std::endl;
                 m_journal.append("EXECUTED", incoming_msg.target_id, incoming_msg.evidence_json);
+
+                // Fire alert webhook (async — runs outside the lock)
+                if (!m_webhook_url.empty()) {
+                    std::string tgt = incoming_msg.target_id;
+                    std::string ev = incoming_msg.evidence_json;
+                    int q = m_pbft.quorum_size();
+                    std::thread([this, tgt, ev, q, now_us]() {
+                        notify_webhook(m_webhook_url, tgt, ev, q, now_us);
+                    }).detach();
+                }
+
                 if (m_bridge) {
                     std::ignore = m_bridge->push_telemetry(
                         "{\"event\":\"entropy_spike\",\"value\":0.98,\"threshold\":0.65,"
@@ -1451,6 +1475,47 @@ void MeshNode::unpin_peer_key(const std::string& node_id) {
 // =============================================================================
 // Utility
 // =============================================================================
+
+void MeshNode::notify_webhook(const std::string& url, const std::string& target_id,
+                              const std::string& evidence_json, int quorum, int64_t timestamp_us) {
+    if (url.empty()) return;
+
+    // Build JSON payload
+    std::string escaped_evidence = evidence_json;
+    for (size_t i = 0; i < escaped_evidence.size(); ++i) {
+        if (escaped_evidence[i] == '"') { escaped_evidence.insert(i++, 1, '\\'); }
+    }
+
+    std::ostringstream payload;
+    payload << "{"
+            << "\"event\":\"isolation\","
+            << "\"target\":\"" << target_id << "\","
+            << "\"quorum\":" << quorum << ","
+            << "\"timestamp_us\":" << timestamp_us << ","
+            << "\"evidence\":" << escaped_evidence
+            << "}";
+
+    // fork+exec curl — same pattern as PolicyEnforcer iptables (no shell injection)
+    std::string payload_str = payload.str();
+    pid_t pid = fork();
+    if (pid == 0) {
+        const char* args[] = {
+            "curl", "-s", "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", payload_str.c_str(),
+            url.c_str(),
+            nullptr
+        };
+        execvp("curl", const_cast<char* const*>(args));
+        _exit(1);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            std::cerr << "[ALERT] Webhook POST failed (exit=" << WEXITSTATUS(status) << ")" << std::endl;
+        }
+    }
+}
 
 std::vector<std::string> MeshNode::split_string(const std::string& str, char delimiter) {
     std::vector<std::string> tokens;
