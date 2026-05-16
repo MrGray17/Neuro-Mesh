@@ -11,6 +11,8 @@
 #include <sstream>
 #include <iomanip>
 #include <iostream>
+#include <cstdlib>
+#include <algorithm>
 #include "crypto/CryptoCore.hpp"
 
 namespace neuro_mesh {
@@ -42,8 +44,8 @@ public:
     static constexpr int VIEW_CHANGE_TIMEOUT_SEC = 30;
     static constexpr int ROUND_TTL_SEC = 120;
     static constexpr int MAX_SEQUENCE_GAP = 100;
-    static constexpr int RATE_LIMIT_WINDOW_SEC = 10;
-    static constexpr int MAX_PRE_PREPARE_PER_WINDOW = 5;
+    static constexpr int DEFAULT_RATE_WINDOW_SEC = 10;
+    static constexpr int DEFAULT_RATE_MAX = 5;
 
 private:
     struct ConsensusRound {
@@ -71,7 +73,22 @@ private:
     };
 
 public:
-    explicit PBFTConsensus(int total_nodes) : m_total_nodes(total_nodes) {
+    explicit PBFTConsensus(int total_nodes)
+        : m_total_nodes(total_nodes),
+          m_rate_window_sec([]() -> int {
+              const char* env = std::getenv("NEURO_PBFT_RATE_WINDOW");
+              if (!env) return DEFAULT_RATE_WINDOW_SEC;
+              char* end = nullptr;
+              long val = std::strtol(env, &end, 10);
+              return (*end == '\0' && val > 0) ? static_cast<int>(val) : DEFAULT_RATE_WINDOW_SEC;
+          }()),
+          m_rate_max([]() -> int {
+              const char* env = std::getenv("NEURO_PBFT_RATE_MAX");
+              if (!env) return DEFAULT_RATE_MAX;
+              char* end = nullptr;
+              long val = std::strtol(env, &end, 10);
+              return (*end == '\0' && val > 0) ? static_cast<int>(val) : DEFAULT_RATE_MAX;
+          }()) {
         m_genesis_hash = crypto::IdentityCore::sha256_hex("GENESIS");
     }
 
@@ -147,8 +164,7 @@ public:
         if (msg.stage_str == "PRE_PREPARE") {
             if (!check_rate_limit(msg.sender_id)) {
                 std::cerr << "[PBFT] RATE LIMITED: " << msg.sender_id
-                          << " exceeded " << MAX_PRE_PREPARE_PER_WINDOW
-                          << " PRE_PREPARE per " << RATE_LIMIT_WINDOW_SEC << "s" << std::endl;
+                          << " (" << m_rate_max << " PRE_PREPARE/" << m_rate_window_sec << "s)" << std::endl;
                 record_failure(msg.sender_id);
                 return PBFTStage::IDLE;
             }
@@ -407,12 +423,12 @@ private:
         timestamps.erase(
             std::remove_if(timestamps.begin(), timestamps.end(),
                 [&](const auto& ts) {
-                    return std::chrono::duration_cast<std::chrono::seconds>(now - ts).count() >= RATE_LIMIT_WINDOW_SEC;
+                    return std::chrono::duration_cast<std::chrono::seconds>(now - ts).count() >= m_rate_window_sec;
                 }),
             timestamps.end()
         );
 
-        if (timestamps.size() >= MAX_PRE_PREPARE_PER_WINDOW) {
+        if (timestamps.size() >= static_cast<size_t>(m_rate_max)) {
             return false;
         }
 
@@ -438,6 +454,8 @@ private:
 
     int m_total_nodes;
     int m_current_view = 0;
+    int m_rate_window_sec;
+    int m_rate_max;
     mutable std::mutex m_mtx;
 
     std::string m_genesis_hash;

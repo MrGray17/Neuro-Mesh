@@ -276,7 +276,18 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
         return;
     }
 
-    std::cout << "[IPC] Listening for commands on " << socket_path << std::endl;
+    std::string ipc_token;
+    const char* env_token = std::getenv("NEURO_IPC_TOKEN");
+    if (env_token) ipc_token = env_token;
+
+    std::cout << "[IPC] Listening for commands on " << socket_path;
+    if (!ipc_token.empty()) {
+        std::cout << " (token auth required)";
+        // Mask the token in logs — show first 4 chars only
+        std::string masked = ipc_token.substr(0, 4) + std::string(std::min(ipc_token.size(), size_t(4)), '*');
+        std::cout << " [" << masked << "]";
+    }
+    std::cout << std::endl;
 
     struct timeval tv;
     tv.tv_sec = 1;
@@ -313,7 +324,6 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                 std::lock_guard<std::mutex> lock(s_ipc_rate_mtx);
                 auto now = std::chrono::steady_clock::now();
                 auto& rl = s_ipc_rate_limits[cred.uid];
-                // Remove old entries outside 1-second window
                 while (!rl.window.empty()) {
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - rl.window.front()).count();
                     if (elapsed >= 1) rl.window.pop_front();
@@ -333,6 +343,33 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
             std::cerr << "[IPC] REJECTED: could not obtain peer credentials" << std::endl;
             close(client_fd);
             continue;
+        }
+
+        // Token auth handshake (if NEURO_IPC_TOKEN is set)
+        if (!ipc_token.empty()) {
+            char auth_buf[256];
+            ssize_t auth_n = read(client_fd, auth_buf, sizeof(auth_buf) - 1);
+            if (auth_n <= 0) { close(client_fd); continue; }
+            auth_buf[auth_n] = '\0';
+            std::string auth_line(auth_buf);
+            // Expect: AUTH <token>\n or <token>\n
+            std::string received_token;
+            if (auth_line.rfind("AUTH ", 0) == 0) {
+                received_token = auth_line.substr(5);
+            } else {
+                received_token = auth_line;
+            }
+            // Trim trailing newline/whitespace
+            while (!received_token.empty() && (received_token.back() == '\n' ||
+                   received_token.back() == '\r' || received_token.back() == ' '))
+                received_token.pop_back();
+            if (received_token != ipc_token) {
+                std::cerr << "[IPC] REJECTED: invalid token from uid=" << cred.uid << std::endl;
+                const char* reject = "REJECT:AUTH_TOKEN\n";
+                write(client_fd, reject, strlen(reject));
+                close(client_fd);
+                continue;
+            }
         }
 
         char buf[256];

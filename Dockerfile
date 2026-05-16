@@ -79,5 +79,9 @@ COPY --from=builder /src/isolation_forest.onnx /app/isolation_forest.onnx
 # Create chroot target for TelemetryBridge sandbox
 RUN mkdir -p /var/empty && chmod 755 /var/empty
 
+# Health check: verify IPC socket exists and process is alive
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD sh -c 'test -S /tmp/neuro_mesh_$$(echo $* | cut -d_ -f2).sock 2>/dev/null || exit 1' -- $${0:-NODE_1}
+
 ENTRYPOINT ["/app/neuro_agent"]
 CMD ["NODE_1"]
