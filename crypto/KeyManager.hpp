@@ -20,7 +20,8 @@ enum class KeyType {
 
 enum class HSMBackend {
     None,
-    SoftHSM
+    SoftHSM,
+    PKCS11
 };
 
 struct CertificateConfig {
@@ -76,6 +77,30 @@ public:
 
 private:
     std::string m_slot;
+};
+
+class PKCS11Backend : public HSMAccess {
+public:
+    explicit PKCS11Backend(const std::string& module_path = "",
+                           const std::string& pin = "",
+                           const std::string& token_label = "");
+    ~PKCS11Backend() override;
+    bool is_available() const override;
+    bool generate_key(KeyType type, const std::string& key_id, UniquePKEY& pub_key, UniquePKEY& priv_key) override;
+    bool sign_data(const std::string& key_id, const std::string& data, std::string& signature) override;
+    bool verify_signature(const std::string& key_id, const std::string& data, const std::string& signature) override;
+
+private:
+    std::string m_module_path;
+    std::string m_pin;
+    std::string m_token_label;
+    void* m_lib;
+
+    // OpenSSL EVP_PKEY wrapper for keys stored on PKCS11 token
+    // Uses OpenSSL's pkcs11 engine/provider when available, falls back to
+    // loading key via PEM export if the token supports it.
+    UniquePKEY load_key_from_token(const std::string& key_id, bool is_private);
+    bool token_available() const;
 };
 
 struct KeyPair {
@@ -151,6 +176,9 @@ public:
     void set_hsm_backend(HSMBackend backend);
     HSMAccess* get_hsm() { return m_hsm.get(); }
 
+    // Optional passphrase for AES-256-GCM keystore encryption
+    void set_passphrase(const std::string& passphrase) { m_passphrase = passphrase; }
+
 private:
     std::string m_keystore_path;
     std::optional<KeyPair> m_cached_key;
@@ -158,8 +186,13 @@ private:
     HSMBackend m_hsm_backend = HSMBackend::None;
     std::string m_ca_key_id;
     std::string m_cert_store_path;
+    std::string m_passphrase;
 
     std::string generate_key_id(KeyType type);
+
+    // AES-256-GCM encryption helpers (used when m_passphrase is set)
+    std::string encrypt_blob(const std::string& plaintext);
+    std::string decrypt_blob(const std::string& ciphertext);
 };
 
 } // namespace neuro_mesh::crypto

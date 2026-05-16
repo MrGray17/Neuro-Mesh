@@ -40,6 +40,14 @@ MeshNode::MeshNode(const std::string& node_id,
       m_webhook_url([]() {
           const char* env = std::getenv("NEURO_WEBHOOK_URL");
           return env ? std::string(env) : "";
+      }()),
+      m_max_evidence_size([]() -> size_t {
+          const char* env = std::getenv("NEURO_PBFT_EVIDENCE_MAX");
+          if (!env) return 4096;
+          char* end = nullptr;
+          long val = std::strtol(env, &end, 10);
+          if (*end != '\0' || val <= 0) return 4096;
+          return std::min(static_cast<size_t>(val), size_t(65536));
       }())
 {
     if (!m_webhook_url.empty()) {
@@ -273,20 +281,38 @@ void MeshNode::send_udp_discovery(const std::string& payload) {
     std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
 
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) return;
+    if (sockfd >= 0) {
+        int broadcast_enable = 1;
+        setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable));
 
-    int broadcast_enable = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable));
+        struct sockaddr_in broadcast_addr{};
+        broadcast_addr.sin_family = AF_INET;
+        broadcast_addr.sin_port = htons(DISCOVERY_UDP_PORT);
+        broadcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
 
-    struct sockaddr_in broadcast_addr{};
-    broadcast_addr.sin_family = AF_INET;
-    broadcast_addr.sin_port = htons(DISCOVERY_UDP_PORT);
-    broadcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+        sendto(sockfd, payload.c_str(), payload.length(), 0,
+               (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+        close(sockfd);
+    }
 
-    sendto(sockfd, payload.c_str(), payload.length(), 0,
-           (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    // IPv6 multicast discovery (ff02::1 = all-nodes link-local)
+    int sock6 = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (sock6 >= 0) {
+        struct sockaddr_in6 mcast_addr{};
+        mcast_addr.sin6_family = AF_INET6;
+        mcast_addr.sin6_port = htons(DISCOVERY_UDP_PORT);
+        mcast_addr.sin6_addr = in6addr_any;
 
-    close(sockfd);
+        struct ipv6_mreq mreq{};
+        inet_pton(AF_INET6, "ff02::1", &mreq.ipv6mr_multiaddr);
+        mreq.ipv6mr_interface = 0;
+        setsockopt(sock6, IPPROTO_IPV6, IPV6_MULTICAST_IF, &mreq.ipv6mr_interface, sizeof(mreq.ipv6mr_interface));
+
+        mcast_addr.sin6_addr = mreq.ipv6mr_multiaddr;
+        sendto(sock6, payload.c_str(), payload.length(), 0,
+               (struct sockaddr*)&mcast_addr, sizeof(mcast_addr));
+        close(sock6);
+    }
 }
 
 void MeshNode::send_udp_unicast(const std::string& ip, int port, const std::string& payload) {
@@ -1024,7 +1050,7 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
 
         if (stage_str.empty() || sender_id.empty() || target_id.empty()) return;
         if (sender_id.size() > 64 || target_id.size() > 64) return;
-        if (evidence_raw.empty() || evidence_raw.size() > 4096) return;
+        if (evidence_raw.empty() || evidence_raw.size() > m_max_evidence_size) return;
         if (evidence_raw[0] != '{') return;
         if (stage_str != "PRE_PREPARE" && stage_str != "PREPARE" && stage_str != "COMMIT") return;
 

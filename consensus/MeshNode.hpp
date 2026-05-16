@@ -149,6 +149,7 @@ private:
     TelemetryBridge* m_bridge;
     StateJournal m_journal;
     std::string m_webhook_url;
+    size_t m_max_evidence_size;
 
     // === TOFU: Trust-On-First-Use for ANNOUNCE key pinning + TLS cert pinning ===
     struct TOFUEntry {
