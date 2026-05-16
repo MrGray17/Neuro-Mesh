@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <chrono>
+#include <iostream>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -26,7 +27,10 @@ public:
                 if (seq > m_seq.load()) m_seq.store(seq);
             }
         }
-        // Only log if there's recovered state
+        // Touch file to ensure it exists (fixes integration test expecting file on boot)
+        int touch_fd = ::open(m_path.c_str(), O_WRONLY | O_CREAT, 0644);
+        if (touch_fd >= 0) ::close(touch_fd);
+
         uint64_t recovered = m_seq.load();
         if (recovered > 0) {
             std::cout << "[JOURNAL] Recovered " << recovered
@@ -40,16 +44,14 @@ public:
     {
         uint64_t seq = m_seq.fetch_add(1, std::memory_order_relaxed) + 1;
 
-        // Cryptographic SHA-256 audit hash — enables forensic verification
         std::string hash = crypto::IdentityCore::sha256_hex(evidence_json);
         if (hash.empty()) {
-            hash = std::string(64, '0');  // fallback on crypto failure
+            hash = std::string(64, '0');
         }
 
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-        // Build JSON line without library dependency
         std::string line = "{\"seq\":" + std::to_string(seq)
                          + ",\"ts\":" + std::to_string(now_ms)
                          + ",\"stage\":\"" + stage + "\""
@@ -59,31 +61,32 @@ public:
 
         std::lock_guard<std::mutex> lock(m_write_mtx);
 
-        // Atomic log rotation using flock() - prevents TOCTOU race
-        {
-            int lock_fd = ::open(m_path.c_str(), O_RDWR);
-            if (lock_fd >= 0) {
-                struct flock fl;
-                fl.l_type = F_WRLCK;
-                fl.l_whence = SEEK_SET;
-                fl.l_start = 0;
-                fl.l_len = 0;
-
-                if (fcntl(lock_fd, F_SETLK, &fl) == 0) {
-                    struct stat st;
-                    if (fstat(lock_fd, &st) == 0 && st.st_size > 10 * 1024 * 1024) {
-                        std::string backup = m_path + ".1";
-                        ::rename(m_path.c_str(), backup.c_str());
-                    }
-                    fl.l_type = F_UNLCK;
-                    fcntl(lock_fd, F_SETLK, &fl);
-                }
-                close(lock_fd);
-            }
-        }
-
-        int fd = ::open(m_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+        // Open file once, check rotation, then write — no TOCTOU race
+        int fd = ::open(m_path.c_str(), O_RDWR | O_CREAT | O_APPEND, 0644);
         if (fd < 0) return seq;
+
+        // Atomic rotation check using flock on the same fd
+        struct flock fl;
+        fl.l_type = F_WRLCK;
+        fl.l_whence = SEEK_SET;
+        fl.l_start = 0;
+        fl.l_len = 0;
+
+        if (fcntl(fd, F_SETLK, &fl) == 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && st.st_size > 10 * 1024 * 1024) {
+                // Seek to beginning before rename so we rename the right file
+                ::lseek(fd, 0, SEEK_SET);
+                std::string backup = m_path + ".1";
+                ::rename(m_path.c_str(), backup.c_str());
+                // Close old fd, reopen new file
+                ::close(fd);
+                fd = ::open(m_path.c_str(), O_RDWR | O_CREAT | O_APPEND, 0644);
+                if (fd < 0) return seq;
+            }
+            fl.l_type = F_UNLCK;
+            fcntl(fd, F_SETLK, &fl);
+        }
 
         ssize_t written = ::write(fd, line.data(), line.size());
         ::fsync(fd);
@@ -104,7 +107,7 @@ private:
     static uint64_t extract_seq(const std::string& line) {
         auto pos = line.find("\"seq\":");
         if (pos == std::string::npos) return 0;
-        pos += 6; // skip "seq":
+        pos += 6;
         uint64_t val = 0;
         while (pos < line.size() && line[pos] >= '0' && line[pos] <= '9') {
             val = val * 10 + (line[pos] - '0');
@@ -112,7 +115,6 @@ private:
         }
         return val;
     }
-
 
     std::string m_path;
     std::atomic<uint64_t> m_seq;

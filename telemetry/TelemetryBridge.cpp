@@ -253,11 +253,13 @@ void TelemetryBridge::apply_uid_drop(const TelemetryBridgeConfig& cfg) {
     }
 
     if (setresuid(cfg.sandbox_uid, cfg.sandbox_uid, cfg.sandbox_uid) == -1) {
-        std::cerr << "[SANDBOX] WARN: setresuid(" << cfg.sandbox_uid
-                  << ") failed: " << strerror(errno) << " — continuing without uid drop" << std::endl;
+        std::cerr << "[SANDBOX] FATAL: setresuid(" << cfg.sandbox_uid
+                  << ") failed: " << strerror(errno) << " — aborting sandbox" << std::endl;
+        _exit(1);
     }
 
-    std::cerr << "[SANDBOX] Sandbox bypassed — running with full privileges (container limitation)" << std::endl;
+    std::cerr << "[SANDBOX] UID/GID dropped to " << cfg.sandbox_uid
+              << ":" << cfg.sandbox_gid << std::endl;
 }
 
 // =========================================================================
@@ -339,10 +341,6 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigaction), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigprocmask), 0);
 
-    // ---- kill / tgkill — process termination (MitigationEngine enforcement) ----
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(kill), 0);
-    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(tgkill), 0);
-
     // ---- getpid / gettid — identity checks in libraries ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getpid), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(gettid), 0);
@@ -376,7 +374,8 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
               << "getpeername/getsockopt + "
               << "eventfd2 + getrandom + mmap/munmap/mprotect + "
               << "openat/newfstatat/readlink + "
-              << "set_robust_list/rseq/prlimit64 + kill/tgkill)."
+              << "set_robust_list/rseq/prlimit64 + getpid/gettid + "
+              << "sched_yield/rt_sigaction/rt_sigprocmask)."
               << std::endl;
 }
 

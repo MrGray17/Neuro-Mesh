@@ -80,7 +80,9 @@ int64_t MitigationEngine::extract_int(std::string_view json, std::string_view ke
     if (json[val_start] == '-') { negative = true; ++val_start; }
 
     while (val_start < json.size() && json[val_start] >= '0' && json[val_start] <= '9') {
-        val = val * 10 + (json[val_start] - '0');
+        int64_t digit = json[val_start] - '0';
+        if (val > (INT64_MAX - digit) / 10) return negative ? INT64_MIN : INT64_MAX;
+        val = val * 10 + digit;
         ++val_start;
     }
 
@@ -232,7 +234,8 @@ void MitigationEngine::log_enforcement(const std::string& action,
                   now.time_since_epoch()) % 1000;
 
     std::ostringstream ts;
-    ts << std::put_time(std::localtime(&now_time_t), "%Y-%m-%dT%H:%M:%S");
+    std::tm tm_buf{};
+    ts << std::put_time(localtime_r(&now_time_t, &tm_buf), "%Y-%m-%dT%H:%M:%S");
     ts << '.' << std::setfill('0') << std::setw(3) << ms.count();
 
     // Truncate hash to 16 chars for readability in logs

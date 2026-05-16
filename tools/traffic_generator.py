@@ -8,8 +8,8 @@ Usage:
     python3 tools/traffic_generator.py --target 127.0.0.1 --duration 15
     python3 tools/traffic_generator.py --target 192.168.65.3 --duration 30 --threads 8
 """
-
 import argparse
+import ipaddress
 import random
 import socket
 import sys
@@ -19,19 +19,33 @@ import time
 STOP = threading.Event()
 
 
+def validate_target(ip: str) -> str:
+    """Validate that the target is a valid IP address."""
+    try:
+        addr = ipaddress.ip_address(ip)
+        # Reject broadcast and multicast ranges for safety
+        if addr.is_multicast or addr.is_broadcast:
+            raise ValueError(f"Refusing to target {ip} (multicast/broadcast)")
+        return ip
+    except ValueError as e:
+        print(f"[ERROR] Invalid target: {e}")
+        sys.exit(1)
+
+
 def udp_flood(target: str, port_range: range, pkt_size: int = 1400) -> None:
     """Send random UDP datagrams as fast as possible."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    junk = bytearray(random.getrandbits(8) for _ in range(pkt_size))
     while not STOP.is_set():
         port = random.choice(port_range)
+        payload = random.randbytes(pkt_size)
         try:
-            sock.sendto(junk, (target, port))
+            sock.sendto(payload, (target, port))
         except OSError:
             pass
+    sock.close()
 
 
-def tcp_scan(target: str, port_range: range, timeout: float = 0.3) -> None:
+def tcp_scan(target: str, port_range: list[int], timeout: float = 0.3) -> None:
     """Aggressive TCP connect() scan cycling through the port range."""
     while not STOP.is_set():
         port = random.choice(port_range)
@@ -39,9 +53,9 @@ def tcp_scan(target: str, port_range: range, timeout: float = 0.3) -> None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             sock.connect((target, port))
-            # Send a tiny payload to look like an exploit attempt
+            # Send a benign probe payload
             try:
-                sock.sendall(b"\x90\x90\x90/bin/sh\x00")
+                sock.sendall(b"PROBE\x00")
             except OSError:
                 pass
             sock.close()
@@ -60,14 +74,34 @@ def banner(target: str, duration: int, threads: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Network traffic generator for Neuro-Mesh eBPF validation")
-    parser.add_argument("--target", required=True, help="Target IP address")
-    parser.add_argument("--duration", type=int, default=15, help="Attack duration in seconds (default: 15)")
-    parser.add_argument("--threads", type=int, default=3, help="Worker threads (default: 3)")
-    parser.add_argument("--udp-ratio", type=float, default=0.6, help="Fraction of threads doing UDP flood (default: 0.6)")
+    parser = argparse.ArgumentParser(
+        description="Network traffic generator for Neuro-Mesh eBPF validation"
+    )
+    parser.add_argument(
+        "--target", required=True, help="Target IP address"
+    )
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=15,
+        help="Duration in seconds (default: 15)",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=3,
+        help="Worker threads (default: 3)",
+    )
+    parser.add_argument(
+        "--udp-ratio",
+        type=float,
+        default=0.6,
+        help="Fraction of threads doing UDP flood (default: 0.6)",
+    )
     args = parser.parse_args()
 
-    banner(args.target, args.duration, args.threads)
+    target = validate_target(args.target)
+    banner(target, args.duration, args.threads)
 
     port_range = range(1, 65536)
     udp_count = max(1, int(args.threads * args.udp_ratio))
@@ -76,15 +110,18 @@ def main() -> None:
     workers: list[threading.Thread] = []
 
     for _ in range(udp_count):
-        t = threading.Thread(target=udp_flood, args=(args.target, port_range), daemon=True)
+        t = threading.Thread(
+            target=udp_flood, args=(target, port_range), daemon=True
+        )
         workers.append(t)
 
-    # Shuffle TCP ports to avoid sequential scan pattern
     tcp_ports = list(port_range)
     random.shuffle(tcp_ports)
 
     for _ in range(tcp_count):
-        t = threading.Thread(target=tcp_scan, args=(args.target, tcp_ports), daemon=True)
+        t = threading.Thread(
+            target=tcp_scan, args=(target, tcp_ports), daemon=True
+        )
         workers.append(t)
 
     print(f"[TRAFFIC] Spawning {udp_count} UDP flooders + {tcp_count} TCP scanners...")
@@ -102,7 +139,10 @@ def main() -> None:
         for t in workers:
             t.join(timeout=2)
         elapsed = time.monotonic() - start
-        print(f"[TRAFFIC] Strike complete. Ran {elapsed:.1f}s. Check the dashboard for eBPF entropy spikes.")
+        print(
+            f"[TRAFFIC] Strike complete. Ran {elapsed:.1f}s. "
+            "Check the dashboard for eBPF entropy spikes."
+        )
 
 
 if __name__ == "__main__":

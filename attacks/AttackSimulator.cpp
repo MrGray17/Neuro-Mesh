@@ -17,15 +17,6 @@ namespace neuro_mesh::attacks {
 
 namespace {
 
-std::string generate_id() {
-    static std::random_device rd;
-    static std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX);
-    std::ostringstream oss;
-    oss << std::hex << dist(gen);
-    return oss.str();
-}
-
 } // namespace
 
 AttackOrchestrator::AttackOrchestrator() = default;

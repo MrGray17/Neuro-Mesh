@@ -22,8 +22,8 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
-    __type(key, __u32);    
-    __type(value, __u8);   
+    __type(key, __u32);
+    __type(value, __u8);
 } xdp_blacklist SEC(".maps");
 
 // XDP: Hardware-level packet dropper
@@ -39,12 +39,10 @@ int xdp_neuro_mesh_dropper(struct xdp_md *ctx) {
     struct iphdr *iph = (void *)(eth + 1);
     if ((void *)(iph + 1) > data_end) return XDP_PASS;
 
-    // Strict validation of banned IPs
     __u32 src_ip = iph->saddr;
     __u8 *banned = bpf_map_lookup_elem(&xdp_blacklist, &src_ip);
     if (banned && *banned == 1) return XDP_DROP;
 
-    // Global Lockdown Check
     __u32 lockdown_key = 0xFFFFFFFF;
     __u8 *lockdown = bpf_map_lookup_elem(&xdp_blacklist, &lockdown_key);
     if (lockdown && *lockdown == 1) return XDP_DROP;
@@ -60,20 +58,17 @@ int trace_execve(void *ctx) {
     event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
     if (!event) return 0;
 
-    // WHY: Cryptographically secure memory sanitization. Prevents uninitialized
-    // kernel stack memory from bleeding into user-space via the payload array.
     __builtin_memset(event, 0, sizeof(struct KernelEvent));
 
     event->pid = bpf_get_current_pid_tgid() >> 32;
     event->event_type = 1;
 
-    // WHY: Fail fast if the process is exiting or context is invalid.
     if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
         bpf_ringbuf_discard(event, 0);
         return 0;
     }
 
-    // Safely read the first argument (binary path) into payload
+    // Read binary path (null-terminated string — _str is correct here)
     const char *pathname = NULL;
     bpf_core_read(&pathname, sizeof(pathname), (void *)((char *)ctx + 16));
     if (pathname) {
@@ -105,21 +100,15 @@ int trace_sendto(void *ctx) {
         return 0;
     }
 
-    // Read the data buffer pointer and length
+    // Read binary data buffer — use bpf_probe_read_user (not _str) for binary data
     __u64 len = 0;
     bpf_core_read(&len, sizeof(len), (void *)((char *)ctx + 32));
-    if (len > 0 && len <= sizeof(event->payload)) {
+    if (len > 0) {
         const char *buff = NULL;
         bpf_core_read(&buff, sizeof(buff), (void *)((char *)ctx + 24));
         if (buff) {
-            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), buff);
-        }
-    } else {
-        // Truncated read for large buffers — still captures entropy sample
-        const char *buff = NULL;
-        bpf_core_read(&buff, sizeof(buff), (void *)((char *)ctx + 24));
-        if (buff) {
-            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), buff);
+            __u64 read_len = len < sizeof(event->payload) ? len : sizeof(event->payload);
+            bpf_probe_read_user(&event->payload, read_len, buff);
         }
     }
 
@@ -169,11 +158,10 @@ int trace_sendmsg(void *ctx) {
             __u64 iov_len;
         } iov;
         bpf_probe_read_user(&iov, sizeof(iov), msg_hdr.msg_iov);
-        __u64 len = iov.iov_len;
-        if (len > 0 && len <= sizeof(event->payload)) {
-            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), iov.iov_base);
-        } else if (len > sizeof(event->payload) && iov.iov_base) {
-            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), iov.iov_base);
+        if (iov.iov_len > 0 && iov.iov_base) {
+            __u64 read_len = iov.iov_len < sizeof(event->payload)
+                           ? iov.iov_len : sizeof(event->payload);
+            bpf_probe_read_user(&event->payload, read_len, iov.iov_base);
         }
     }
 
@@ -200,7 +188,6 @@ int trace_sendmmsg(void *ctx) {
         return 0;
     }
 
-    // struct mmsghdr { struct msghdr msg_hdr; unsigned int msg_len; };
     struct mmsghdr {
         void *msg_name;
         __u32 msg_namelen;
@@ -224,11 +211,10 @@ int trace_sendmmsg(void *ctx) {
             __u64 iov_len;
         } iov;
         bpf_probe_read_user(&iov, sizeof(iov), mm.msg_iov);
-        __u64 len = iov.iov_len;
-        if (len > 0 && len <= sizeof(event->payload)) {
-            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), iov.iov_base);
-        } else if (len > sizeof(event->payload) && iov.iov_base) {
-            bpf_probe_read_user_str(&event->payload, sizeof(event->payload), iov.iov_base);
+        if (iov.iov_len > 0 && iov.iov_base) {
+            __u64 read_len = iov.iov_len < sizeof(event->payload)
+                           ? iov.iov_len : sizeof(event->payload);
+            bpf_probe_read_user(&event->payload, read_len, iov.iov_base);
         }
     }
 
@@ -256,17 +242,16 @@ int trace_connect(void *ctx) {
         return 0;
     }
 
-    // Read sockaddr pointer and try to capture target info
+    // Read binary sockaddr — use bpf_probe_read_user (not _str)
     __u32 addr_len = 0;
     bpf_core_read(&addr_len, sizeof(addr_len), (void *)((char *)ctx + 32));
     const char *addr_ptr = NULL;
     bpf_core_read(&addr_ptr, sizeof(addr_ptr), (void *)((char *)ctx + 24));
-    if (addr_ptr && addr_len > 0 && addr_len <= sizeof(event->payload)) {
-        bpf_probe_read_user_str(&event->payload, sizeof(event->payload), addr_ptr);
-    } else if (addr_ptr && addr_len > sizeof(event->payload)) {
-        bpf_probe_read_user_str(&event->payload, sizeof(event->payload), addr_ptr);
+    if (addr_ptr && addr_len > 0) {
+        __u64 read_len = addr_len < sizeof(event->payload)
+                       ? addr_len : sizeof(event->payload);
+        bpf_probe_read_user(&event->payload, read_len, addr_ptr);
     } else {
-        // Fallback: write numeric info so ONNX has something to chew on
         __builtin_memcpy(event->payload, "NET_CONNECT", 11);
     }
 

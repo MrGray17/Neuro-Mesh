@@ -1,0 +1,59 @@
+---
+# Neuro-Mesh clang-tidy configuration
+# Enforces modern C++ practices, catches bugs, improves readability
+
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-implicit-widening-of-multiplication-result,
+  cppcoreguidelines-*,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  performance-*,
+  -performance-enum-size,
+  readability-*,
+  -readability-identifier-length,
+  -readability-identifier-naming,
+  -readability-function-cognitive-complexity,
+  -readability-magic-numbers,
+  -readability-uppercase-literal-suffix,
+  -readability-convert-member-functions-to-static
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: '.*'
+
+CheckOptions:
+  # Modernize
+  modernize-use-nullptr.NullMacros: 'NULL'
+  modernize-loop-convert.MaxCopySize: '16'
+  modernize-loop-convert.MinConfidence: reasonable
+  modernize-use-emplace.Namespaces: 'std'
+  modernize-use-auto.MinTypeNameLength: '5'
+
+  # Readability
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.FunctionCase: snake_case
+  readability-identifier-naming.VariableCase: snake_case
+  readability-identifier-naming.ConstantCase: UPPER_CASE
+  readability-identifier-naming.MemberPrefix: m_
+  readability-identifier-naming.PrivateMemberPrefix: m_
+
+  # Performance
+  performance-move-const-arg.CheckMoveTriggersForTemporary: true
+  performance-inefficient-string-concatenation.StrictMode: true
+
+  # Bugprone
+  bugprone-exception-escape.FunctionsThatShouldNotThrow: ''
+  bugprone-string-constructor.StringLikeClasses: 'std::basic_string;std::basic_string_view'

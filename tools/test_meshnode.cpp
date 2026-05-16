@@ -3,7 +3,6 @@
 #include "enforcer/MitigationEngine.hpp"
 #include "telemetry/TelemetryBridge.hpp"
 #include <iostream>
-#include <cassert>
 #include <sstream>
 
 using namespace neuro_mesh;
@@ -16,6 +15,9 @@ static int tests_failed = 0;
         std::cout << "  " << (name) << "... "; \
         try
 
+#define ASSERT(cond) \
+        if (!(cond)) { throw std::runtime_error("assertion failed: " #cond); }
+
 #define END_TEST() \
         std::cout << "PASSED" << std::endl; \
         ++tests_passed; \
@@ -25,94 +27,78 @@ static int tests_failed = 0;
         } \
     } while(0)
 
-// Helper to call private validate_message via friend or by creating minimal MeshNode
-// For this test, we'll test the public API surface and split_string directly
-
 int main() {
     std::cout << "[MESGNODE] Running MeshNode unit tests..." << std::endl;
 
-    // =========================================================================
     TEST("split_string basic delimiter") {
         MeshNode node("NODE_1", nullptr, nullptr, nullptr);
         auto tokens = node.split_string("a|b|c", '|');
-        assert(tokens.size() == 3);
-        assert(tokens[0] == "a");
-        assert(tokens[1] == "b");
-        assert(tokens[2] == "c");
+        ASSERT(tokens.size() == 3);
+        ASSERT(tokens[0] == "a");
+        ASSERT(tokens[1] == "b");
+        ASSERT(tokens[2] == "c");
     END_TEST();
 
-    // =========================================================================
     TEST("split_string empty string") {
         MeshNode node("NODE_1", nullptr, nullptr, nullptr);
         auto tokens = node.split_string("", '|');
-        assert(tokens.size() == 0);  // empty input = no tokens
+        ASSERT(tokens.empty());
     END_TEST();
 
-    // =========================================================================
     TEST("split_string single token") {
         MeshNode node("NODE_1", nullptr, nullptr, nullptr);
         auto tokens = node.split_string("single", '|');
-        assert(tokens.size() == 1);
-        assert(tokens[0] == "single");
+        ASSERT(tokens.size() == 1);
+        ASSERT(tokens[0] == "single");
     END_TEST();
 
-    // =========================================================================
     TEST("split_string trailing delimiter") {
         MeshNode node("NODE_1", nullptr, nullptr, nullptr);
         auto tokens = node.split_string("a|b|", '|');
-        assert(tokens.size() == 2);  // trailing empty dropped
-        assert(tokens[0] == "a");
-        assert(tokens[1] == "b");
+        ASSERT(tokens.size() == 2);
+        ASSERT(tokens[0] == "a");
+        ASSERT(tokens[1] == "b");
     END_TEST();
 
-    // =========================================================================
     TEST("split_string consecutive delimiters") {
         MeshNode node("NODE_1", nullptr, nullptr, nullptr);
         auto tokens = node.split_string("a||b", '|');
-        assert(tokens.size() == 3);
-        assert(tokens[1] == "");
+        ASSERT(tokens.size() == 3);
+        ASSERT(tokens[1] == "");
     END_TEST();
 
-    // =========================================================================
     TEST("split_string no delimiter") {
         MeshNode node("NODE_1", nullptr, nullptr, nullptr);
         auto tokens = node.split_string("nodelimiter", '|');
-        assert(tokens.size() == 1);
-        assert(tokens[0] == "nodelimiter");
+        ASSERT(tokens.size() == 1);
+        ASSERT(tokens[0] == "nodelimiter");
     END_TEST();
 
-    // =========================================================================
     TEST("peer_count starts with self") {
         PolicyEnforcer enforcer;
         MitigationEngine mitigation(&enforcer);
         TelemetryBridge bridge({});
         MeshNode node("NODE_1", &enforcer, &mitigation, &bridge);
-        // With no peers, peer_count should be 1 (self)
-        assert(node.peer_count() == 1);
+        ASSERT(node.peer_count() == 1);
     END_TEST();
 
-    // =========================================================================
     TEST("get_active_peer_ids returns empty initially") {
         PolicyEnforcer enforcer;
         MitigationEngine mitigation(&enforcer);
         TelemetryBridge bridge({});
         MeshNode node("NODE_1", &enforcer, &mitigation, &bridge);
         auto ids = node.get_active_peer_ids();
-        assert(ids.empty());
+        ASSERT(ids.empty());
     END_TEST();
 
-    // =========================================================================
     TEST("is_targeted_recently false initially") {
         PolicyEnforcer enforcer;
         MitigationEngine mitigation(&enforcer);
         TelemetryBridge bridge({});
         MeshNode node("NODE_1", &enforcer, &mitigation, &bridge);
-        // Should be false at start - no recent targeting
-        bool targeted = node.is_targeted_recently();
-        assert(!targeted);
+        ASSERT(!node.is_targeted_recently());
     END_TEST();
 
-    // =========================================================================
     std::cout << "\n[MESHNODE] Results: " << tests_passed << " passed, "
               << tests_failed << " failed." << std::endl;
 

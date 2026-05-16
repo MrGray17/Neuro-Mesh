@@ -1,0 +1,36 @@
+---
+# Neuro-Mesh clang-format configuration
+# Based on Google C++ Style Guide with project-specific adjustments
+BasedOnStyle: Google
+IndentWidth: 4
+AccessModifierOffset: -2
+ColumnLimit: 120
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+SortIncludes: true
+IncludeBlocks: Preserve
+MaxEmptyLinesToKeep: 1
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+ContinuationIndentWidth: 4
+BinPackArguments: true
+BinPackParameters: true
+ConstructorInitializerAllOnOneLineOrOnePerLine: true
+ConstructorInitializerIndentWidth: 4
+AlignEscapedNewlines: Right
+AlignOperands: Align
+AlignTrailingComments: true
+CompactNamespaces: false
+FixNamespaceComments: true
+NamespaceIndentation: None
+UseTab: Never
+IndentCaseLabels: true
+IndentPPDirectives: AfterHash
+SpaceAfterTemplateKeyword: true
+RemoveSemicolonLambdas: false
+DerivePointerAlignment: false
+DeriveReferenceAlignment: false

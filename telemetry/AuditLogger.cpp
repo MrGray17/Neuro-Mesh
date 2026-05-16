@@ -2,13 +2,38 @@
 #include "common/UniqueFD.hpp"
 #include <iostream>
 #include <chrono>
+#include <cmath>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <algorithm>
 
 namespace neuro_mesh::telemetry {
 
 static UniqueFD s_udp_socket; // RAII-managed static socket
+
+static std::string json_escape(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size() + 4);
+    for (char c : raw) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
 
 void AuditLogger::initialize() {
     s_udp_socket = UniqueFD(socket(AF_INET, SOCK_DGRAM, 0));
@@ -29,11 +54,11 @@ void AuditLogger::emit_json(AuditLevel level, const std::string& component,
     }
 
     std::string json = "{\"type\":\"EVENT\",\"timestamp\":" + std::to_string(ms) +
-                       ",\"level\":\"" + lvl_str + "\"" +
-                       ",\"component\":\"" + component + "\"" +
-                       ",\"action\":\"" + action + "\"" +
-                       ",\"target\":\"" + target + "\"" +
-                       ",\"details\":\"" + details + "\"}";
+                       ",\"level\":\"" + json_escape(lvl_str) + "\"" +
+                       ",\"component\":\"" + json_escape(component) + "\"" +
+                       ",\"action\":\"" + json_escape(action) + "\"" +
+                       ",\"target\":\"" + json_escape(target) + "\"" +
+                       ",\"details\":\"" + json_escape(details) + "\"}";
 
     std::cout << json << std::endl;
 
@@ -48,8 +73,14 @@ void AuditLogger::emit_json(AuditLevel level, const std::string& component,
 }
 
 void AuditLogger::emit_metric(double cpu_percent, double ram_mb, int active_agents) {
-    std::string json = "{\"type\":\"METRIC\",\"cpu\":" + std::to_string(cpu_percent) +
-                       ",\"ram\":" + std::to_string(ram_mb) +
+    // Sanitize NaN/Inf — std::to_string produces "nan"/"inf" which is invalid JSON
+    auto safe_num = [](double v) -> std::string {
+        if (std::isnan(v) || std::isinf(v)) return "0.0";
+        return std::to_string(v);
+    };
+
+    std::string json = "{\"type\":\"METRIC\",\"cpu\":" + safe_num(cpu_percent) +
+                       ",\"ram\":" + safe_num(ram_mb) +
                        ",\"agents\":" + std::to_string(active_agents) + "}";
 
     if (s_udp_socket.valid()) {

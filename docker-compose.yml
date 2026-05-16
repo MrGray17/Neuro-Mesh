@@ -1,7 +1,4 @@
-version: "3.8"
-
 services:
-  # Static dashboard served via nginx — JS connects to wsbridge for WebSocket telemetry.
   dashboard:
     image: nginx:alpine
     container_name: neuro_dashboard
@@ -10,11 +7,12 @@ services:
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
-  # Stateless WebSocket proxy — bridges browser WS connections to any C++ node's
-  # TelemetryBridge (ports 9000-9004 on host network). Not a control plane —
-  # just a network bridge needed for Docker/WSL2. In real deployments, the
-  # browser connects directly to node IPs.
   wsbridge:
     build:
       context: ./orchestration
@@ -24,19 +22,24 @@ services:
       - "9001:9001"
     command: ["python3", "-u", "ws_proxy.py"]
     restart: unless-stopped
+    environment:
+      NEURO_HOST_IP: "${NEURO_HOST_IP:-172.18.0.1}"
 
   alpha:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_alpha
-    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - BPF
+      - NET_ADMIN
+      - PERFMON
     network_mode: host
     command: ["ALPHA"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
-      - ./journal_ALPHA.log:/app/journal_ALPHA.log
     restart: unless-stopped
 
   bravo:
@@ -44,67 +47,65 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_bravo
-    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - BPF
+      - NET_ADMIN
+      - PERFMON
     network_mode: host
     command: ["BRAVO"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
-      - ./journal_BRAVO.log:/app/journal_BRAVO.log
     restart: unless-stopped
-    depends_on:
-      - alpha
 
   charlie:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_charlie
-    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - BPF
+      - NET_ADMIN
+      - PERFMON
     network_mode: host
     command: ["CHARLIE"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
-      - ./journal_CHARLIE.log:/app/journal_CHARLIE.log
     restart: unless-stopped
-    depends_on:
-      - alpha
-      - bravo
 
   delta:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_delta
-    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - BPF
+      - NET_ADMIN
+      - PERFMON
     network_mode: host
     command: ["DELTA"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
-      - ./journal_DELTA.log:/app/journal_DELTA.log
     restart: unless-stopped
-    depends_on:
-      - alpha
-      - bravo
-      - charlie
 
   echo:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_echo
-    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - BPF
+      - NET_ADMIN
+      - PERFMON
     network_mode: host
     command: ["ECHO"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
-      - ./journal_ECHO.log:/app/journal_ECHO.log
     restart: unless-stopped
-    depends_on:
-      - alpha
-      - bravo
-      - charlie
-      - delta

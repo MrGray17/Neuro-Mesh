@@ -1,0 +1,84 @@
+# Neuro-Mesh pre-commit hooks configuration
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # C++ formatting
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format
+        entry: clang-format
+        language: system
+        types: [c++]
+        args: ["-i", "-style=file"]
+
+  # Python linting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.0
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+      - id: ruff-format
+
+  # Shell script linting
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: ["-e", "SC1091,SC2034"]
+
+  # Security: banned functions in C/C++
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.23.0
+    hooks:
+      - id: gitleaks
+
+  # Local security check
+  - repo: local
+    hooks:
+      - id: banned-c-functions
+        name: Check for banned C functions
+        entry: bash -c 'grep -rn "\b\(system\|gets\|strcpy\|strcat\|sprintf\|scanf\)\b" --include="*.cpp" --include="*.c" --include="*.hpp" --include="*.h" . | grep -v "_archive_old" | grep -v "third_party" && exit 1 || exit 0'
+        language: system
+        types: [c++]
+        pass_filenames: false
+
+      - id: banned-python-functions
+        name: Check for banned Python functions
+        entry: bash -c 'grep -rn "\bos\.system\|\beval(\|\bexec(" --include="*.py" . | grep -v "_archive_old" && exit 1 || exit 0'
+        language: system
+        types: [python]
+        pass_filenames: false
+
+  # YAML validation
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: ["-d", "{extends: relaxed, rules: {line-length: disable}}"]
+
+  # Dockerfile linting
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.1-beta
+    hooks:
+      - id: hadolint-docker
+        args: ["--ignore", "DL3008", "--ignore", "DL3013", "--ignore", "DL3018", "--ignore", "DL3059"]
+
+  # Markdown linting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.43.0
+    hooks:
+      - id: markdownlint
+        args: ["--disable", "MD013", "--disable", "MD033", "--disable", "MD041"]
+
+  # Trailing whitespace
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: detect-private-key

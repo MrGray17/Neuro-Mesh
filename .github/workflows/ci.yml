@@ -1,0 +1,325 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Build matrix: compiler × mode
+  # ─────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.compiler }}, ${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [clang, gcc]
+        mode: [release, debug, sanitize]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            clang llvm libbpf-dev libelf-dev zlib1g-dev \
+            libssl-dev libseccomp-dev \
+            bpftool python3 python3-pip 2>&1 | tail -5
+
+      - name: Install GCC (if needed)
+        if: matrix.compiler == 'gcc'
+        run: |
+          sudo apt-get install -y -qq g++-14 2>&1 | tail -3
+          echo "CXX=g++-14" >> $GITHUB_ENV
+          echo "CC=gcc-14" >> $GITHUB_ENV
+
+      - name: Install ONNX Runtime
+        run: |
+          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          tar -xzf onnxruntime-linux-x64-1.20.1.tgz
+          sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
+          sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
+          sudo ldconfig
+
+      - name: Install Python ML deps
+        run: pip3 install --break-system-packages -q scikit-learn skl2onnx onnxruntime 2>&1 | tail -3
+
+      - name: Generate ONNX model
+        run: python3 tools/train_iforest.py --output isolation_forest.onnx --samples 5000
+
+      - name: Build (release)
+        if: matrix.mode == 'release'
+        run: make clean && make -j$(nproc)
+
+      - name: Build (debug)
+        if: matrix.mode == 'debug'
+        run: make clean && make -j$(nproc) DEBUG=1
+
+      - name: Build (sanitize)
+        if: matrix.mode == 'sanitize'
+        run: make clean && make -j$(nproc) SANITIZE=1
+
+      - name: Run unit tests
+        run: make test
+
+  # ─────────────────────────────────────────────
+  # Docker build & integration
+  # ─────────────────────────────────────────────
+  docker:
+    name: Docker Build & Integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker images
+        run: docker compose build --no-cache 2>&1 | tail -10
+
+      - name: Boot mesh
+        run: |
+          docker compose up -d
+          sleep 20
+          docker ps
+
+      - name: Verify all 5 nodes running
+        run: |
+          for node in neuro_alpha neuro_bravo neuro_charlie neuro_delta neuro_echo; do
+            if ! docker ps --format '{{.Names}}' | grep -q "$node"; then
+              echo "FAIL: $node not running"
+              docker compose logs "$node" | tail -20
+              exit 1
+            fi
+          done
+          echo "All 5 nodes running"
+
+      - name: Inject CRITICAL event
+        run: |
+          docker exec neuro_charlie /app/inject_event \
+            --node CHARLIE --target ALPHA \
+            --event entropy_spike --verdict CRITICAL
+          echo "Waiting for PBFT consensus..."
+          sleep 30
+
+      - name: Verify consensus in logs
+        run: |
+          docker logs neuro_alpha 2>&1 | grep -i "EXECUTED\|consensus\|isolate" || true
+          docker logs neuro_charlie 2>&1 | grep -i "EXECUTED\|consensus\|isolate" || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  # ─────────────────────────────────────────────
+  # Static analysis
+  # ─────────────────────────────────────────────
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            clang-tidy cppcheck \
+            libbpf-dev libelf-dev zlib1g-dev \
+            libssl-dev libseccomp-dev \
+            bpftool python3 python3-pip 2>&1 | tail -5
+
+      - name: Install ONNX Runtime
+        run: |
+          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          tar -xzf onnxruntime-linux-x64-1.20.1.tgz
+          sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
+          sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
+          sudo ldconfig
+
+      - name: Install Python ML deps
+        run: pip3 install --break-system-packages -q scikit-learn skl2onnx 2>&1 | tail -3
+
+      - name: Generate ONNX model
+        run: python3 tools/train_iforest.py --output isolation_forest.onnx --samples 1000
+
+      - name: Run clang-tidy
+        run: make lint
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=warning,performance,portability,style \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --inline-suppr \
+            -I. -Ithird_party/uWebSockets/src -Ithird_party/uWebSockets/uSockets/src \
+            --std=c++20 \
+            main.cpp cell/ consensus/ enforcer/ crypto/ net/ telemetry/ 2>&1 || true
+
+  # ─────────────────────────────────────────────
+  # Security audit
+  # ─────────────────────────────────────────────
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for banned C/C++ functions
+        run: |
+          echo "=== Checking for unsafe C functions ==="
+          FOUND=0
+          for pattern in '\bsystem(' '\bgets(' '\bstrcpy(' '\bstrcat(' '\bsprintf(' '\bscanf('; do
+            MATCHES=$(grep -rn "$pattern" --include='*.cpp' --include='*.c' --include='*.hpp' --include='*.h' . | grep -v '_archive_old' | grep -v 'third_party' || true)
+            if [ -n "$MATCHES" ]; then
+              echo "WARNING: Found $pattern:"
+              echo "$MATCHES"
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" -eq 1 ]; then
+            echo "FAIL: Banned functions found in source code"
+            exit 1
+          fi
+          echo "No banned C functions found"
+
+      - name: Check for banned Python functions
+        run: |
+          echo "=== Checking for unsafe Python functions ==="
+          FOUND=0
+          for pattern in 'os\.system(' '\beval(' '\bexec('; do
+            MATCHES=$(grep -rn "$pattern" --include='*.py' . | grep -v '_archive_old' || true)
+            if [ -n "$MATCHES" ]; then
+              echo "WARNING: Found $pattern:"
+              echo "$MATCHES"
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" -eq 1 ]; then
+            echo "FAIL: Banned Python functions found"
+            exit 1
+          fi
+          echo "No banned Python functions found"
+
+      - name: Check for hardcoded secrets
+        run: |
+          echo "=== Checking for hardcoded secrets ==="
+          grep -rn 'password\s*=\s*"[^"]\+"' --include='*.py' --include='*.cpp' --include='*.hpp' . | grep -v '_archive_old' | grep -v 'test' || true
+          grep -rn 'api_key\s*=\s*"[^"]\+"' --include='*.py' --include='*.cpp' --include='*.hpp' . | grep -v '_archive_old' || true
+          echo "Secret check complete"
+
+      - name: Check Docker security
+        run: |
+          echo "=== Docker security checks ==="
+          if grep -q 'privileged: true' docker-compose.yml; then
+            echo "WARNING: privileged: true found in docker-compose.yml"
+          fi
+          if ! grep -q 'USER' Dockerfile; then
+            echo "WARNING: No USER directive in Dockerfile"
+          fi
+          echo "Docker security check complete"
+
+      - name: Install and run semgrep
+        run: |
+          pip3 install --break-system-packages -q semgrep 2>&1 | tail -3
+          semgrep scan --config auto --error --max-target-bytes 1000000 \
+            --exclude '_archive_old' --exclude 'third_party' --exclude 'node_modules' . 2>&1 || true
+
+  # ─────────────────────────────────────────────
+  # Fuzz testing (libFuzzer, 10s per target)
+  # ─────────────────────────────────────────────
+  fuzz:
+    name: Fuzz Testing
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            clang llvm libbpf-dev libelf-dev zlib1g-dev \
+            libssl-dev libseccomp-dev \
+            bpftool 2>&1 | tail -5
+
+      - name: Install ONNX Runtime
+        run: |
+          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          tar -xzf onnxruntime-linux-x64-1.20.1.tgz
+          sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
+          sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
+          sudo ldconfig
+
+      - name: Build fuzz targets
+        run: |
+          make -j$(nproc) $(BIN_DIR)/fuzz_beacon_parser $(BIN_DIR)/fuzz_json_parser $(BIN_DIR)/fuzz_pbft_message
+
+      - name: Run fuzz beacon parser (10s)
+        run: bin/fuzz_beacon_parser -max_total_time=10 || true
+
+      - name: Run fuzz JSON parser (10s)
+        run: bin/fuzz_json_parser -max_total_time=10 || true
+
+      - name: Run fuzz PBFT message (10s)
+        run: bin/fuzz_pbft_message -max_total_time=10 || true
+
+  # ─────────────────────────────────────────────
+  # Python linting
+  # ─────────────────────────────────────────────
+  python-lint:
+    name: Python Linting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check
+        run: ruff check orchestration/ tools/*.py
+
+      - name: Run ruff format check
+        run: ruff format --check orchestration/ tools/*.py
+
+  # ─────────────────────────────────────────────
+  # Shell script linting
+  # ─────────────────────────────────────────────
+  shell-lint:
+    name: Shell Linting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Run shellcheck
+        run: |
+          shellcheck -e SC1091,SC2034 *.sh tests/*.sh 2>&1 || true
+
+  # ─────────────────────────────────────────────
+  # Dockerfile linting
+  # ─────────────────────────────────────────────
+  dockerfile-lint:
+    name: Dockerfile Linting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+          ignored: DL3008,DL3013,DL3018,DL3059

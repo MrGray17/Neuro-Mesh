@@ -2,6 +2,7 @@
 #include <cstring>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -18,12 +19,6 @@
 namespace neuro_mesh::net {
 
 namespace {
-
-int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
 
 } // namespace
 
@@ -123,9 +118,8 @@ TransportLayer::~TransportLayer() {
 }
 
 bool TransportLayer::initialize_openssl() {
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
+    OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS, nullptr);
+    OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
     return true;
 }
 
@@ -199,6 +193,10 @@ int TransportLayer::accept() {
 int TransportLayer::connect(const std::string& host, uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+
+    struct timeval tv{};
+    tv.tv_sec = 5;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
@@ -399,6 +397,23 @@ bool MTLSAuth::load_crl(const std::string& crl_path) {
 
     if (!crl) return false;
 
+    // Extract serial numbers from revoked entries and store them
+    STACK_OF(X509_REVOKED)* revoked = X509_CRL_get_REVOKED(crl);
+    if (revoked) {
+        for (int i = 0; i < sk_X509_REVOKED_num(revoked); ++i) {
+            X509_REVOKED* entry = sk_X509_REVOKED_value(revoked, i);
+            const ASN1_INTEGER* serial = X509_REVOKED_get0_serialNumber(entry);
+            if (serial) {
+                char* serial_str = i2s_ASN1_INTEGER(nullptr, serial);
+                if (serial_str) {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_revoked_serials.insert(serial_str);
+                    OPENSSL_free(serial_str);
+                }
+            }
+        }
+    }
+
     X509_CRL_free(crl);
     return true;
 }
@@ -560,7 +575,12 @@ bool PeerDiscovery::handle_incoming_beacon(const char* data, size_t len, const s
 
     std::string node_id = payload.substr(0, sep1);
     std::string ip = payload.substr(sep1 + 1, sep2 - sep1 - 1);
-    uint16_t port = static_cast<uint16_t>(std::stoi(payload.substr(sep2 + 1)));
+    uint16_t port = 0;
+    try {
+        port = static_cast<uint16_t>(std::stoi(payload.substr(sep2 + 1)));
+    } catch (...) {
+        return false;
+    }
 
     if (node_id == m_node_id) return false;
 

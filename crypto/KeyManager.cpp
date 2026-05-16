@@ -374,8 +374,10 @@ bool KeyManager::store_key(const KeyPair& key_pair) {
     std::string blob(data, len);
     std::string encrypted = encrypt_blob(blob);
     out.write(encrypted.data(), encrypted.size());
-    BIO_free(bio);
     out.close();
+    BIO_free(bio);
+
+    ::chmod(key_file.c_str(), 0600);
 
     m_cached_key.emplace(key_pair);
     return true;
@@ -618,6 +620,8 @@ bool SoftHSMBackend::generate_key(KeyType type, const std::string& key_id, Uniqu
             long len = BIO_get_mem_data(bio, &data);
             out.write(data, len);
             BIO_free(bio);
+            out.close();
+            ::chmod(path.c_str(), 0600);
         }
     }
 

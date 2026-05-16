@@ -22,6 +22,7 @@
 #include "cell/InferenceEngine.hpp"
 #include "cell/NodeAgent.hpp"
 #include "common/UniqueFD.hpp"
+#include "telemetry/AuditLogger.hpp"
 
 using namespace neuro_mesh;
 
@@ -126,7 +127,10 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
     int seq = 0;
     pid_t my_pid = getpid();  // filter eBPF events from our own traffic
     while (global_running) {
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        for (int i = 0; i < 10 && global_running; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        if (!global_running) break;
 
         // Build peer_list JSON array
         auto peer_ids = mesh.get_active_peer_ids();
@@ -253,7 +257,7 @@ static constexpr int IPC_RATE_LIMIT_PER_SEC = 10;
 
 void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshNode& mesh, TelemetryBridge& bridge) {
     (void)bridge;
-    std::string socket_path = "/tmp/neuro_mesh_" + node_id.substr(node_id.find('_') + 1) + ".sock";
+    std::string socket_path = "/tmp/neuro_mesh_" + node_id + ".sock";
     unlink(socket_path.c_str());
 
     UniqueFD server_fd{socket(AF_UNIX, SOCK_STREAM, 0)};
@@ -436,6 +440,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << "[BOOT] Neuro-Mesh V9.0 Node: " << node_id << std::endl;
 
+    // ---- Stage 0: Audit logging ----
+    telemetry::AuditLogger::initialize();
+
     // ---- Stage 1: Defense mechanisms ----
     PolicyEnforcer jailer;
     jailer.add_safe_node(node_id);
@@ -559,7 +566,7 @@ int main(int argc, char* argv[]) {
 
     // ---- Main idle loop ----
     while (global_running) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
     // ---- Graceful shutdown (reverse order of init) ----

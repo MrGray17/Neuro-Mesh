@@ -1,31 +1,36 @@
-#!/bin/bash
-
-# 1. CLEANUP: Kill any existing nodes and tmux sessions to ensure a clean slate
-killall neuro_agent 2>/dev/null
-tmux kill-session -t neuro_mesh 2>/dev/null
+#!/usr/bin/env bash
+# mesh_dashboard.sh — Launch 5-node mesh in a tmux grid
+set -euo pipefail
 
 SESSION="neuro_mesh"
-tmux new-session -d -s $SESSION
+NODES=("ALPHA" "BRAVO" "CHARLIE" "DELTA" "ECHO")
 
-# 2. ORCHESTRATE: Create a professional 5-pane grid
-# Split vertically (Left/Right)
-tmux split-window -h
-# Split left side horizontally
+# Cleanup previous session
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+# Build if needed
+if [ ! -f bin/neuro_agent ]; then
+    echo "[BUILD] Compiling neuro_agent..."
+    make -j"$(nproc)"
+fi
+
+# Create session
+tmux new-session -d -s "$SESSION"
+
+# Create 5-pane grid
+tmux split-window -h       # 0 | 1
 tmux select-pane -t 0
-tmux split-window -v
-# Split right side horizontally
+tmux split-window -v       # 0 | 2
+                           # 1 | 3
 tmux select-pane -t 2
-tmux split-window -v
-# Create the 5th pane (Simulator Control)
-tmux select-pane -t 3
-tmux split-window -v
+tmux split-window -v       # 0 | 2
+                           # 3 | 3
 
-# 3. EXECUTE: Assign nodes to specific, dedicated panes
-tmux send-keys -t 0 "./bin/neuro_agent NODE_1" C-m
-tmux send-keys -t 1 "./bin/neuro_agent NODE_2" C-m
-tmux send-keys -t 2 "./bin/neuro_agent NODE_3" C-m
-tmux send-keys -t 3 "./bin/neuro_agent NODE_4" C-m
-tmux send-keys -t 4 "echo '--- Neuro-Mesh Online ---'; echo 'Ready for event injection.'" C-m
+# Launch nodes
+for i in "${!NODES[@]}"; do
+    tmux send-keys -t "$i" "./bin/neuro_agent ${NODES[$i]}" C-m
+done
 
-# Attach to the session
-tmux attach-session -t $SESSION
+echo "[INFO] Neuro-Mesh launched in tmux session '$SESSION'"
+echo "[INFO] Dashboard: http://localhost:8080"
+tmux attach-session -t "$SESSION"

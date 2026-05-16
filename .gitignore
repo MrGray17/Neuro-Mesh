@@ -18,6 +18,7 @@ api.json
 api_tmp.json
 ia_commands.txt
 .env
+.env.local
 trained_models/
 venv/
 node_modules/
@@ -37,6 +38,7 @@ _archive_old/
 neuro_mesh_full_*.txt
 neuro_mesh_pure_code*
 *.log
+journal_*.log
 ia_commands.txt
 
 # Third-party (vendored, not tracked)
@@ -47,3 +49,20 @@ third_party/
 .nemp/
 .repowise/
 .mcp.json
+
+# Build and test artifacts
+*.gcno
+*.gcda
+*.profraw
+*.profdata
+coverage/
+
+# IDE
+*.swp
+*.swo
+*~
+.idea/
+
+# Temporary files
+*.tmp
+*.bak
