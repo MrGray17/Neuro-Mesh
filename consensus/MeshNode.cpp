@@ -919,14 +919,15 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
             announce_identity();
         }
     }
-    else if (cmd == "VOTE" && tokens.size() >= 7) {
+    else if (cmd == "VOTE" && tokens.size() >= 8) {
         const std::string& stage_str    = tokens[1];
         const std::string& sender_id    = tokens[2];
         const std::string& seq_str      = tokens[3];
         const std::string& view_str     = tokens[4];
         const std::string& target_id    = tokens[5];
         const std::string& evidence_raw = tokens[6];
-        const std::string& sig_b64      = tokens[7];
+        const std::string& prev_hash    = tokens[7];
+        const std::string& sig_b64      = tokens[8];
 
         if (stage_str.empty() || sender_id.empty() || target_id.empty()) return;
         if (sender_id.size() > 64 || target_id.size() > 64) return;
@@ -949,7 +950,7 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
             std::cerr << "[PBFT] Failed to decode signature from " << sender_id << std::endl;
             return;
         }
-        P2PMessage incoming_msg{stage_str, sender_id, target_id, evidence_raw, decoded_sig, "", seq, view};
+        P2PMessage incoming_msg{stage_str, sender_id, target_id, evidence_raw, decoded_sig, prev_hash, seq, view};
         if (incoming_msg.sender_id == m_node_id) return;
 
         // Mark when this node is the target of a PBFT round
@@ -1046,7 +1047,7 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
     uint64_t seq = m_sequence_number.fetch_add(1, std::memory_order_relaxed) + 1;
     int view = m_pbft.current_view();
 
-    std::string prev_hash = m_pbft.get_chain_state_hash();
+    std::string prev_hash = m_pbft.get_last_sent_hash(m_node_id);
 
     P2PMessage msg;
     msg.stage_str = stage_str;
@@ -1061,7 +1062,8 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
     std::string encoded_sig = base64_encode(signature);
 
     std::string payload = "VOTE|" + stage_str + "|" + m_node_id + "|" + std::to_string(seq) + "|" +
-                          std::to_string(view) + "|" + target_id + "|" + evidence_json + "|" + encoded_sig;
+                          std::to_string(view) + "|" + target_id + "|" + evidence_json + "|" +
+                          prev_hash + "|" + encoded_sig;
 
     // Prefer TLS to known peers, fall back to UDP broadcast
     bool tls_sent = false;

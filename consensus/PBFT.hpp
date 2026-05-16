@@ -283,9 +283,23 @@ public:
 
     std::string get_chain_state_hash() const {
         std::lock_guard<std::mutex> lock(m_mtx);
+        if (m_last_confirmed_hash.empty()) {
+            return m_genesis_hash;
+        }
         std::stringstream ss;
         ss << m_last_confirmed_hash << "|" << m_total_nodes << "|" << m_current_view;
         return crypto::IdentityCore::sha256_hex(ss.str());
+    }
+
+    // Returns the hash to use as prev_message_hash when this node sends the
+    // next message.  Chains from the most recent message we sent, or genesis.
+    std::string get_last_sent_hash(const std::string& sender_id) const {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        auto it = m_message_history.find(sender_id);
+        if (it == m_message_history.end() || it->second.empty()) {
+            return m_genesis_hash;
+        }
+        return it->second.rbegin()->second;
     }
 
     int current_view() const { return m_current_view; }
@@ -298,19 +312,19 @@ public:
 
 private:
     bool verify_message_chaining(const P2PMessage& msg) const {
-        if (msg.prev_message_hash.empty()) {
-            return msg.sequence_number == 0;
-        }
-
         auto history_it = m_message_history.find(msg.sender_id);
-        if (history_it == m_message_history.end()) {
-            return msg.sequence_number == 0;
+        if (history_it == m_message_history.end() || history_it->second.empty()) {
+            // First message from this sender — accept.  Signature binding
+            // already proves the sender authorized this content.
+            return true;
         }
 
         const auto& history = history_it->second;
         auto prev_it = history.find(msg.sequence_number - 1);
         if (prev_it == history.end()) {
-            return msg.sequence_number == 0;
+            // Gap in stored history (e.g. eviction, view change).
+            // Accept if chaining from genesis, otherwise reject.
+            return msg.prev_message_hash == m_genesis_hash;
         }
 
         return prev_it->second == msg.prev_message_hash;
