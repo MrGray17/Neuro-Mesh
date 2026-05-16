@@ -7,20 +7,25 @@ Measures:
 
 Requires agents to be running via docker-compose. Zero external dependencies.
 """
-import subprocess, time, json, os, argparse
+
+import subprocess
+import time
+import json
+import os
+import argparse
 from datetime import datetime
 
 CONTAINERS = {
-    "ALPHA":   "neuro_alpha",
-    "BRAVO":   "neuro_bravo",
+    "ALPHA": "neuro_alpha",
+    "BRAVO": "neuro_bravo",
     "CHARLIE": "neuro_charlie",
 }
 
 INJECTOR_NODE = "CHARLIE"  # daemon that receives IPC injection command
 
 JOURNAL_PATHS = {
-    "ALPHA":   "./journal_ALPHA.log",
-    "BRAVO":   "./journal_BRAVO.log",
+    "ALPHA": "./journal_ALPHA.log",
+    "BRAVO": "./journal_BRAVO.log",
     "CHARLIE": "./journal_CHARLIE.log",
 }
 
@@ -58,7 +63,9 @@ def get_container_stats(container: str):
     try:
         result = subprocess.run(
             ["docker", "exec", container, "cat", "/proc/1/stat"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         fields = result.stdout.split()
         utime = int(fields[13]) if len(fields) > 13 else 0
@@ -79,10 +86,20 @@ def snapshot_all_stats():
 
 def run_inject_event(node: str, target: str, event: str, verdict: str, tag: str = ""):
     """Inject a threat via IPC to a local daemon inside a running container."""
-    cmd = ["docker", "exec", CONTAINERS[node],
-           "/app/inject_event",
-           "--node", node, "--target", target,
-           "--event", event, "--verdict", verdict]
+    cmd = [
+        "docker",
+        "exec",
+        CONTAINERS[node],
+        "/app/inject_event",
+        "--node",
+        node,
+        "--target",
+        target,
+        "--event",
+        event,
+        "--verdict",
+        verdict,
+    ]
     if tag:
         cmd.extend(["--tag", tag])
     try:
@@ -182,18 +199,26 @@ def format_markdown(all_results: list):
         avg = sum(deltas) / len(deltas)
         lat_min = min(deltas)
         lat_max = max(deltas)
-        lines.append(f"| **Stats** | | **avg: {avg:.2f}** | min: {lat_min:.2f} / max: {lat_max:.2f} |")
+        lines.append(
+            f"| **Stats** | | **avg: {avg:.2f}** | min: {lat_min:.2f} / max: {lat_max:.2f} |"
+        )
 
     lines.append("")
 
     # --- Metric B: Resources ---
     lines.append("## Metric B: Resource Delta During Consensus Round")
     lines.append("")
-    lines.append("| Run | Node | CPU Before | CPU After | CPU Delta | Mem Before (KB) | Mem After | Mem Delta (KB) |")
-    lines.append("|-----|------|-----------|-----------|-----------|-----------------|-----------|----------------|")
+    lines.append(
+        "| Run | Node | CPU Before | CPU After | CPU Delta | Mem Before (KB) | Mem After | Mem Delta (KB) |"
+    )
+    lines.append(
+        "|-----|------|-----------|-----------|-----------|-----------------|-----------|----------------|"
+    )
 
     for r in all_results:
-        all_nodes = sorted(set(list(r["cpu_before"].keys()) + list(r["cpu_after"].keys())))
+        all_nodes = sorted(
+            set(list(r["cpu_before"].keys()) + list(r["cpu_after"].keys()))
+        )
         for nid in all_nodes:
             cb = r["cpu_before"].get(nid, 0)
             ca = r["cpu_after"].get(nid, 0)
@@ -201,7 +226,9 @@ def format_markdown(all_results: list):
             ma = r["mem_after_kb"].get(nid, 0)
             cd = ca - cb
             md = ma - mb
-            lines.append(f"| {r['run']} | {nid} | {cb} | {ca} | {cd} | {mb} | {ma} | {md} |")
+            lines.append(
+                f"| {r['run']} | {nid} | {cb} | {ca} | {cd} | {mb} | {ma} | {md} |"
+            )
 
     lines.append("")
     return "\n".join(lines)
@@ -209,21 +236,29 @@ def format_markdown(all_results: list):
 
 def main():
     parser = argparse.ArgumentParser(description="Neuro-Mesh PBFT Consensus Benchmark")
-    parser.add_argument("--runs", type=int, default=3, help="Number of benchmark iterations")
+    parser.add_argument(
+        "--runs", type=int, default=3, help="Number of benchmark iterations"
+    )
     parser.add_argument("--output", choices=["markdown", "json"], default="markdown")
-    parser.add_argument("--target", default="ALPHA", help="Target node for threat injection")
+    parser.add_argument(
+        "--target", default="ALPHA", help="Target node for threat injection"
+    )
     parser.add_argument("--event", default="lateral_movement", help="Event type")
     parser.add_argument("--verdict", default="THREAT", help="Verdict severity")
     args = parser.parse_args()
 
     all_results = []
     for i in range(args.runs):
-        print(f"\n{'='*60}")
-        print(f"[RUN {i+1}/{args.runs}] Injecting {args.event}/{args.verdict} -> {args.target}")
-        print(f"{'='*60}")
+        print(f"\n{'=' * 60}")
+        print(
+            f"[RUN {i + 1}/{args.runs}] Injecting {args.event}/{args.verdict} -> {args.target}"
+        )
+        print(f"{'=' * 60}")
         result = run_single_benchmark(i + 1, args.target, args.event, args.verdict)
         all_results.append(result)
-        print(f"  Delta: {result['delta_ms']} ms  |  Executed seq: {result.get('executed_seq', 'N/A')}")
+        print(
+            f"  Delta: {result['delta_ms']} ms  |  Executed seq: {result.get('executed_seq', 'N/A')}"
+        )
         if i < args.runs - 1:
             time.sleep(2)
 

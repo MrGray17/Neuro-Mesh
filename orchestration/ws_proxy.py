@@ -6,6 +6,7 @@ This proxy tries each backend in order — if one node is down, it fails over
 to the next. In a real deployment (physical machines, K8s with Pod networking),
 the browser connects directly to nodes and this proxy is unnecessary.
 """
+
 import asyncio
 import os
 import websockets
@@ -84,8 +85,7 @@ async def proxy(peer_sock, path="/"):
 async def main() -> None:
     backends_str = ", ".join(BACKENDS)
     print(
-        f"[WS-PROXY] Listening on 0.0.0.0:{LISTEN_PORT} "
-        f"→ backends: {backends_str}",
+        f"[WS-PROXY] Listening on 0.0.0.0:{LISTEN_PORT} → backends: {backends_str}",
         flush=True,
     )
     async with websockets.serve(

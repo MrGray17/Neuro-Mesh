@@ -3,6 +3,7 @@
 
 CLI tool to send commands to neuro_agent via IPC Unix socket.
 """
+
 import socket
 import sys
 import os
@@ -23,7 +24,9 @@ def find_agent_socket() -> str | None:
 def send_ipc_command(command: str, socket_path: str) -> bool:
     """Send a command to a neuro_agent via its Unix domain socket."""
     if not os.path.exists(socket_path):
-        print(f"[ERROR] Agent socket not found at {socket_path}. Is Neuro-Mesh running?")
+        print(
+            f"[ERROR] Agent socket not found at {socket_path}. Is Neuro-Mesh running?"
+        )
         return False
 
     try:

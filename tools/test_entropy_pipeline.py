@@ -38,9 +38,19 @@ async def collect_entropy(duration_s: float) -> list[float]:
 def inject_event(node: str, target: str) -> bool:
     """Run inject_event inside a Docker container. Returns True on success."""
     proc = subprocess.run(
-        ["docker", "exec", f"neuro_{node.lower()}",
-         "/app/inject_event", "--node", node, "--target", target],
-        capture_output=True, text=True, timeout=10,
+        [
+            "docker",
+            "exec",
+            f"neuro_{node.lower()}",
+            "/app/inject_event",
+            "--node",
+            node,
+            "--target",
+            target,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     return "ACK:INJECT" in proc.stdout
 
@@ -87,7 +97,9 @@ async def main():
                     spike_values.append(entropy)
                     if entropy > 0.8:
                         spike_found = True
-                        print(f"  SPIKE DETECTED: node={data.get('node')} entropy={entropy:.4f} threat={data.get('threat')}")
+                        print(
+                            f"  SPIKE DETECTED: node={data.get('node')} entropy={entropy:.4f} threat={data.get('threat')}"
+                        )
             except asyncio.TimeoutError:
                 pass
 

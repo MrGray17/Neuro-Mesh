@@ -26,11 +26,13 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          set -o pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             clang llvm libbpf-dev libelf-dev zlib1g-dev \
             libssl-dev libseccomp-dev \
-            bpftool python3 python3-pip 2>&1 | tail -5
+            linux-tools-common linux-tools-generic bpftool \
+            python3 python3-pip 2>&1 | tail -20
 
       - name: Install GCC (if needed)
         if: matrix.compiler == 'gcc'
@@ -128,12 +130,14 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -o pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             clang-tidy cppcheck \
             libbpf-dev libelf-dev zlib1g-dev \
             libssl-dev libseccomp-dev \
-            bpftool python3 python3-pip 2>&1 | tail -5
+            linux-tools-common linux-tools-generic bpftool \
+            python3 python3-pip 2>&1 | tail -20
 
       - name: Install ONNX Runtime
         run: |
@@ -242,11 +246,12 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          set -o pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             clang llvm libbpf-dev libelf-dev zlib1g-dev \
             libssl-dev libseccomp-dev \
-            bpftool 2>&1 | tail -5
+            linux-tools-common linux-tools-generic bpftool 2>&1 | tail -20
 
       - name: Install ONNX Runtime
         run: |
@@ -258,7 +263,7 @@ jobs:
 
       - name: Build fuzz targets
         run: |
-          make -j$(nproc) $(BIN_DIR)/fuzz_beacon_parser $(BIN_DIR)/fuzz_json_parser $(BIN_DIR)/fuzz_pbft_message
+          make -j$(nproc) bin/fuzz_beacon_parser bin/fuzz_json_parser bin/fuzz_pbft_message
 
       - name: Run fuzz beacon parser (10s)
         run: bin/fuzz_beacon_parser -max_total_time=10 || true
@@ -322,4 +327,4 @@ jobs:
         with:
           dockerfile: Dockerfile
           failure-threshold: warning
-          ignored: DL3008,DL3013,DL3018,DL3059
+          ignore: DL3008,DL3013,DL3018,DL3042,DL3059

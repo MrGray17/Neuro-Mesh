@@ -8,6 +8,7 @@ Usage:
     python3 tools/traffic_generator.py --target 127.0.0.1 --duration 15
     python3 tools/traffic_generator.py --target 192.168.65.3 --duration 30 --threads 8
 """
+
 import argparse
 import ipaddress
 import random
@@ -64,22 +65,20 @@ def tcp_scan(target: str, port_range: list[int], timeout: float = 0.3) -> None:
 
 
 def banner(target: str, duration: int, threads: int) -> None:
-    print(f"[TRAFFIC] Strike launched!")
+    print("[TRAFFIC] Strike launched!")
     print(f"        Target   : {target}")
     print(f"        Duration : {duration}s")
     print(f"        Threads  : {threads}")
-    print(f"        UDP flood: ports 1-65535, 1400B payloads")
-    print(f"        TCP scan : ports 1-65535, aggressive connect()")
-    print(f"[TRAFFIC] Press Ctrl+C to abort early.\n")
+    print("        UDP flood: ports 1-65535, 1400B payloads")
+    print("        TCP scan : ports 1-65535, aggressive connect()")
+    print("[TRAFFIC] Press Ctrl+C to abort early.\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Network traffic generator for Neuro-Mesh eBPF validation"
     )
-    parser.add_argument(
-        "--target", required=True, help="Target IP address"
-    )
+    parser.add_argument("--target", required=True, help="Target IP address")
     parser.add_argument(
         "--duration",
         type=int,
@@ -110,18 +109,14 @@ def main() -> None:
     workers: list[threading.Thread] = []
 
     for _ in range(udp_count):
-        t = threading.Thread(
-            target=udp_flood, args=(target, port_range), daemon=True
-        )
+        t = threading.Thread(target=udp_flood, args=(target, port_range), daemon=True)
         workers.append(t)
 
     tcp_ports = list(port_range)
     random.shuffle(tcp_ports)
 
     for _ in range(tcp_count):
-        t = threading.Thread(
-            target=tcp_scan, args=(target, tcp_ports), daemon=True
-        )
+        t = threading.Thread(target=tcp_scan, args=(target, tcp_ports), daemon=True)
         workers.append(t)
 
     print(f"[TRAFFIC] Spawning {udp_count} UDP flooders + {tcp_count} TCP scanners...")

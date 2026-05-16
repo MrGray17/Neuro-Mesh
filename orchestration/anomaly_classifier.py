@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Neuro-Mesh Anomaly Classifier — rule-based secondary detector."""
+
 import json
 import time
 import os
@@ -48,8 +49,7 @@ def listen_p2p_telemetry() -> None:
                             "net_out_bytes_s": node_data.get("NET_OUT", 0),
                             "status": (
                                 "FLAGGED"
-                                if "SELF_ISOLATED"
-                                in str(node_data.get("STATUS", ""))
+                                if "SELF_ISOLATED" in str(node_data.get("STATUS", ""))
                                 else "STABLE"
                             ),
                             "_last_seen": time.time(),

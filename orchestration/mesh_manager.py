@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Neuro-Mesh Process Manager — launches and monitors mesh nodes."""
+
 import subprocess
 import time
 import signal
@@ -34,7 +35,9 @@ def monitor_nodes() -> None:
     """Restart any node that has crashed."""
     for i, (node_id, p) in enumerate(zip(nodes, processes)):
         if p.poll() is not None and running:
-            print(f"[SYSTEM] Node {node_id} exited (code {p.returncode}), restarting...")
+            print(
+                f"[SYSTEM] Node {node_id} exited (code {p.returncode}), restarting..."
+            )
             log_file = open(f"logs/{node_id}.log", "a")
             new_p = subprocess.Popen(
                 ["./bin/neuro_agent", node_id],

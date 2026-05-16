@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Neuro-Mesh Control Plane — aggregates UDP telemetry, serves HTTP + WebSocket."""
+
 import asyncio
 import websockets
 import json
+import os
 import time
 import socket
 import sys
@@ -103,9 +105,7 @@ async def http_api_handler(
     try:
         await reader.read(1024)
         async with db_lock:
-            flagged = any(
-                n.get("status") == "FLAGGED" for n in nodes_db.values()
-            )
+            flagged = any(n.get("status") == "FLAGGED" for n in nodes_db.values())
             data = {
                 "active_nodes": list(nodes_db.values()),
                 "logs": logs,
@@ -125,7 +125,9 @@ async def http_api_handler(
         writer.close()
 
 
-async def ws_handler(websocket: websockets.WebSocketServerProtocol, path: str = "/") -> None:
+async def ws_handler(
+    websocket: websockets.WebSocketServerProtocol, path: str = "/"
+) -> None:
     """Emit per-node dashboard-compatible events from the aggregated nodes_db."""
     sent_log_count = 0
     try:
@@ -133,8 +135,7 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol, path: str = 
             async with db_lock:
                 now = time.time()
                 dead = [
-                    k for k, v in nodes_db.items()
-                    if now - v.get("last_seen", 0) > 5.0
+                    k for k, v in nodes_db.items() if now - v.get("last_seen", 0) > 5.0
                 ]
                 for k in dead:
                     del nodes_db[k]
@@ -163,20 +164,23 @@ async def ws_handler(websocket: websockets.WebSocketServerProtocol, path: str = 
                     sent_log_count += 1
                     if "eBPF anomaly verified on" in log_msg:
                         import re
+
                         match = re.search(r"on (\S+)", log_msg)
                         nid = match.group(1) if match else "UNKNOWN"
                         real_entropy = nodes_db.get(nid, {}).get("entropy", 0.0)
                         if real_entropy > 0.65:
                             await websocket.send(
-                                json.dumps({
-                                    "event": "ebpf_entropy",
-                                    "sensor": "ebpf_entropy",
-                                    "ID": nid,
-                                    "node": nid,
-                                    "value": real_entropy,
-                                    "threshold": 0.65,
-                                    "mitre_attack": ["T1059", "T1021", "T1571"],
-                                })
+                                json.dumps(
+                                    {
+                                        "event": "ebpf_entropy",
+                                        "sensor": "ebpf_entropy",
+                                        "ID": nid,
+                                        "node": nid,
+                                        "value": real_entropy,
+                                        "threshold": 0.65,
+                                        "mitre_attack": ["T1059", "T1021", "T1571"],
+                                    }
+                                )
                             )
 
             await asyncio.sleep(0.5)
@@ -193,15 +197,12 @@ async def legacy_ws_handler(
             async with db_lock:
                 now = time.time()
                 dead = [
-                    k for k, v in nodes_db.items()
-                    if now - v.get("last_seen", 0) > 5.0
+                    k for k, v in nodes_db.items() if now - v.get("last_seen", 0) > 5.0
                 ]
                 for k in dead:
                     del nodes_db[k]
 
-                flagged = any(
-                    n.get("status") == "FLAGGED" for n in nodes_db.values()
-                )
+                flagged = any(n.get("status") == "FLAGGED" for n in nodes_db.values())
                 state = {
                     "active_nodes": list(nodes_db.values()),
                     "logs": logs,
@@ -220,9 +221,7 @@ async def main() -> None:
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     udp_sock.bind(("127.0.0.1", UDP_TELEMETRY_PORT))
-    await loop.create_datagram_endpoint(
-        lambda: TelemetryProtocol(), sock=udp_sock
-    )
+    await loop.create_datagram_endpoint(lambda: TelemetryProtocol(), sock=udp_sock)
 
     await asyncio.start_server(http_api_handler, "0.0.0.0", HTTP_API_PORT)
     await websockets.serve(ws_handler, "0.0.0.0", 9002)

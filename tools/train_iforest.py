@@ -34,13 +34,15 @@ def generate_synthetic_data(n_samples: int = 10000, contamination: float = 0.05)
     normal_null_ratio = rng.uniform(0.0, 0.05, n_normal)
     normal_printable = rng.uniform(0.85, 1.0, n_normal)
 
-    X_normal = np.column_stack([
-        normal_payload_entropy,
-        normal_payload_len,
-        normal_comm_entropy,
-        normal_null_ratio,
-        normal_printable,
-    ])
+    X_normal = np.column_stack(
+        [
+            normal_payload_entropy,
+            normal_payload_len,
+            normal_comm_entropy,
+            normal_null_ratio,
+            normal_printable,
+        ]
+    )
 
     # --- Anomalous samples ---
     anom_payload_entropy = rng.uniform(3.5, 8.0, n_anomaly)
@@ -49,29 +51,41 @@ def generate_synthetic_data(n_samples: int = 10000, contamination: float = 0.05)
     anom_null_ratio = rng.uniform(0.0, 0.6, n_anomaly)
     anom_printable = rng.uniform(0.1, 0.7, n_anomaly)
 
-    X_anomaly = np.column_stack([
-        anom_payload_entropy,
-        anom_payload_len,
-        anom_comm_entropy,
-        anom_null_ratio,
-        anom_printable,
-    ])
+    X_anomaly = np.column_stack(
+        [
+            anom_payload_entropy,
+            anom_payload_len,
+            anom_comm_entropy,
+            anom_null_ratio,
+            anom_printable,
+        ]
+    )
 
     X = np.vstack([X_normal, X_anomaly]).astype(np.float32)
     return X
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Isolation Forest for eBPF anomaly detection")
-    parser.add_argument("--output", default="isolation_forest.onnx", help="Output ONNX model path")
-    parser.add_argument("--samples", type=int, default=10000, help="Number of synthetic samples")
-    parser.add_argument("--contamination", type=float, default=0.05, help="Expected anomaly ratio")
+    parser = argparse.ArgumentParser(
+        description="Train Isolation Forest for eBPF anomaly detection"
+    )
+    parser.add_argument(
+        "--output", default="isolation_forest.onnx", help="Output ONNX model path"
+    )
+    parser.add_argument(
+        "--samples", type=int, default=10000, help="Number of synthetic samples"
+    )
+    parser.add_argument(
+        "--contamination", type=float, default=0.05, help="Expected anomaly ratio"
+    )
     args = parser.parse_args()
 
     X = generate_synthetic_data(args.samples, args.contamination)
 
-    print(f"[TRAIN] Training IsolationForest on {args.samples} samples "
-          f"(features={X.shape[1]}, contamination={args.contamination})")
+    print(
+        f"[TRAIN] Training IsolationForest on {args.samples} samples "
+        f"(features={X.shape[1]}, contamination={args.contamination})"
+    )
 
     model = IsolationForest(
         n_estimators=100,
@@ -95,7 +109,7 @@ def main():
     # Export to ONNX with flat float32 tensor output (no zipmap)
     initial_type = [("float_input", FloatTensorType([1, 5]))]
 
-    print(f"[EXPORT] Converting to ONNX...")
+    print("[EXPORT] Converting to ONNX...")
     onx = to_onnx(
         model,
         initial_types=initial_type,
@@ -106,7 +120,9 @@ def main():
     with open(args.output, "wb") as f:
         f.write(onx.SerializeToString())
 
-    print(f"[EXPORT] Model saved to {args.output} ({len(onx.SerializeToString())} bytes)")
+    print(
+        f"[EXPORT] Model saved to {args.output} ({len(onx.SerializeToString())} bytes)"
+    )
 
     # Verify: log all outputs
     for i, out in enumerate(onx.graph.output):
