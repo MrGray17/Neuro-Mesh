@@ -60,6 +60,9 @@ public:
     int peer_count() const;
     std::vector<std::string> get_active_peer_ids() const;
 
+    // Seed peers for cross-subnet discovery (env NEURO_PEERS="ip:port,ip:port")
+    void set_seed_peers(const std::vector<std::pair<std::string, int>>& seeds);
+
     // TOFU key management — unpin a peer's key to allow rotation (manual intervention)
     void unpin_peer_key(const std::string& node_id);
 
@@ -68,6 +71,8 @@ public:
 
     // Utility — split string by delimiter (public for testing)
     std::vector<std::string> split_string(const std::string& str, char delimiter);
+    static bool try_parse_int(const std::string& s, int& out) noexcept;
+    static bool try_parse_long(const std::string& s, int64_t& out) noexcept;
 
 private:
     // === Threads ===
@@ -119,6 +124,7 @@ private:
     crypto::KeyManager m_key_manager;
     std::string m_tls_cert_path;
     std::string m_tls_key_path;
+    std::string m_tls_cert_fingerprint;  // SHA256 of TLS cert for TOFU
 
     // === Thread handles ===
     std::thread m_listener_thread;
@@ -138,6 +144,22 @@ private:
     MitigationEngine* m_mitigation;
     TelemetryBridge* m_bridge;
     StateJournal m_journal;
+
+    // === TOFU: Trust-On-First-Use for ANNOUNCE key pinning + TLS cert pinning ===
+    struct TOFUEntry {
+        std::string pinned_pem;
+        std::string pinned_tls_fingerprint;
+        std::chrono::steady_clock::time_point first_seen;
+        bool trust_frozen = false;
+    };
+    std::unordered_map<std::string, TOFUEntry> m_tofu_trust;
+    mutable std::mutex m_tofu_mtx;
+
+    // Verify peer TLS cert matches pinned fingerprint
+    bool verify_peer_tls_cert(const std::string& peer_id, const std::string& cert_fingerprint) const;
+
+    // === Seed peers for cross-subnet unicast discovery ===
+    std::vector<std::pair<std::string, int>> m_seed_peers;
 
     // === Legacy peer tracking (for ANNOUNCE protocol compatibility) ===
     std::mutex m_peer_mtx;

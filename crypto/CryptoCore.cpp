@@ -117,4 +117,8 @@ std::string IdentityCore::sha256_hex(const std::string& data) {
     return oss.str();
 }
 
+std::string IdentityCore::cert_fingerprint(const std::string& der_cert) {
+    return sha256_hex(der_cert);
+}
+
 } // namespace neuro_mesh::crypto

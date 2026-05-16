@@ -87,6 +87,19 @@ bool PolicyEnforcer::is_loopback(const std::string& ip) {
     return (ntohl(addr.s_addr) & 0xFF000000) == 0x7F000000;
 }
 
+bool PolicyEnforcer::is_loopback_ipv6(const std::string& ip) {
+    struct in6_addr addr;
+    if (inet_pton(AF_INET6, ip.c_str(), &addr) != 1) return false;
+    // Check ::1 (loopback) or ::ffff:127.x.x.x (IPv4-mapped loopback)
+    if (IN6_IS_ADDR_LOOPBACK(&addr)) return true;
+    if (IN6_IS_ADDR_V4MAPPED(&addr)) {
+        // Extract IPv4 from ::ffff:127.x.x.x
+        uint8_t* p = addr.s6_addr + 12;
+        return (p[0] == 127);
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Fork+exec helpers
 // ---------------------------------------------------------------------------
@@ -228,7 +241,7 @@ bool PolicyEnforcer::apply_ebpf_drop(const std::string& ip) {
     if (map_fd < 0) return false;
 
     struct in_addr addr;
-    inet_aton(ip.c_str(), &addr);
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) { close(map_fd); return false; }
     uint32_t key = addr.s_addr;
     uint8_t value = 1;
     int ret = bpf_map_update_elem(map_fd, &key, &value, BPF_ANY);
@@ -242,7 +255,7 @@ bool PolicyEnforcer::remove_ebpf_drop(const std::string& ip) {
     int map_fd = bpf_obj_get(map_path);
     if (map_fd < 0) return false;
     struct in_addr addr;
-    inet_aton(ip.c_str(), &addr);
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) { close(map_fd); return false; }
     uint32_t key = addr.s_addr;
     int ret = bpf_map_delete_elem(map_fd, &key);
     close(map_fd);
@@ -306,7 +319,7 @@ bool PolicyEnforcer::block_ip_address(const std::string& ip) {
         return false;
     }
 
-    if (is_loopback(ip)) {
+    if (is_loopback(ip) || is_loopback_ipv6(ip)) {
         std::cerr << "[ENFORCER] REFUSED: " << ip
                   << " is loopback — will not block localhost." << std::endl;
         return false;
@@ -343,63 +356,77 @@ bool PolicyEnforcer::block_ip_address(const std::string& ip) {
 // Core isolation pipeline
 // ---------------------------------------------------------------------------
 
-void PolicyEnforcer::isolate_target(const std::string& target) {
+bool PolicyEnforcer::isolate_target(const std::string& target) {
     std::lock_guard<std::mutex> lock(m_mtx);
 
-    if (m_isolated_nodes.find(target) != m_isolated_nodes.end()) return;
+    if (m_isolated_nodes.find(target) != m_isolated_nodes.end()) {
+        return true;  // Already isolated
+    }
 
     if (is_safe(target)) {
         std::cout << "[ENFORCER] REFUSED: " << target
                   << " is safe-listed. Isolation blocked." << std::endl;
-        return;
+        return false;
     }
 
     std::string resolved_ip = resolve_target(target);
     if (resolved_ip.empty()) {
         std::cerr << "[ENFORCER] Cannot resolve target '" << target
                   << "': not a valid IP and no peer mapping registered." << std::endl;
-        return;
+        return false;
     }
 
     if (is_loopback(resolved_ip)) {
         std::cerr << "[ENFORCER] REFUSED: " << resolved_ip
                   << " is a loopback address — will not isolate localhost." << std::endl;
-        return;
+        return false;
+    }
+
+    if (is_loopback_ipv6(resolved_ip)) {
+        std::cerr << "[ENFORCER] REFUSED: " << resolved_ip
+                  << " is an IPv6 loopback address — will not isolate localhost." << std::endl;
+        return false;
     }
 
     std::cout << "[ENFORCER] Consensus reached. Resolved " << target
               << " → " << resolved_ip << ". Executing isolation..." << std::endl;
 
     EnforcementBackend backends = available_backends();
+    bool any_success = false;
 
     if ((backends & EnforcementBackend::EBPF) && apply_ebpf_drop(resolved_ip)) {
         std::cout << "[ENFORCER] Zero-Trust Rule Applied: Dropping all traffic from "
                   << resolved_ip << " [eBPF]" << std::endl;
         m_isolated_nodes.insert(target);
-        return;
+        any_success = true;
     }
 
-    if ((backends & EnforcementBackend::NFTABLES) && apply_nftables_drop(resolved_ip)) {
+    if (!any_success && (backends & EnforcementBackend::NFTABLES) && apply_nftables_drop(resolved_ip)) {
         std::cout << "[ENFORCER] Zero-Trust Rule Applied: Dropping all traffic from "
                   << resolved_ip << " [nftables]" << std::endl;
         m_isolated_nodes.insert(target);
-        return;
+        any_success = true;
     }
 
-    if ((backends & EnforcementBackend::IPTABLES) && apply_iptables_drop(resolved_ip)) {
+    if (!any_success && (backends & EnforcementBackend::IPTABLES) && apply_iptables_drop(resolved_ip)) {
         std::cout << "[ENFORCER] Zero-Trust Rule Applied: Dropping all traffic from "
                   << resolved_ip << " [iptables]" << std::endl;
         m_isolated_nodes.insert(target);
-        return;
+        any_success = true;
     }
 
-    std::string diag;
-    diag += (backends & EnforcementBackend::EBPF)     ? "eBPF: attempted,failed" : "eBPF: unavailable";
-    diag += (backends & EnforcementBackend::NFTABLES) ? " | nftables: attempted,failed" : " | nftables: unavailable";
-    diag += (backends & EnforcementBackend::IPTABLES) ? " | iptables: attempted,failed" : " | iptables: unavailable";
+    if (!any_success) {
+        std::string diag;
+        diag += (backends & EnforcementBackend::EBPF)     ? "eBPF: attempted,failed" : "eBPF: unavailable";
+        diag += (backends & EnforcementBackend::NFTABLES) ? " | nftables: attempted,failed" : " | nftables: unavailable";
+        diag += (backends & EnforcementBackend::IPTABLES) ? " | iptables: attempted,failed" : " | iptables: unavailable";
 
-    std::cerr << "[ENFORCER] CRITICAL: All enforcement methods failed for "
-              << resolved_ip << ". Target NOT isolated. (" << diag << ")" << std::endl;
+        std::cerr << "[ENFORCER] CRITICAL: All enforcement methods failed for "
+                  << resolved_ip << ". Target NOT isolated. (" << diag << ")" << std::endl;
+        return false;
+    }
+
+    return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,13 @@ listener
 obj/
 *.o
 *.skel.h
+neuro_agent
+inject_event
+
+# Generated
+isolation_forest.onnx
+keystore_*/
+launch_attack
 
 # Secrets & State
 api.json
@@ -15,6 +22,15 @@ trained_models/
 venv/
 node_modules/
 
+# Python
+__pycache__/
+*.pyc
+orchestration/__pycache__/
+tools/__pycache__/
+
+# Archive (old experiments, never committed)
+_archive_old/
+
 # OS/IDEs
 .DS_Store
 .vscode/
@@ -22,5 +38,12 @@ neuro_mesh_full_*.txt
 neuro_mesh_pure_code*
 *.log
 ia_commands.txt
+
+# Third-party (vendored, not tracked)
 third_party/
-third_party/
+
+# Agent tooling (local config)
+.claude/
+.nemp/
+.repowise/
+.mcp.json

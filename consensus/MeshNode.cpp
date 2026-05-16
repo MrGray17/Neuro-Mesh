@@ -46,7 +46,14 @@ MeshNode::MeshNode(const std::string& node_id,
 
     // Enable enhanced PBFT features: identity, private key for signing, message chaining
     m_pbft.set_my_identity(m_node_id);
-    m_pbft.set_private_key(std::move(m_private_key));
+    // Duplicate the key before moving into PBFT — MeshNode still needs it
+    // for signing discovery beacons and ANNOUNCE messages.
+    crypto::UniquePKEY pbft_key(EVP_PKEY_dup(m_private_key.get()));
+    if (pbft_key) {
+        m_pbft.set_private_key(std::move(pbft_key));
+    } else {
+        m_pbft.set_private_key(std::move(m_private_key));
+    }
 
     // Initialize TLS infrastructure
     auto tls_key = m_key_manager.generate_key(crypto::KeyType::Ed25519, m_node_id + "_tls");
@@ -71,6 +78,17 @@ MeshNode::MeshNode(const std::string& node_id,
     m_tls_config.verify_client = false;
     m_tls_config.enable_tls13 = true;
     m_tls_config.enable_mtls = false;
+
+    // Compute TLS cert fingerprint for TOFU verification
+    if (!m_tls_cert_path.empty()) {
+        std::ifstream cert_file(m_tls_cert_path);
+        if (cert_file.is_open()) {
+            std::string cert_pem((std::istreambuf_iterator<char>(cert_file)),
+                                 std::istreambuf_iterator<char>());
+            m_tls_cert_fingerprint = crypto::IdentityCore::sha256_hex(cert_pem);
+            std::cout << "[TLS] Cert fingerprint: " << m_tls_cert_fingerprint.substr(0, 16) << "..." << std::endl;
+        }
+    }
 
     net::DiscoveryConfig disc_cfg;
     disc_cfg.beacon_port = DISCOVERY_UDP_PORT;
@@ -143,9 +161,15 @@ std::vector<std::string> MeshNode::get_active_peer_ids() const {
 // =============================================================================
 
 void MeshNode::announce_identity() {
-    std::string payload = "ANNOUNCE|" + m_node_id + "|" + m_public_key_pem;
+    // Sign the ANNOUNCE blob for TOFU verification
+    std::string signed_blob = m_node_id + "|" + m_public_key_pem;
+    std::string raw_sig = crypto::IdentityCore::sign_payload(m_private_key.get(), signed_blob);
+    std::string b64_sig = base64_encode(raw_sig);
+
+    // ANNOUNCE|node_id|pem|b64_signature
+    std::string payload = "ANNOUNCE|" + m_node_id + "|" + m_public_key_pem + "|" + b64_sig;
     send_udp_broadcast(payload);
-    std::cout << "[NETWORK] Broadcasted identity to local subnet." << std::endl;
+    std::cout << "[NETWORK] Broadcasted signed identity to local subnet." << std::endl;
 }
 
 // =============================================================================
@@ -157,21 +181,30 @@ void MeshNode::send_discovery_beacon() {
     auto now = steady_clock::now();
     auto us = duration_cast<microseconds>(now.time_since_epoch()).count();
 
-    // Signed blob binds node_id + tcp_port + tls_port + timestamp
+    // Signed blob binds node_id + tcp_port + tls_port + timestamp + tls_fingerprint
     std::string signed_blob = m_node_id + "|" + std::to_string(m_tcp_port) + "|"
-                            + std::to_string(m_tls_port) + "|" + std::to_string(us);
+                            + std::to_string(m_tls_port) + "|" + std::to_string(us) + "|"
+                            + m_tls_cert_fingerprint;
     std::string raw_sig = crypto::IdentityCore::sign_payload(m_private_key.get(), signed_blob);
     std::string b64_sig = base64_encode(raw_sig);
 
-    // Packet: DISCOVERY|<node_id>|<tcp_port>|<tls_port>|<timestamp_us>|<b64_pubkey>|<b64_sig>
+    // Packet: DISCOVERY|<node_id>|<tcp_port>|<tls_port>|<timestamp_us>|<b64_pubkey>|<tls_fingerprint>|<b64_sig>
     std::string payload = "DISCOVERY|" + m_node_id + "|"
                         + std::to_string(m_tcp_port) + "|"
                         + std::to_string(m_tls_port) + "|"
                         + std::to_string(us) + "|"
                         + m_public_key_b64 + "|"
+                        + m_tls_cert_fingerprint + "|"
                         + b64_sig;
 
     send_udp_discovery(payload);
+
+    // Unicast to seed peers for cross-subnet / cloud-VPC environments
+    if (!m_seed_peers.empty()) {
+        for (const auto& [ip, port] : m_seed_peers) {
+            send_udp_unicast(ip, port, payload);
+        }
+    }
 }
 
 void MeshNode::discovery_beacon_loop() {
@@ -462,7 +495,8 @@ void MeshNode::tcp_listener_loop() {
                         if (parts.size() >= 3) {
                             const std::string& pid = parts[0];
                             const std::string& pip = parts[1];
-                            int pport = std::stoi(parts[2]);
+                            int pport = 0;
+                            if (!try_parse_int(parts[2], pport)) continue;
                             if (pid != m_node_id) {
                                 // Add as unverified — will be verified on next beacon
                                 bool is_new = false;
@@ -576,7 +610,8 @@ bool MeshNode::perform_pex_handshake(const std::string& ip, int port,
         if (parts.size() >= 3) {
             const std::string& pid = parts[0];
             const std::string& pip = parts[1];
-            int pport = std::stoi(parts[2]);
+            int pport = 0;
+            if (!try_parse_int(parts[2], pport)) continue;
             if (pid != m_node_id) {
                 std::unique_lock<std::shared_mutex> lock(m_peers_mtx);
                 if (m_peers.find(pid) == m_peers.end()) {
@@ -600,18 +635,25 @@ bool MeshNode::perform_pex_handshake(const std::string& ip, int port,
 
 void MeshNode::process_discovery_beacon(const std::string& msg, const std::string& sender_ip) {
     auto tokens = split_string(msg, '|');
-    // Accept both old format (6 tokens, no TLS) and new format (7 tokens, with TLS)
+    // Accept formats:
+    // - Old: 6 tokens (no TLS fingerprint)
+    // - V1: 7 tokens (with TLS fingerprint, no signature bind)
+    // - V2: 8 tokens (with TLS fingerprint, signature includes fingerprint)
     if (tokens[0] != "DISCOVERY") return;
 
-    bool has_tls = tokens.size() >= 7;
+    bool has_tls_fingerprint = tokens.size() >= 7;
     if (tokens.size() < 6) return;
 
     const std::string& peer_id   = tokens[1];
-    int peer_tcp_port            = std::stoi(tokens[2]);
-    int peer_tls_port            = has_tls ? std::stoi(tokens[3]) : 0;
-    int64_t timestamp            = std::stoll(tokens[has_tls ? 4 : 3]);
-    const std::string& b64_pubkey = tokens[has_tls ? 5 : 4];
-    const std::string& b64_sig    = tokens[has_tls ? 6 : 5];
+    int peer_tcp_port            = 0;
+    int peer_tls_port            = 0;
+    int64_t timestamp            = 0;
+    if (!try_parse_int(tokens[2], peer_tcp_port)) return;
+    if (has_tls_fingerprint && !try_parse_int(tokens[3], peer_tls_port)) return;
+    if (!try_parse_long(tokens[has_tls_fingerprint ? 4 : 3], timestamp)) return;
+    const std::string& b64_pubkey = tokens[has_tls_fingerprint ? 5 : 4];
+    const std::string& tls_fingerprint = has_tls_fingerprint ? tokens[6] : "";
+    const std::string& b64_sig    = tokens[has_tls_fingerprint ? 7 : 5];
 
     if (peer_id == m_node_id) return;
 
@@ -619,12 +661,19 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     std::string peer_pem = base64_decode(b64_pubkey);
     if (peer_pem.empty()) return;
 
-    // Verify signature: bind(node_id | tcp_port | [tls_port |] timestamp)
+    // Verify signature: bind(node_id | tcp_port | tls_port | timestamp | [tls_fingerprint])
     std::string signed_blob;
-    if (has_tls) {
+    if (has_tls_fingerprint && tokens.size() >= 8) {
+        // V2 format: signature includes TLS fingerprint
+        signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|"
+                    + std::to_string(peer_tls_port) + "|" + std::to_string(timestamp) + "|"
+                    + tls_fingerprint;
+    } else if (has_tls_fingerprint) {
+        // V1 format: no signature binding for TLS fingerprint
         signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|"
                     + std::to_string(peer_tls_port) + "|" + std::to_string(timestamp);
     } else {
+        // Old format
         signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|" + std::to_string(timestamp);
     }
     std::string raw_sig = base64_decode(b64_sig);
@@ -646,6 +695,23 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
         std::cerr << "[DISCOVERY] Stale beacon from " << peer_id
                   << " (drift=" << drift << "s). Ignored." << std::endl;
         return;
+    }
+
+    // TOFU: Store/update TLS cert fingerprint
+    if (has_tls_fingerprint && !tls_fingerprint.empty()) {
+        std::lock_guard<std::mutex> lock(m_tofu_mtx);
+        auto it = m_tofu_trust.find(peer_id);
+        if (it == m_tofu_trust.end()) {
+            m_tofu_trust[peer_id] = {peer_pem, tls_fingerprint, std::chrono::steady_clock::now(), true};
+            std::cout << "[TOFU] Pinned TLS cert for " << peer_id << ": " << tls_fingerprint.substr(0, 16) << "..." << std::endl;
+        } else if (it->second.pinned_tls_fingerprint.empty()) {
+            it->second.pinned_tls_fingerprint = tls_fingerprint;
+            std::cout << "[TOFU] Updated TLS cert fingerprint for " << peer_id << std::endl;
+        } else if (it->second.pinned_tls_fingerprint != tls_fingerprint) {
+            std::cerr << "[DEFENSE] TLS cert MISMATCH for " << peer_id
+                      << " — possible MITM. Use unpin_peer_key() to reset." << std::endl;
+            return;
+        }
     }
 
     // Capture copies before entering the lock — perform_pex_handshake
@@ -853,13 +919,65 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
     const std::string& cmd = tokens[0];
 
     if (cmd == "ANNOUNCE") {
+        // ANNOUNCE|node_id|pem|b64_signature
+        if (tokens.size() < 4) {
+            std::cerr << "[DEFENSE] ANNOUNCE: malformed (too few tokens) from " << sender_ip << std::endl;
+            return;
+        }
         const std::string& peer_id = tokens[1];
         const std::string& peer_pem = tokens[2];
+        const std::string& sig_b64 = tokens[3];
 
         // Input validation: reject malformed announcements
         if (peer_id.empty() || peer_id.size() > 64) return;
         if (peer_pem.empty() || peer_pem.find("-----BEGIN PUBLIC KEY-----") == std::string::npos) return;
         if (peer_id == m_node_id) return;
+
+        // === TOFU: Verify signature or accept first-time ===
+        std::string decoded_sig = base64_decode(sig_b64);
+        if (decoded_sig.empty()) {
+            std::cerr << "[DEFENSE] ANNOUNCE: invalid signature from " << peer_id << std::endl;
+            return;
+        }
+
+        // Verify the signature
+        auto pub_key = crypto::IdentityCore::get_pubkey_from_pem(peer_pem);
+        if (!pub_key) {
+            std::cerr << "[DEFENSE] ANNOUNCE: invalid public key from " << peer_id << std::endl;
+            return;
+        }
+
+        std::string signed_blob = peer_id + "|" + peer_pem;
+        if (!crypto::IdentityCore::verify_signature(pub_key.get(), signed_blob, decoded_sig)) {
+            // Check if this is first contact (TOFU accept)
+            bool is_first_contact = false;
+            {
+                std::lock_guard<std::mutex> lock(m_tofu_mtx);
+                is_first_contact = (m_tofu_trust.find(peer_id) == m_tofu_trust.end());
+            }
+            if (is_first_contact) {
+                std::cout << "[TOFU] First contact with " << peer_id << " — accepting key (unverified)" << std::endl;
+            } else {
+                std::cerr << "[DEFENSE] ANNOUNCE: signature verification FAILED from " << peer_id
+                          << " (possible MITM attack)" << std::endl;
+                return;
+            }
+        } else {
+            // Signature verified — check for TOFU key change
+            std::lock_guard<std::mutex> lock(m_tofu_mtx);
+            auto it = m_tofu_trust.find(peer_id);
+            if (it != m_tofu_trust.end() && !it->second.trust_frozen) {
+                if (it->second.pinned_pem != peer_pem) {
+                    std::cerr << "[DEFENSE] ANNOUNCE: KEY CHANGED for " << peer_id
+                              << " — rejecting (possible hijack). Use unpin_peer_key() to reset." << std::endl;
+                    return;
+                }
+            } else if (it == m_tofu_trust.end()) {
+                // First verified contact — pin the key
+                m_tofu_trust[peer_id] = {peer_pem, "", std::chrono::steady_clock::now(), true};
+                std::cout << "[TOFU] Pinned trusted key for " << peer_id << std::endl;
+            }
+        }
 
         bool is_new_peer = false;
         {
@@ -867,7 +985,7 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
             if (m_known_peer_ips.find(peer_id) == m_known_peer_ips.end()) {
                 m_known_peer_ips.insert(peer_id);
                 is_new_peer = true;
-                std::cout << "[NETWORK] Discovered peer: " << peer_id << " at " << sender_ip << std::endl;
+                std::cout << "[NETWORK] Discovered verified peer: " << peer_id << " at " << sender_ip << std::endl;
             }
             m_pbft.register_peer_key(peer_id, peer_pem);
         }
@@ -1269,6 +1387,40 @@ bool MeshNode::is_targeted_recently() const {
 }
 
 // =============================================================================
+// TOFU: TLS Certificate Verification
+// =============================================================================
+
+bool MeshNode::verify_peer_tls_cert(const std::string& peer_id, const std::string& cert_fingerprint) const {
+    std::lock_guard<std::mutex> lock(m_tofu_mtx);
+    auto it = m_tofu_trust.find(peer_id);
+    if (it == m_tofu_trust.end()) {
+        // First contact — accept and pin
+        return true;
+    }
+    // Verify fingerprint matches pinned value
+    if (it->second.pinned_tls_fingerprint.empty()) {
+        // First TLS connection, pin the fingerprint
+        return true;
+    }
+    return it->second.pinned_tls_fingerprint == cert_fingerprint;
+}
+
+// =============================================================================
+// Seed Peers — unicast discovery fallback for cross-subnet mesh
+// =============================================================================
+
+void MeshNode::set_seed_peers(const std::vector<std::pair<std::string, int>>& seeds) {
+    m_seed_peers = seeds;
+    if (!seeds.empty()) {
+        std::cout << "[DISCOVERY] Configured " << seeds.size()
+                  << " seed peer(s) for unicast discovery." << std::endl;
+        for (const auto& [ip, port] : seeds) {
+            std::cout << "[DISCOVERY]   Seed: " << ip << ":" << port << std::endl;
+        }
+    }
+}
+
+// =============================================================================
 // TOFU Key Management — unpin a peer's key for legitimate rotation
 // =============================================================================
 
@@ -1281,8 +1433,19 @@ void MeshNode::unpin_peer_key(const std::string& node_id) {
     }
     it->second.public_key_pem.clear();
     it->second.verified = false;
-    std::cout << "[SECURITY] Key unpinned for " << node_id
-              << " — next beacon will accept new key." << std::endl;
+
+    // Also unpin TLS certificate fingerprint
+    {
+        std::lock_guard<std::mutex> lock_tofu(m_tofu_mtx);
+        auto tofu_it = m_tofu_trust.find(node_id);
+        if (tofu_it != m_tofu_trust.end()) {
+            tofu_it->second.pinned_tls_fingerprint.clear();
+            tofu_it->second.trust_frozen = false;
+        }
+    }
+
+    std::cout << "[SECURITY] Key and TLS cert unpinned for " << node_id
+              << " — next beacon will accept new key and cert." << std::endl;
 }
 
 // =============================================================================
@@ -1295,6 +1458,30 @@ std::vector<std::string> MeshNode::split_string(const std::string& str, char del
     std::istringstream tokenStream(str);
     while (std::getline(tokenStream, token, delimiter)) tokens.push_back(token);
     return tokens;
+}
+
+bool MeshNode::try_parse_int(const std::string& s, int& out) noexcept {
+    try {
+        size_t pos = 0;
+        int val = std::stoi(s, &pos);
+        if (pos != s.size()) return false;
+        out = val;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool MeshNode::try_parse_long(const std::string& s, int64_t& out) noexcept {
+    try {
+        size_t pos = 0;
+        int64_t val = std::stoll(s, &pos);
+        if (pos != s.size()) return false;
+        out = val;
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 } // namespace neuro_mesh

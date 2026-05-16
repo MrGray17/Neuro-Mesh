@@ -32,7 +32,8 @@ public:
 
     // Execute network isolation against a target (called from PBFT consensus at EXECUTED stage).
     // Resolution flow: safe-list check → loopback check → IP resolution → backends in priority order.
-    void isolate_target(const std::string& target);
+    // Returns true ONLY if at least one backend successfully applies the rule.
+    bool isolate_target(const std::string& target);
 
     // Block a raw IP address through the enforcement cascade (no node-ID resolution).
     // Used by MitigationEngine when evidence_json carries a src_ip field.
@@ -46,6 +47,7 @@ public:
 
     // IP validation utilities (stateless, safe for external use)
     static bool is_loopback(const std::string& ip);
+    static bool is_loopback_ipv6(const std::string& ip);
     static bool is_valid_ipv4(const std::string& ip);
     static bool is_valid_ipv6(const std::string& ip);
     static bool is_valid_ip(const std::string& ip);

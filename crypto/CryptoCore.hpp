@@ -35,6 +35,9 @@ public:
 
     // SHA-256 hex digest — used for enforcement audit hashing
     static std::string sha256_hex(const std::string& data);
+
+    // Compute SHA-256 fingerprint of a DER-encoded certificate
+    static std::string cert_fingerprint(const std::string& der_cert);
 };
 
 } // namespace neuro_mesh::crypto

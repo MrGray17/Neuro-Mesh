@@ -6,10 +6,15 @@
   <img src="https://img.shields.io/badge/consensus-PBFT-%23934fff?logo=blockchaindotcom" alt="PBFT">
   <img src="https://img.shields.io/badge/crypto-Ed25519-%23000000?logo=letsencrypt" alt="Ed25519">
   <img src="https://img.shields.io/badge/docker-ready-%232496ED?logo=docker" alt="Docker">
+  <img src="https://github.com/MrGray17/Neuro-Mesh/actions/workflows/build.yml/badge.svg" alt="CI">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
 <p align="center"><b>No master. No control plane. No single point of failure.</b></p>
+
+<p align="center">
+  <img src="docs/architecture.svg" alt="Neuro-Mesh Architecture" width="90%">
+</p>
 
 **Neuro-Mesh** is a decentralized P2P security fabric. Every node runs eBPF kernel probes, detects anomalies with entropy-based inference, votes on threats via Ed25519-signed PBFT consensus over UDP, and enforces network isolation — all without a central coordinator. If one node falls, the mesh votes and moves on.
 
@@ -98,7 +103,49 @@ docker compose up -d                         # 5 nodes + dashboard
 docker compose ps                            # verify all 5 running
 open http://localhost:8080                   # dashboard
 docker compose down                          # tear down
+
+---
+
+## Testing
+
+### Unit Tests
+
+Five test binaries cover every subsystem:
+
+```bash
+./bin/test_crypto       # Ed25519 sign/verify
+./bin/test_pbft         # PBFT state machine (10 tests)
+./bin/test_enforcer     # PolicyEnforcer logic (9 tests)
+./bin/test_meshnode     # MeshNode discovery/PEX (9 tests)
+./bin/test_inference    # ONNX entropy scoring (5 tests)
 ```
+
+All 36 tests must pass before any merge.
+
+### Integration Test
+
+Full end-to-end pipeline: Docker Compose boot → event injection → PBFT consensus → network isolation verification:
+
+```bash
+sudo ./tests/integration_test.sh
+```
+
+What it asserts:
+1. All 5 nodes + dashboard container start successfully
+2. Cross-node network reachability
+3. `inject_event` delivers a CRITICAL threat into the mesh
+4. PBFT consensus reaches COMMIT and triggers PolicyEnforcer
+5. `iptables -S` shows the target peer isolated
+6. Safe list prevents self-isolation (loopback still works)
+
+### CI Pipeline
+
+Every push to `main` triggers [GitHub Actions](.github/workflows/build.yml):
+- **Build**: Full `make clean && make` compilation
+- **Unit tests**: All 5 test binaries executed
+- **Lint**: `clang-tidy` on key source files
+- **Security audit**: grep for banned functions (`system()`, `gets()`, `strcpy`)
+- **Docker integration**: `docker compose up` → inject → verify isolation
 
 ---
 

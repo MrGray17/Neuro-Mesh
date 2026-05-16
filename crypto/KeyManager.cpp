@@ -7,7 +7,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstdio>
-#include <dlfcn.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <openssl/x509.h>
@@ -16,7 +15,6 @@
 #include <openssl/hmac.h>
 #include <pthread.h>
 #include <mutex>
-#include <endian.h>
 
 namespace neuro_mesh::crypto {
 
@@ -99,12 +97,43 @@ X509* create_x509_cert(const CertificateConfig& config, EVP_PKEY* pub_key, EVP_P
     }
 
     if (is_ca) {
-        X509_add1_ext_i2d(cert, NID_basic_constraints, (char*)"CA:TRUE", 0, 0);
-        X509_add1_ext_i2d(cert, NID_key_usage, (char*)"keyCertSign,cRLSign", 0, 0);
+        BASIC_CONSTRAINTS* bcons = BASIC_CONSTRAINTS_new();
+        if (bcons) {
+            bcons->ca = 1;
+            bcons->pathlen = nullptr;
+            X509_add1_ext_i2d(cert, NID_basic_constraints, bcons, 0, 0);
+            BASIC_CONSTRAINTS_free(bcons);
+        }
+        ASN1_BIT_STRING* key_usage = ASN1_BIT_STRING_new();
+        if (key_usage) {
+            ASN1_BIT_STRING_set_bit(key_usage, KU_KEY_CERT_SIGN, 1);
+            ASN1_BIT_STRING_set_bit(key_usage, KU_CRL_SIGN, 1);
+            X509_add1_ext_i2d(cert, NID_key_usage, key_usage, 0, 0);
+            ASN1_BIT_STRING_free(key_usage);
+        }
     } else {
-        X509_add1_ext_i2d(cert, NID_basic_constraints, (char*)"CA:FALSE", 0, 0);
-        if (config.is_server_auth) X509_add1_ext_i2d(cert, NID_ext_key_usage, (char*)"serverAuth", 0, 0);
-        if (config.is_client_auth) X509_add1_ext_i2d(cert, NID_ext_key_usage, (char*)"clientAuth", 0, 0);
+        BASIC_CONSTRAINTS* bcons = BASIC_CONSTRAINTS_new();
+        if (bcons) {
+            bcons->ca = 0;
+            bcons->pathlen = nullptr;
+            X509_add1_ext_i2d(cert, NID_basic_constraints, bcons, 0, 0);
+            BASIC_CONSTRAINTS_free(bcons);
+        }
+        if (config.is_server_auth || config.is_client_auth) {
+            EXTENDED_KEY_USAGE* eku = EXTENDED_KEY_USAGE_new();
+            if (eku) {
+                if (config.is_server_auth) {
+                    ASN1_OBJECT* obj = OBJ_nid2obj(NID_server_auth);
+                    if (obj) sk_ASN1_OBJECT_push(eku, obj);
+                }
+                if (config.is_client_auth) {
+                    ASN1_OBJECT* obj = OBJ_nid2obj(NID_client_auth);
+                    if (obj) sk_ASN1_OBJECT_push(eku, obj);
+                }
+                X509_add1_ext_i2d(cert, NID_ext_key_usage, eku, 0, 0);
+                EXTENDED_KEY_USAGE_free(eku);
+            }
+        }
     }
 
     if (ca_key) {
@@ -135,12 +164,6 @@ void KeyManager::set_hsm_backend(HSMBackend backend) {
     switch (backend) {
         case HSMBackend::SoftHSM:
             m_hsm = std::make_unique<SoftHSMBackend>();
-            break;
-        case HSMBackend::TPM2:
-            m_hsm = std::make_unique<TPM2Backend>();
-            break;
-        case HSMBackend::PKCS11:
-            m_hsm = std::make_unique<PKCS11Backend>("libpkcs11.so", "");
             break;
         default:
             break;
@@ -547,173 +570,6 @@ bool SoftHSMBackend::verify_signature(const std::string& key_id, const std::stri
     EVP_MD_CTX_free(ctx);
     EVP_PKEY_free(key);
     return ok;
-}
-
-namespace {
-
-struct TPM2Header {
-    uint16_t tag;
-    uint32_t size;
-    uint32_t code;
-} __attribute__((packed));
-
-int tpm2_send_command(int fd, const std::vector<uint8_t>& cmd, std::vector<uint8_t>& resp) {
-    if (write(fd, cmd.data(), cmd.size()) != static_cast<ssize_t>(cmd.size())) return -1;
-    resp.resize(4096);
-    ssize_t n = read(fd, resp.data(), resp.size());
-    if (n < static_cast<ssize_t>(sizeof(TPM2Header))) return -1;
-    resp.resize(n);
-    return 0;
-}
-
-bool tpm2_get_capability(int fd) {
-    std::vector<uint8_t> cmd = {
-        0x80, 0x01,             // TPM_ST_NO_SESSIONS
-        0x00, 0x00, 0x00, 0x16, // command size = 22
-        0x00, 0x00, 0x01, 0x7A, // TPM2_CC_GetCapability
-        0x00, 0x00, 0x00, 0x06, // TPM_CAP_TPM_PROPERTIES
-        0x00, 0x00, 0x01, 0x00, // TPM_PT_MANUFACTURER
-        0x00, 0x00, 0x00, 0x01  // property count = 1
-    };
-    std::vector<uint8_t> resp;
-    return tpm2_send_command(fd, cmd, resp) == 0 &&
-           be32toh(reinterpret_cast<TPM2Header*>(resp.data())->code) == 0;
-}
-
-} // namespace
-
-TPM2Backend::TPM2Backend(const std::string& device) : m_device(device), m_tpm_fd(-1) {}
-
-bool TPM2Backend::is_available() const {
-    if (m_device.empty()) return false;
-    int fd = open(m_device.c_str(), O_RDWR);
-    if (fd < 0) return false;
-    bool ok = tpm2_get_capability(fd);
-    close(fd);
-    return ok;
-}
-
-TPM2Backend::~TPM2Backend() {
-    if (m_tpm_fd >= 0) close(m_tpm_fd);
-}
-
-bool TPM2Backend::generate_key(KeyType, const std::string&, UniquePKEY&, UniquePKEY&) {
-    if (!is_available()) return false;
-    return false;
-}
-
-bool TPM2Backend::sign_data(const std::string&, const std::string&, std::string&) {
-    if (!is_available()) return false;
-    return false;
-}
-
-bool TPM2Backend::verify_signature(const std::string&, const std::string&, const std::string&) {
-    if (!is_available()) return false;
-    return false;
-}
-
-namespace {
-
-// PKCS#11 v2.40 minimal types for dlopen-based HSM access
-using CK_BYTE = unsigned char;
-using CK_ULONG = unsigned long;
-using CK_BBOOL = CK_BYTE;
-using CK_SLOT_ID = CK_ULONG;
-using CK_SESSION_HANDLE = CK_ULONG;
-using CK_OBJECT_HANDLE = CK_ULONG;
-using CK_MECHANISM_TYPE = CK_ULONG;
-using CK_ATTRIBUTE_TYPE = CK_ULONG;
-using CK_RV = CK_ULONG;
-using CK_FLAGS = CK_ULONG;
-using CK_USER_TYPE = CK_ULONG;
-
-constexpr CK_RV CKR_OK = 0x00000000;
-constexpr CK_BBOOL CK_FALSE = 0;
-constexpr CK_FLAGS CKF_SERIAL_SESSION = 0x00000004;
-constexpr CK_FLAGS CKF_RW_SESSION = 0x00000002;
-constexpr CK_USER_TYPE CKU_USER = 1;
-constexpr CK_MECHANISM_TYPE CKM_ECDSA = 0x00001041;
-constexpr CK_MECHANISM_TYPE CKM_EDDSA = 0x00001057;
-constexpr CK_MECHANISM_TYPE CKM_RSA_PKCS = 0x00000001;
-constexpr CK_MECHANISM_TYPE CKM_SHA256_RSA_PKCS = 0x00000040;
-
-struct CK_MECHANISM {
-    CK_MECHANISM_TYPE mechanism;
-    void* pParameter;
-    CK_ULONG ulParameterLen;
-};
-
-struct CK_ATTRIBUTE {
-    CK_ATTRIBUTE_TYPE type;
-    void* pValue;
-    CK_ULONG ulValueLen;
-};
-
-struct CK_FUNCTION_LIST {
-    CK_RV (*C_Initialize)(void*);
-    CK_RV (*C_Finalize)(void*);
-    CK_RV (*C_GetInfo)(void*);
-    CK_RV (*C_GetSlotList)(CK_BBOOL, CK_SLOT_ID*, CK_ULONG*);
-    CK_RV (*C_GetSlotInfo)(CK_SLOT_ID, void*);
-    CK_RV (*C_OpenSession)(CK_SLOT_ID, CK_FLAGS, void*, void*, CK_SESSION_HANDLE*);
-    CK_RV (*C_CloseSession)(CK_SESSION_HANDLE);
-    CK_RV (*C_Login)(CK_SESSION_HANDLE, CK_USER_TYPE, CK_BYTE*, CK_ULONG);
-    CK_RV (*C_Logout)(CK_SESSION_HANDLE);
-    CK_RV (*C_GenerateKeyPair)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_ATTRIBUTE*, CK_ULONG,
-                                CK_ATTRIBUTE*, CK_ULONG, CK_OBJECT_HANDLE*, CK_OBJECT_HANDLE*);
-    CK_RV (*C_SignInit)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
-    CK_RV (*C_Sign)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG, CK_BYTE*, CK_ULONG*);
-    CK_RV (*C_VerifyInit)(CK_SESSION_HANDLE, CK_MECHANISM*, CK_OBJECT_HANDLE);
-    CK_RV (*C_Verify)(CK_SESSION_HANDLE, CK_BYTE*, CK_ULONG, CK_BYTE*, CK_ULONG);
-    CK_RV (*C_DestroyObject)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
-    CK_RV (*C_FindObjects)(CK_SESSION_HANDLE, CK_OBJECT_HANDLE*, CK_ULONG, CK_ULONG*);
-};
-
-} // namespace
-
-PKCS11Backend::PKCS11Backend(const std::string& module, const std::string& pin)
-    : m_module(module), m_pin(pin), m_lib(nullptr), m_ctx(nullptr) {}
-
-PKCS11Backend::~PKCS11Backend() {
-    if (m_ctx && m_lib) {
-        auto* fns = static_cast<CK_FUNCTION_LIST*>(m_ctx);
-        fns->C_Finalize(nullptr);
-    }
-    if (m_lib) dlclose(m_lib);
-}
-
-bool PKCS11Backend::is_available() const {
-    if (m_module.empty()) return false;
-    if (access(m_module.c_str(), R_OK) != 0) return false;
-    void* lib = dlopen(m_module.c_str(), RTLD_NOW);
-    if (!lib) return false;
-    using GetFnList = CK_RV (*)(CK_FUNCTION_LIST**);
-    auto get_fn_list = reinterpret_cast<GetFnList>(dlsym(lib, "C_GetFunctionList"));
-    if (!get_fn_list) { dlclose(lib); return false; }
-    CK_FUNCTION_LIST* fns = nullptr;
-    if (get_fn_list(&fns) != CKR_OK || !fns) { dlclose(lib); return false; }
-    if (fns->C_Initialize(nullptr) != CKR_OK) { dlclose(lib); return false; }
-    CK_ULONG slot_count = 0;
-    if (fns->C_GetSlotList(CK_FALSE, nullptr, &slot_count) != CKR_OK || slot_count == 0) {
-        fns->C_Finalize(nullptr);
-        dlclose(lib);
-        return false;
-    }
-    fns->C_Finalize(nullptr);
-    dlclose(lib);
-    return true;
-}
-
-bool PKCS11Backend::generate_key(KeyType, const std::string&, UniquePKEY&, UniquePKEY&) {
-    return false;
-}
-
-bool PKCS11Backend::sign_data(const std::string&, const std::string&, std::string&) {
-    return false;
-}
-
-bool PKCS11Backend::verify_signature(const std::string&, const std::string&, const std::string&) {
-    return false;
 }
 
 } // namespace neuro_mesh::crypto

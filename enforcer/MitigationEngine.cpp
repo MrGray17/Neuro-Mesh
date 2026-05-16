@@ -88,6 +88,66 @@ int64_t MitigationEngine::extract_int(std::string_view json, std::string_view ke
 }
 
 // =============================================================================
+// Evidence JSON Schema Validation
+// =============================================================================
+
+bool MitigationEngine::validate_evidence_schema(std::string_view json) {
+    // Reject empty or oversized evidence
+    if (json.empty() || json.size() > 8192) {
+        std::cerr << "[VALIDATION] Evidence rejected: empty or oversized (" << json.size() << " bytes)" << std::endl;
+        return false;
+    }
+
+    // Must start with { for valid JSON object
+    size_t start = 0;
+    while (start < json.size() && (json[start] == ' ' || json[start] == '\t' || json[start] == '\n')) ++start;
+    if (start >= json.size() || json[start] != '{') {
+        std::cerr << "[VALIDATION] Evidence rejected: not a JSON object" << std::endl;
+        return false;
+    }
+
+    // Check for at least one known field: event, verdict, src_ip, pid, node, entropy
+    static const char* valid_fields[] = {"event", "verdict", "src_ip", "pid", "node", "entropy", "source"};
+    bool has_valid_field = false;
+    for (const char* field : valid_fields) {
+        std::string needle = std::string("\"") + field + "\":";
+        if (json.find(needle) != std::string_view::npos) {
+            has_valid_field = true;
+            break;
+        }
+    }
+
+    if (!has_valid_field) {
+        std::cerr << "[VALIDATION] Evidence rejected: no recognized fields" << std::endl;
+        return false;
+    }
+
+    // Check for basic structure balance (matching braces)
+    int brace_depth = 0;
+    bool in_string = false;
+    for (size_t i = start; i < json.size(); ++i) {
+        char c = json[i];
+        if (c == '"' && (i == 0 || json[i-1] != '\\')) {
+            in_string = !in_string;
+        } else if (!in_string) {
+            if (c == '{') ++brace_depth;
+            else if (c == '}') --brace_depth;
+            if (brace_depth < 0) {
+                std::cerr << "[VALIDATION] Evidence rejected: unbalanced braces" << std::endl;
+                return false;
+            }
+        }
+    }
+
+    if (brace_depth != 0) {
+        std::cerr << "[VALIDATION] Evidence rejected: unclosed braces" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+// =============================================================================
 // PID validation
 // =============================================================================
 
@@ -193,6 +253,11 @@ void MitigationEngine::log_enforcement(const std::string& action,
 // based on PBFT consensus verdict. Parses evidence_json for pid/src_ip to dispatch.
 bool MitigationEngine::execute_response(const std::string& evidence_json,
                                          const std::string& target_id) {
+    // Validate evidence JSON schema before processing
+    if (!validate_evidence_schema(evidence_json)) {
+        return false;
+    }
+
     // Compute cryptographic hash of the consensus evidence for audit trail
     std::string consensus_hash = crypto::IdentityCore::sha256_hex(evidence_json);
     if (consensus_hash.empty()) {
@@ -252,10 +317,15 @@ bool MitigationEngine::execute_response(const std::string& evidence_json,
     }
 
     // ---- Node-level isolation (existing PolicyEnforcer path) ----
-    // Always isolate the target node at EXECUTED stage
+    // Only mark as success if isolation actually succeeded
     if (m_enforcer && !target_id.empty()) {
-        m_enforcer->isolate_target(target_id);
-        any_action = true;
+        bool isolated = m_enforcer->isolate_target(target_id);
+        if (isolated) {
+            any_action = true;
+        } else {
+            std::cerr << "[MITIGATION] FAILED: Could not isolate " << target_id
+                      << " — enforcement backends unavailable. Consensus reached but isolation incomplete." << std::endl;
+        }
     }
 
     return any_action;

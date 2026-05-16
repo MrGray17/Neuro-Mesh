@@ -20,9 +20,7 @@ enum class KeyType {
 
 enum class HSMBackend {
     None,
-    SoftHSM,
-    TPM2,
-    PKCS11
+    SoftHSM
 };
 
 struct CertificateConfig {
@@ -78,36 +76,6 @@ public:
 
 private:
     std::string m_slot;
-};
-
-class TPM2Backend : public HSMAccess {
-public:
-    explicit TPM2Backend(const std::string& device = "/dev/tpm0");
-    ~TPM2Backend() override;
-    bool is_available() const override;
-    bool generate_key(KeyType type, const std::string& key_id, UniquePKEY& pub_key, UniquePKEY& priv_key) override;
-    bool sign_data(const std::string& key_id, const std::string& data, std::string& signature) override;
-    bool verify_signature(const std::string& key_id, const std::string& data, const std::string& signature) override;
-
-private:
-    std::string m_device;
-    int m_tpm_fd;
-};
-
-class PKCS11Backend : public HSMAccess {
-public:
-    PKCS11Backend(const std::string& module, const std::string& pin);
-    ~PKCS11Backend() override;
-    bool is_available() const override;
-    bool generate_key(KeyType type, const std::string& key_id, UniquePKEY& pub_key, UniquePKEY& priv_key) override;
-    bool sign_data(const std::string& key_id, const std::string& data, std::string& signature) override;
-    bool verify_signature(const std::string& key_id, const std::string& data, const std::string& signature) override;
-
-private:
-    std::string m_module;
-    std::string m_pin;
-    void* m_lib;
-    void* m_ctx;
 };
 
 struct KeyPair {

@@ -4,8 +4,11 @@
 #include <chrono>
 #include <atomic>
 #include <memory>
+#include <sstream>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
+#include <deque>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/sysinfo.h>
@@ -241,6 +244,13 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
 // IPC listener — accepts commands from Python C2 server over Unix domain socket
 // =============================================================================
 
+struct IPRateLimit {
+    std::deque<std::chrono::steady_clock::time_point> window;
+};
+static std::unordered_map<uid_t, IPRateLimit> s_ipc_rate_limits;
+static std::mutex s_ipc_rate_mtx;
+static constexpr int IPC_RATE_LIMIT_PER_SEC = 10;
+
 void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshNode& mesh, TelemetryBridge& bridge) {
     (void)bridge;
     std::string socket_path = "/tmp/neuro_mesh_" + node_id.substr(node_id.find('_') + 1) + ".sock";
@@ -296,6 +306,28 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                 write(client_fd, reject, strlen(reject));
                 close(client_fd);
                 continue;
+            }
+
+            // Per-UID rate limiting: max 10 commands per second
+            {
+                std::lock_guard<std::mutex> lock(s_ipc_rate_mtx);
+                auto now = std::chrono::steady_clock::now();
+                auto& rl = s_ipc_rate_limits[cred.uid];
+                // Remove old entries outside 1-second window
+                while (!rl.window.empty()) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - rl.window.front()).count();
+                    if (elapsed >= 1) rl.window.pop_front();
+                    else break;
+                }
+                if (rl.window.size() >= IPC_RATE_LIMIT_PER_SEC) {
+                    std::cerr << "[IPC] REJECTED: rate limit exceeded for uid=" << cred.uid
+                              << " (" << rl.window.size() << " req/sec)" << std::endl;
+                    const char* reject = "REJECT:RATE_LIMIT\n";
+                    write(client_fd, reject, strlen(reject));
+                    close(client_fd);
+                    continue;
+                }
+                rl.window.push_back(now);
             }
         } else {
             std::cerr << "[IPC] REJECTED: could not obtain peer credentials" << std::endl;
@@ -415,15 +447,47 @@ int main(int argc, char* argv[]) {
     // ---- Stage 3: Consensus engine (dynamic scaling, starts with n=1) ----
     MeshNode mesh(node_id, &jailer, &mitigation, &bridge);
 
+    {
+        const char* peers_env = std::getenv("NEURO_PEERS");
+        if (peers_env && peers_env[0] != '\0') {
+            std::vector<std::pair<std::string, int>> seeds;
+            std::istringstream stream(peers_env);
+            std::string entry;
+            while (std::getline(stream, entry, ',')) {
+                auto colon = entry.rfind(':');
+                if (colon == std::string::npos || colon == 0 ||
+                    colon == entry.size() - 1) {
+                    std::cerr << "[BOOT] Invalid NEURO_PEERS entry: " << entry << std::endl;
+                    continue;
+                }
+                std::string ip = entry.substr(0, colon);
+                int port = std::stoi(entry.substr(colon + 1));
+                seeds.emplace_back(ip, port);
+            }
+            if (!seeds.empty()) mesh.set_seed_peers(seeds);
+        }
+    }
+
     // ---- Stage 4: ML inference engine (ONNX Isolation Forest) ----
+    // Model search order: NEURO_MODEL_PATH env → ./isolation_forest.onnx → /app/isolation_forest.onnx
+    std::string model_path;
+    const char* env_model = std::getenv("NEURO_MODEL_PATH");
+    if (env_model) {
+        model_path = env_model;
+    } else if (access("isolation_forest.onnx", R_OK) == 0) {
+        model_path = "isolation_forest.onnx";
+    } else {
+        model_path = "/app/isolation_forest.onnx";
+    }
     std::unique_ptr<ai::InferenceEngine> inference;
     try {
-        inference = std::make_unique<ai::InferenceEngine>("/app/isolation_forest.onnx", -0.05f);
+        inference = std::make_unique<ai::InferenceEngine>(model_path, -0.05f);
         std::cout << "[BOOT] ONNX InferenceEngine: "
                   << (inference->is_operational() ? "OPERATIONAL" : "DEGRADED")
                   << std::endl;
     } catch (const std::exception& e) {
-        std::cerr << "[BOOT] InferenceEngine failed to load: " << e.what() << std::endl;
+        std::cerr << "[BOOT] InferenceEngine failed to load " << model_path
+                  << ": " << e.what() << std::endl;
         std::cerr << "[BOOT] Continuing without ML inference — using fallback." << std::endl;
     }
 

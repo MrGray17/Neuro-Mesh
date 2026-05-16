@@ -25,6 +25,9 @@ private:
     static std::string extract_str(std::string_view json, std::string_view key);
     static int64_t extract_int(std::string_view json, std::string_view key);
 
+    // Validate evidence JSON schema before processing
+    static bool validate_evidence_schema(std::string_view json);
+
     // Validate PID before sending signal
     bool validate_pid(uint32_t pid) const;
 

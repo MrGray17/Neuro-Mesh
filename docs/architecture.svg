@@ -1,0 +1,224 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 750" font-family="'JetBrains Mono','Fira Code','Menlo',monospace" font-size="12">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="box-kernel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a2332"/>
+      <stop offset="100%" stop-color="#0d1b2a"/>
+    </linearGradient>
+    <linearGradient id="box-cell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1b2a1a"/>
+      <stop offset="100%" stop-color="#0d1a0d"/>
+    </linearGradient>
+    <linearGradient id="box-consensus" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2a1a2a"/>
+      <stop offset="100%" stop-color="#1a0d1a"/>
+    </linearGradient>
+    <linearGradient id="box-enforcer" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2a1a1a"/>
+      <stop offset="100%" stop-color="#1a0d0d"/>
+    </linearGradient>
+    <linearGradient id="box-telemetry" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a1a2a"/>
+      <stop offset="100%" stop-color="#0d0d1a"/>
+    </linearGradient>
+    <linearGradient id="box-dashboard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a2a1a"/>
+      <stop offset="100%" stop-color="#0d1a0d"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#58a6ff"/>
+    </marker>
+    <marker id="arrow-threat" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#f85149"/>
+    </marker>
+    <marker id="arrow-consensus" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#d2a8ff"/>
+    </marker>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="750" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="600" y="36" text-anchor="middle" fill="#f0f6fc" font-size="20" font-weight="bold" filter="url(#glow)">Neuro-Mesh Architecture</text>
+  <text x="600" y="54" text-anchor="middle" fill="#8b949e" font-size="11">Decentralized P2P Security Fabric — eBPF → PBFT → Isolation</text>
+
+  <!-- ===== KERNEL LAYER ===== -->
+  <rect x="30" y="75" width="280" height="200" rx="6" fill="url(#box-kernel)" stroke="#30363d" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="170" y="97" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="bold">KERNEL SPACE</text>
+  <line x1="50" y1="106" x2="290" y2="106" stroke="#30363d" stroke-width="1"/>
+
+  <rect x="50" y="116" width="240" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="60" y="136" fill="#f0f6fc">execve(2) tracepoint</text>
+  <text x="260" y="136" fill="#8b949e" text-anchor="end">eBPF</text>
+
+  <rect x="50" y="152" width="240" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="60" y="172" fill="#f0f6fc">sendto(2) tracepoint</text>
+  <text x="260" y="172" fill="#8b949e" text-anchor="end">eBPF</text>
+
+  <rect x="50" y="188" width="240" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="60" y="208" fill="#f0f6fc">connect(2) tracepoint</text>
+  <text x="260" y="208" fill="#8b949e" text-anchor="end">eBPF</text>
+
+  <rect x="50" y="224" width="240" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="60" y="244" fill="#f0f6fc">XDP packet filter</text>
+  <text x="260" y="244" fill="#8b949e" text-anchor="end">eBPF</text>
+
+  <!-- Ring buffer arrow -->
+  <line x1="310" y1="175" x2="430" y2="175" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="370" y="167" text-anchor="middle" fill="#8b949e" font-size="10">ring buffer</text>
+  <text x="370" y="195" text-anchor="middle" fill="#8b949e" font-size="10">poll</text>
+
+  <!-- ===== CELL LAYER (NodeAgent + InferenceEngine) ===== -->
+  <rect x="440" y="75" width="280" height="200" rx="6" fill="url(#box-cell)" stroke="#30363d" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="580" y="97" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold">NODE INTELLIGENCE</text>
+  <line x1="460" y1="106" x2="700" y2="106" stroke="#30363d" stroke-width="1"/>
+
+  <rect x="460" y="116" width="240" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="470" y="136" fill="#f0f6fc">NodeAgent</text>
+  <text x="690" y="136" fill="#8b949e" text-anchor="end">telemetry_loop()</text>
+
+  <rect x="460" y="152" width="240" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="470" y="172" fill="#f0f6fc">InferenceEngine</text>
+  <text x="690" y="172" fill="#8b949e" text-anchor="end">ONNX entropy</text>
+
+  <rect x="460" y="188" width="240" height="50" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="470" y="208" fill="#8b949e">ONNX Isolation Forest</text>
+  <text x="470" y="226" fill="#8b949e">5-feature entropy model</text>
+
+  <!-- Threat alert arrow -->
+  <line x1="720" y1="175" x2="830" y2="175" stroke="#f85149" stroke-width="2.5" marker-end="url(#arrow-threat)" filter="url(#glow)"/>
+  <text x="775" y="167" text-anchor="middle" fill="#f85149" font-size="10">anomaly</text>
+  <text x="775" y="195" text-anchor="middle" fill="#f85149" font-size="10">!alert!</text>
+
+  <!-- ===== PBFT CONSENSUS LAYER ===== -->
+  <rect x="840" y="75" width="330" height="200" rx="6" fill="url(#box-consensus)" stroke="#30363d" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="1005" y="97" text-anchor="middle" fill="#d2a8ff" font-size="13" font-weight="bold">PBFT CONSENSUS</text>
+  <line x1="860" y1="106" x2="1150" y2="106" stroke="#30363d" stroke-width="1"/>
+
+  <rect x="860" y="116" width="290" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="870" y="136" fill="#f0f6fc">MeshNode</text>
+  <text x="1140" y="136" fill="#8b949e" text-anchor="end">UDP 9999/9998</text>
+
+  <rect x="860" y="152" width="290" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="870" y="172" fill="#f0f6fc">PBFT Stages</text>
+  <text x="1140" y="172" fill="#8b949e" text-anchor="end">PRE_PREPARE → COMMIT</text>
+
+  <rect x="860" y="188" width="290" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="870" y="208" fill="#f0f6fc">Ed25519 Signatures</text>
+  <text x="1140" y="208" fill="#8b949e" text-anchor="end">OpenSSL EVP</text>
+
+  <rect x="860" y="224" width="290" height="30" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="870" y="244" fill="#f0f6fc">PEX Peer Exchange</text>
+  <text x="1140" y="244" fill="#8b949e" text-anchor="end">TCP unicast</text>
+
+  <!-- UDP broadcast peers (dashed lines) -->
+  <line x1="930" y1="275" x2="930" y2="310" stroke="#d2a8ff" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="1000" y1="275" x2="1000" y2="310" stroke="#d2a8ff" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="1070" y1="275" x2="1070" y2="310" stroke="#d2a8ff" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <rect x="915" y="310" width="30" height="18" rx="3" fill="#3fb950" opacity="0.3" stroke="#3fb950" stroke-width="1"/>
+  <text x="930" y="323" text-anchor="middle" fill="#3fb950" font-size="9">A</text>
+  <rect x="985" y="310" width="30" height="18" rx="3" fill="#d2a8ff" opacity="0.3" stroke="#d2a8ff" stroke-width="1"/>
+  <text x="1000" y="323" text-anchor="middle" fill="#d2a8ff" font-size="9">B</text>
+  <rect x="1055" y="310" width="30" height="18" rx="3" fill="#f85149" opacity="0.3" stroke="#f85149" stroke-width="1"/>
+  <text x="1070" y="323" text-anchor="middle" fill="#f85149" font-size="9">C</text>
+
+  <text x="1005" y="348" text-anchor="middle" fill="#8b949e" font-size="9">UDP broadcast (255.255.255.255:9999)</text>
+
+  <!-- ===== ENFORCER LAYER ===== -->
+  <rect x="30" y="390" width="540" height="160" rx="6" fill="url(#box-enforcer)" stroke="#30363d" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="300" y="412" text-anchor="middle" fill="#f85149" font-size="13" font-weight="bold">POLICY ENFORCER</text>
+  <line x1="50" y1="420" x2="550" y2="420" stroke="#30363d" stroke-width="1"/>
+
+  <!-- 3-tier cascade -->
+  <rect x="50" y="432" width="150" height="50" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="125" y="455" text-anchor="middle" fill="#f0f6fc">Tier 1: eBPF Map</text>
+  <text x="125" y="472" text-anchor="middle" fill="#8b949e" font-size="10">BPF_MAP_TYPE_HASH</text>
+
+  <!-- Arrow T1→T2 -->
+  <line x1="200" y1="457" x2="230" y2="457" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="235" y="432" width="150" height="50" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="310" y="455" text-anchor="middle" fill="#f0f6fc">Tier 2: nftables</text>
+  <text x="310" y="472" text-anchor="middle" fill="#8b949e" font-size="10">neuro_mesh chain</text>
+
+  <!-- Arrow T2→T3 -->
+  <line x1="385" y1="457" x2="415" y2="457" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="420" y="432" width="130" height="50" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="485" y="455" text-anchor="middle" fill="#f0f6fc">Tier 3: iptables</text>
+  <text x="485" y="472" text-anchor="middle" fill="#8b949e" font-size="10">fork+execv</text>
+
+  <text x="300" y="505" text-anchor="middle" fill="#8b949e" font-size="10">Safe list prevents self-isolation · Loopback (127.0.0.0/8) always refused</text>
+
+  <!-- MitigationEngine -->
+  <rect x="50" y="520" width="500" height="20" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="300" y="534" text-anchor="middle" fill="#f0f6fc">MitigationEngine: seccomp sandbox (46 syscalls) · SIGSTOP → SIGKILL · detached threads</text>
+
+  <!-- ===== TELEMETRY & DASHBOARD LAYER ===== -->
+  <rect x="600" y="390" width="570" height="160" rx="6" fill="url(#box-telemetry)" stroke="#30363d" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="885" y="412" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="bold">TELEMETRY &amp; DASHBOARD</text>
+  <line x1="620" y1="420" x2="1150" y2="420" stroke="#30363d" stroke-width="1"/>
+
+  <rect x="620" y="432" width="240" height="50" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="740" y="455" text-anchor="middle" fill="#f0f6fc">TelemetryBridge</text>
+  <text x="740" y="472" text-anchor="middle" fill="#8b949e" font-size="10">uWebSockets · seccomp sandboxed child</text>
+
+  <rect x="880" y="432" width="270" height="50" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="1015" y="455" text-anchor="middle" fill="#f0f6fc">Dashboard (Vanilla JS)</text>
+  <text x="1015" y="472" text-anchor="middle" fill="#8b949e" font-size="10">Canvas · WebSocket · Zero dependencies</text>
+
+  <text x="885" y="505" text-anchor="middle" fill="#8b949e" font-size="10">AuditLogger (UDP JSON) · TelemetryExporter (flock() on mesh_status.json)</text>
+
+  <rect x="620" y="520" width="530" height="20" rx="4" fill="#0d1117" stroke="#30363d"/>
+  <text x="885" y="534" text-anchor="middle" fill="#f0f6fc">Telemetry gossip: unicast UDP (port 9998) → each node pushes telemetry to all peers</text>
+
+  <!-- ===== CONNECTION ARROWS ===== -->
+
+  <!-- Consensus → Enforcer (isolation order) -->
+  <path d="M890,275 L890,355 L300,355 L300,390" stroke="#f85149" stroke-width="2.5" fill="none" marker-end="url(#arrow-threat)" filter="url(#glow)"/>
+  <rect x="555" y="346" width="100" height="18" rx="3" fill="#f85149" opacity="0.15" stroke="#f85149" stroke-width="1"/>
+  <text x="605" y="359" text-anchor="middle" fill="#f85149" font-size="9">ISOLATE order</text>
+
+  <!-- Consensus → Telemetry (gossip) -->
+  <path d="M1050,275 L1050,390" stroke="#58a6ff" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <text x="1065" y="355" fill="#8b949e" font-size="9">gossip</text>
+
+  <!-- Telemetry → Dashboard -->
+  <line x1="1015" y1="482" x2="1015" y2="510" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Enforcer → Dashboard via Telemetry -->
+  <path d="M570,470 L600,470" stroke="#58a6ff" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- ===== BOTTOM: PROJECT STATS ===== -->
+  <rect x="30" y="580" width="1140" height="50" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="600" y="600" text-anchor="middle" fill="#8b949e" font-size="10">Key Properties</text>
+  
+  <text x="100" y="620" fill="#3fb950" font-size="11">● No control plane</text>
+  <text x="320" y="620" fill="#d2a8ff" font-size="11">● PBFT quorum: ⌊(2n+2)/3⌋</text>
+  <text x="580" y="620" fill="#f85149" font-size="11">● Cross-stage replay protection</text>
+  <text x="820" y="620" fill="#58a6ff" font-size="11">● RAII resources (UniqueFD)</text>
+  <text x="1020" y="620" fill="#e3b341" font-size="11">● Ed25519 signed votes</text>
+
+  <!-- ===== SECURITY BADGES ===== -->
+  <rect x="30" y="650" width="1140" height="40" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="600" y="668" text-anchor="middle" fill="#8b949e" font-size="10">Security Properties</text>
+  <text x="140" y="682" fill="#8b949e">fork+execv argv[] — no shell injection</text>
+  <text x="440" y="682" fill="#8b949e">binary-safe crypto — no null-byte truncation</text>
+  <text x="740" y="682" fill="#8b949e">PBFT timeout eviction at 120s</text>
+  <text x="1000" y="682" fill="#8b949e">seccomp sandbox — 46 syscall limit</text>
+
+  <!-- eBPF → XDP isolation feedback arrow -->
+  <path d="M270,239 L270,260 L30,260 L30,350 L170,350 L170,390" stroke="#f85149" stroke-width="1.5" fill="none" stroke-dasharray="4,3" marker-end="url(#arrow-threat)"/>
+  <text x="40" y="345" fill="#f85149" font-size="9" transform="rotate(-90,40,345)">XDP block</text>
+</svg>

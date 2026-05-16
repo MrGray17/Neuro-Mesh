@@ -4,6 +4,9 @@
 CXX = clang++
 CC  = clang
 
+# ---- Default target must be first in file ----
+all: directories isolation_forest.onnx kernel/sensor.skel.h $(AGENT_TARGET) tools
+
 CXXFLAGS = -std=c++20 -Wall -Wextra -O3 -I. \
            -Ithird_party/uWebSockets/src \
            -Ithird_party/uWebSockets/uSockets/src \
@@ -52,7 +55,13 @@ AGENT_TARGET = $(BIN_DIR)/neuro_agent
 SIM_TARGET = $(BIN_DIR)/inject_event
 CRYPTO_TEST_TARGET = $(BIN_DIR)/test_crypto
 
-all: directories kernel/sensor.skel.h $(AGENT_TARGET) tools
+# ONNX model — auto-generate if missing (requires Python + sklearn)
+isolation_forest.onnx:
+	@if command -v python3 >/dev/null 2>&1; then \
+		python3 -c "from sklearn.ensemble import IsolationForest; from skl2onnx import to_onnx" 2>/dev/null && \
+		python3 tools/train_iforest.py --output $@ --samples 10000 2>&1 || \
+		echo "WARNING: skl2onnx not available — using pre-generated model if present"; \
+	fi
 
 directories:
 	@mkdir -p $(OBJ_DIR) $(BIN_DIR)

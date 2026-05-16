@@ -184,9 +184,7 @@ void TelemetryBridge::child_main(int read_fd, const TelemetryBridgeConfig& cfg) 
     apply_uid_drop(cfg);
 
     // ---- Stage 4: Seccomp-BPF default-kill filter ----
-    // Skip seccomp when already running without sandbox (container limitation)
-    // The filter may block syscalls needed by uSockets event loop
-    std::cerr << "[SANDBOX] Skipping seccomp — running without sandbox isolation" << std::endl;
+    apply_seccomp_filter(read_fd);
 
     std::cerr << "[TELEMETRY_BRIDGE] Sandbox complete. Starting WebSocket on port "
               << cfg.websocket_port << "..." << std::endl;

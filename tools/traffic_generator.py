@@ -82,7 +82,6 @@ def main() -> None:
     # Shuffle TCP ports to avoid sequential scan pattern
     tcp_ports = list(port_range)
     random.shuffle(tcp_ports)
-    tcp_ports = tcp_ports  # keep shuffled list; each scanner gets the same shuffle
 
     for _ in range(tcp_count):
         t = threading.Thread(target=tcp_scan, args=(args.target, tcp_ports), daemon=True)
