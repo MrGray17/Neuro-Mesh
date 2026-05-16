@@ -147,10 +147,10 @@ private:
     std::function<void(const std::vector<Span>&)> m_exporter;
 };
 
-class AuditLogger {
+class DetailedAuditLogger {
 public:
-    AuditLogger(const std::string& audit_path);
-    ~AuditLogger();
+    DetailedAuditLogger(const std::string& audit_path);
+    ~DetailedAuditLogger();
 
     void log_event(const std::string& event_type,
                    const std::string& actor,
@@ -248,7 +248,7 @@ public:
 
     MetricsCollector* metrics() { return m_metrics.get(); }
     DistributedTracer* tracer() { return m_tracer.get(); }
-    AuditLogger* audit() { return m_audit.get(); }
+    DetailedAuditLogger* audit() { return m_audit.get(); }
     AlertManager* alerts() { return m_alerts.get(); }
 
     bool start();
@@ -264,7 +264,7 @@ private:
 
     std::unique_ptr<MetricsCollector> m_metrics;
     std::unique_ptr<DistributedTracer> m_tracer;
-    std::unique_ptr<AuditLogger> m_audit;
+    std::unique_ptr<DetailedAuditLogger> m_audit;
     std::unique_ptr<AlertManager> m_alerts;
     std::unique_ptr<PrometheusExporter> m_exporter;
 

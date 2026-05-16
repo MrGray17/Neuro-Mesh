@@ -1,141 +1,197 @@
 #pragma once
 #include <string>
 #include <memory>
-#include <vector>
 #include <optional>
+#include <vector>
 #include <chrono>
+#include <unordered_set>
 #include <functional>
-#include <thread>
-#include <unordered_map>
-#include <openssl/evp.h>
-#include <openssl/pem.h>
+#include <mutex>
 #include <openssl/x509.h>
-#include <openssl/x509v3.h>
+#include "crypto/CryptoCore.hpp"
 
 namespace neuro_mesh::crypto {
 
 enum class KeyType {
-    ED25519,
-    RSA_4096,
-    ML_KEM_768,
-    ML_KEM_1024
+    Ed25519,
+    RSA,
+    Ed448
 };
 
-enum class KeySource {
-    TPM_2_0,
-    SOFT_HSM,
-    SOFTWARE,
-    MEMORY
+enum class HSMBackend {
+    None,
+    SoftHSM,
+    TPM2,
+    PKCS11
 };
 
-struct KeyMetadata {
-    std::string key_id;
-    KeyType type;
-    KeySource source;
-    std::chrono::system_clock::time_point created_at;
-    std::chrono::system_clock::time_point expires_at;
-    bool is_rotating = false;
-    std::string parent_key_id;
-    std::unique_ptr<EVP_PKEY, EVPKeyDeleter> private_key;
-    std::unique_ptr<EVP_PKEY, EVPKeyDeleter> public_key;
+struct CertificateConfig {
+    std::string common_name;
+    std::string organization;
+    std::string organizational_unit;
+    std::string country;
+    std::string state;
+    std::string locality;
+    std::vector<std::string> sans;
+    uint32_t validity_days = 365;
+    bool is_ca = false;
+    bool is_server_auth = true;
+    bool is_client_auth = false;
 };
 
-struct KeyPair {
-    std::unique_ptr<EVP_PKEY, EVPKeyDeleter> private_key;
-    KeyMetadata metadata;
+struct X509Deleter {
+    void operator()(X509* cert) const {
+        if (cert) X509_free(cert);
+    }
 };
+
+using UniqueX509 = std::unique_ptr<X509, X509Deleter>;
 
 struct Certificate {
-    std::string pem_encoded;
+    std::string key_id;
+    UniqueX509 certificate;
+    UniquePKEY ca_private_key;
     std::string subject;
     std::string issuer;
     std::chrono::system_clock::time_point not_before;
     std::chrono::system_clock::time_point not_after;
-    std::vector<std::string> san;
-    bool is_revoked = false;
+    std::vector<std::string> sans;
+    bool is_ca;
+};
+
+class HSMAccess {
+public:
+    virtual ~HSMAccess() = default;
+    virtual bool is_available() const = 0;
+    virtual bool generate_key(KeyType type, const std::string& key_id, UniquePKEY& pub_key, UniquePKEY& priv_key) = 0;
+    virtual bool sign_data(const std::string& key_id, const std::string& data, std::string& signature) = 0;
+    virtual bool verify_signature(const std::string& key_id, const std::string& data, const std::string& signature) = 0;
+};
+
+class SoftHSMBackend : public HSMAccess {
+public:
+    explicit SoftHSMBackend(const std::string& slot = "");
+    bool is_available() const override;
+    bool generate_key(KeyType type, const std::string& key_id, UniquePKEY& pub_key, UniquePKEY& priv_key) override;
+    bool sign_data(const std::string& key_id, const std::string& data, std::string& signature) override;
+    bool verify_signature(const std::string& key_id, const std::string& data, const std::string& signature) override;
+
+private:
+    std::string m_slot;
+};
+
+class TPM2Backend : public HSMAccess {
+public:
+    explicit TPM2Backend(const std::string& device = "/dev/tpm0");
+    ~TPM2Backend() override;
+    bool is_available() const override;
+    bool generate_key(KeyType type, const std::string& key_id, UniquePKEY& pub_key, UniquePKEY& priv_key) override;
+    bool sign_data(const std::string& key_id, const std::string& data, std::string& signature) override;
+    bool verify_signature(const std::string& key_id, const std::string& data, const std::string& signature) override;
+
+private:
+    std::string m_device;
+    int m_tpm_fd;
+};
+
+class PKCS11Backend : public HSMAccess {
+public:
+    PKCS11Backend(const std::string& module, const std::string& pin);
+    ~PKCS11Backend() override;
+    bool is_available() const override;
+    bool generate_key(KeyType type, const std::string& key_id, UniquePKEY& pub_key, UniquePKEY& priv_key) override;
+    bool sign_data(const std::string& key_id, const std::string& data, std::string& signature) override;
+    bool verify_signature(const std::string& key_id, const std::string& data, const std::string& signature) override;
+
+private:
+    std::string m_module;
+    std::string m_pin;
+    void* m_lib;
+    void* m_ctx;
+};
+
+struct KeyPair {
+    std::string key_id;
+    UniquePKEY public_key;
+    UniquePKEY private_key;
+    KeyType type;
+
+    KeyPair() = default;
+    KeyPair(std::string id, UniquePKEY pub, UniquePKEY priv, KeyType t)
+        : key_id(std::move(id))
+        , public_key(std::move(pub))
+        , private_key(std::move(priv))
+        , type(t) {}
+
+    KeyPair(const KeyPair& other)
+        : key_id(other.key_id)
+        , type(other.type) {
+        if (other.public_key) {
+            public_key.reset(EVP_PKEY_dup(other.public_key.get()));
+        }
+        if (other.private_key) {
+            private_key.reset(EVP_PKEY_dup(other.private_key.get()));
+        }
+    }
+
+    KeyPair& operator=(const KeyPair& other) {
+        if (this != &other) {
+            key_id = other.key_id;
+            type = other.type;
+            if (other.public_key) {
+                public_key.reset(EVP_PKEY_dup(other.public_key.get()));
+            } else {
+                public_key.reset();
+            }
+            if (other.private_key) {
+                private_key.reset(EVP_PKEY_dup(other.private_key.get()));
+            } else {
+                private_key.reset();
+            }
+        }
+        return *this;
+    }
+
+    KeyPair(KeyPair&&) = default;
+    KeyPair& operator=(KeyPair&&) = default;
 };
 
 class KeyManager {
 public:
-    using KeyRotationCallback = std::function<void(const std::string&)>;
+    explicit KeyManager(const std::string& keystore_path = "");
 
-    explicit KeyManager(KeySource preferred_source = KeySource::SOFTWARE);
-    ~KeyManager();
+    std::unique_ptr<KeyPair> generate_key(KeyType type, const std::string& key_id = "");
 
-    bool is_available() const { return m_available; }
-    KeySource source() const { return m_source; }
-
-    std::optional<KeyPair> generate_key(KeyType type, const std::string& key_id = "");
-
-    std::optional<std::string> sign(const std::string& key_id, const std::string& data);
-
-    bool verify(const std::string& key_id, const std::string& data, const std::string& signature);
-
-    bool import_key(KeyType type, const std::string& key_id, const std::string& private_key_pem);
-
-    bool export_public_key(const std::string& key_id, std::string& public_key_pem);
-
+    bool store_key(const KeyPair& key_pair);
+    std::unique_ptr<KeyPair> load_key(const std::string& key_id);
     bool delete_key(const std::string& key_id);
 
-    std::optional<Certificate> create_certificate(
-        const std::string& key_id,
-        const std::string& subject,
-        const std::vector<std::string>& san,
-        const std::chrono::days& validity_days);
+    std::string get_public_key_pem(const std::string& key_id);
+    std::string get_private_key_pem(const std::string& key_id);
 
-    bool import_certificate(const Certificate& cert);
+    bool has_key(const std::string& key_id) const;
 
-    std::optional<Certificate> get_certificate(const std::string& key_id);
+    std::unique_ptr<Certificate> generate_certificate(
+        const KeyPair& key_pair,
+        const CertificateConfig& config,
+        const std::string& ca_key_id = "");
 
-    std::vector<std::string> list_key_ids() const;
+    std::unique_ptr<Certificate> load_certificate(const std::string& cert_id);
+    bool store_certificate(const Certificate& cert);
+    bool delete_certificate(const std::string& cert_id);
 
-    void set_rotation_callback(KeyRotationCallback callback);
-
-    bool rotate_key(const std::string& key_id);
-
-    std::optional<KeyPair> get_key_pair(const std::string& key_id);
-
-    static std::string key_type_to_string(KeyType type);
-    static std::string source_to_string(KeySource source);
+    void set_hsm_backend(HSMBackend backend);
+    HSMAccess* get_hsm() { return m_hsm.get(); }
 
 private:
-    class Impl;
-    std::unique_ptr<Impl> m_impl;
-    KeySource m_source;
-    bool m_available;
-};
+    std::string m_keystore_path;
+    std::optional<KeyPair> m_cached_key;
+    std::unique_ptr<HSMAccess> m_hsm;
+    HSMBackend m_hsm_backend = HSMBackend::None;
+    std::string m_ca_key_id;
+    std::string m_cert_store_path;
 
-class KeyManagerFactory {
-public:
-    static std::unique_ptr<KeyManager> create(KeySource source);
-    static std::vector<KeySource> available_sources();
-    static KeySource detect_best_source();
-};
-
-class KeyRotationScheduler {
-public:
-    KeyRotationScheduler(KeyManager* manager, std::chrono::hours rotation_interval);
-
-    void start();
-    void stop();
-
-    void schedule_rotation(const std::string& key_id);
-    void cancel_rotation(const std::string& key_id);
-
-    bool is_rotating(const std::string& key_id) const;
-
-    void on_rotation_complete(const std::string& key_id, const std::string& new_key_id);
-
-private:
-    void rotation_loop();
-    void execute_rotation(const std::string& key_id);
-
-    KeyManager* m_manager;
-    std::chrono::hours m_interval;
-    bool m_running;
-    std::thread m_thread;
-    std::mutex m_mutex;
-    std::unordered_map<std::string, bool> m_pending_rotations;
+    std::string generate_key_id(KeyType type);
 };
 
 } // namespace neuro_mesh::crypto

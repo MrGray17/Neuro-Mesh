@@ -12,6 +12,7 @@
 #include <cstring>
 #include <random>
 #include <thread>
+#include <fstream>
 
 namespace neuro_mesh {
 
@@ -25,9 +26,11 @@ MeshNode::MeshNode(const std::string& node_id,
     : m_node_id(node_id),
       m_udp_port(9999),
       m_tcp_port(0),
+      m_tls_port(0),
       m_running(false),
       m_pbft(1),   // start with n=1 (self), scale up via discovery
       m_sequence_number(0),
+      m_key_manager("./keystore_" + node_id),
       m_enforcer(enforcer),
       m_mitigation(mitigation),
       m_bridge(bridge),
@@ -45,7 +48,43 @@ MeshNode::MeshNode(const std::string& node_id,
     m_pbft.set_my_identity(m_node_id);
     m_pbft.set_private_key(std::move(m_private_key));
 
+    // Initialize TLS infrastructure
+    auto tls_key = m_key_manager.generate_key(crypto::KeyType::Ed25519, m_node_id + "_tls");
+    if (tls_key) {
+        m_key_manager.store_key(*tls_key);
+        crypto::CertificateConfig cert_cfg;
+        cert_cfg.common_name = m_node_id;
+        cert_cfg.organization = "Neuro-Mesh";
+        cert_cfg.is_server_auth = true;
+        cert_cfg.is_client_auth = true;
+        cert_cfg.validity_days = 7;
+        auto cert = m_key_manager.generate_certificate(*tls_key, cert_cfg, "");
+        if (cert) {
+            m_key_manager.store_certificate(*cert);
+            m_tls_cert_path = "./keystore_" + m_node_id + "/certs/" + cert->key_id + ".crt";
+            m_tls_key_path = "./keystore_" + m_node_id + "/" + tls_key->key_id + ".pem";
+        }
+    }
+
+    m_tls_config.cert_path = m_tls_cert_path;
+    m_tls_config.key_path = m_tls_key_path;
+    m_tls_config.verify_client = false;
+    m_tls_config.enable_tls13 = true;
+    m_tls_config.enable_mtls = false;
+
+    net::DiscoveryConfig disc_cfg;
+    disc_cfg.beacon_port = DISCOVERY_UDP_PORT;
+    m_discovery = std::make_unique<net::PeerDiscovery>(disc_cfg, m_node_id, m_public_key_pem);
+
+    try {
+        m_transport = std::make_unique<net::TransportLayer>(m_tls_config);
+    } catch (const std::exception& e) {
+        std::cerr << "[TLS] TransportLayer init failed: " << e.what()
+                  << " — falling back to UDP only." << std::endl;
+    }
+
     std::cout << "[DEFENSE] Elite PBFT initialized with equivocation detection and timing obfuscation." << std::endl;
+    std::cout << "[TLS] Transport layer ready. Cert/key stored for " << m_node_id << "." << std::endl;
     std::cout << "[JOURNAL] Initialized. Last seq: " << m_journal.last_seq() << std::endl;
 }
 
@@ -64,7 +103,10 @@ void MeshNode::start() {
     m_listener_thread  = std::thread(&MeshNode::p2p_listener_loop, this);
     m_discovery_thread = std::thread(&MeshNode::discovery_beacon_loop, this);
     m_tcp_thread       = std::thread(&MeshNode::tcp_listener_loop, this);
+    m_tls_thread       = std::thread(&MeshNode::tls_acceptor_loop, this);
     m_liveness_thread  = std::thread(&MeshNode::liveness_monitor, this);
+
+    if (m_discovery) m_discovery->start();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     announce_identity();
@@ -72,9 +114,12 @@ void MeshNode::start() {
 
 void MeshNode::stop() {
     m_running = false;
+    if (m_discovery) m_discovery->stop();
+    if (m_transport) m_transport->shutdown();
     if (m_listener_thread.joinable())  m_listener_thread.join();
     if (m_discovery_thread.joinable()) m_discovery_thread.join();
     if (m_tcp_thread.joinable())       m_tcp_thread.join();
+    if (m_tls_thread.joinable())       m_tls_thread.join();
     if (m_liveness_thread.joinable())  m_liveness_thread.join();
 }
 
@@ -112,14 +157,16 @@ void MeshNode::send_discovery_beacon() {
     auto now = steady_clock::now();
     auto us = duration_cast<microseconds>(now.time_since_epoch()).count();
 
-    // Signed blob binds node_id + tcp_port + timestamp
-    std::string signed_blob = m_node_id + "|" + std::to_string(m_tcp_port) + "|" + std::to_string(us);
+    // Signed blob binds node_id + tcp_port + tls_port + timestamp
+    std::string signed_blob = m_node_id + "|" + std::to_string(m_tcp_port) + "|"
+                            + std::to_string(m_tls_port) + "|" + std::to_string(us);
     std::string raw_sig = crypto::IdentityCore::sign_payload(m_private_key.get(), signed_blob);
     std::string b64_sig = base64_encode(raw_sig);
 
-    // Packet: DISCOVERY|<node_id>|<tcp_port>|<timestamp_us>|<b64_pubkey>|<b64_sig>
+    // Packet: DISCOVERY|<node_id>|<tcp_port>|<tls_port>|<timestamp_us>|<b64_pubkey>|<b64_sig>
     std::string payload = "DISCOVERY|" + m_node_id + "|"
                         + std::to_string(m_tcp_port) + "|"
+                        + std::to_string(m_tls_port) + "|"
                         + std::to_string(us) + "|"
                         + m_public_key_b64 + "|"
                         + b64_sig;
@@ -553,13 +600,18 @@ bool MeshNode::perform_pex_handshake(const std::string& ip, int port,
 
 void MeshNode::process_discovery_beacon(const std::string& msg, const std::string& sender_ip) {
     auto tokens = split_string(msg, '|');
-    if (tokens.size() < 6 || tokens[0] != "DISCOVERY") return;
+    // Accept both old format (6 tokens, no TLS) and new format (7 tokens, with TLS)
+    if (tokens[0] != "DISCOVERY") return;
+
+    bool has_tls = tokens.size() >= 7;
+    if (tokens.size() < 6) return;
 
     const std::string& peer_id   = tokens[1];
     int peer_tcp_port            = std::stoi(tokens[2]);
-    int64_t timestamp            = std::stoll(tokens[3]);
-    const std::string& b64_pubkey = tokens[4];
-    const std::string& b64_sig    = tokens[5];
+    int peer_tls_port            = has_tls ? std::stoi(tokens[3]) : 0;
+    int64_t timestamp            = std::stoll(tokens[has_tls ? 4 : 3]);
+    const std::string& b64_pubkey = tokens[has_tls ? 5 : 4];
+    const std::string& b64_sig    = tokens[has_tls ? 6 : 5];
 
     if (peer_id == m_node_id) return;
 
@@ -567,8 +619,14 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     std::string peer_pem = base64_decode(b64_pubkey);
     if (peer_pem.empty()) return;
 
-    // Verify signature: bind(node_id | tcp_port | timestamp)
-    std::string signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|" + std::to_string(timestamp);
+    // Verify signature: bind(node_id | tcp_port | [tls_port |] timestamp)
+    std::string signed_blob;
+    if (has_tls) {
+        signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|"
+                    + std::to_string(peer_tls_port) + "|" + std::to_string(timestamp);
+    } else {
+        signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|" + std::to_string(timestamp);
+    }
     std::string raw_sig = base64_decode(b64_sig);
     if (raw_sig.empty()) return;
 
@@ -605,15 +663,18 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
             pi.node_id = peer_id;
             pi.ip = sender_ip;
             pi.tcp_port = peer_tcp_port;
+            pi.tls_port = peer_tls_port;
             pi.public_key_pem = peer_pem;
             pi.last_heartbeat = steady_clock::now();
             pi.verified = true;
+            pi.tls_fd = -1;
             m_peers[peer_id] = pi;
             is_new = true;
         } else {
             it->second.last_heartbeat = steady_clock::now();
             it->second.ip = sender_ip;        // update IP (may change)
             it->second.tcp_port = peer_tcp_port;
+            it->second.tls_port = peer_tls_port;
             // TOFU key pinning: reject key changes for verified peers.
             // A key change requires manual unpin_peer_key() first.
             // Skip check if stored key is empty — PEX handshake may have
@@ -633,6 +694,7 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     if (is_new) {
         std::cout << "[NETWORK] Verified peer " << peer_id_copy
                   << " at " << sender_ip_copy << ":" << peer_tcp_port
+                  << " (TLS:" << peer_tls_port << ")"
                   << ". Quorum updated to n=" << peer_count() << "." << std::endl;
 
         // Register key with PBFT and IP with enforcer
@@ -644,6 +706,13 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
         // Initiate PEX handshake to exchange peer lists (O(log N) discovery)
         // Called OUTSIDE the unique_lock to avoid self-deadlock on m_peers_mtx
         perform_pex_handshake(sender_ip_copy, peer_tcp_port, peer_id_copy);
+
+        // Attempt TLS connection to the new peer
+        if (peer_tls_port > 0 && m_transport) {
+            std::thread([this, peer_id_copy, sender_ip_copy, peer_tls_port]() {
+                connect_tls_to_peer(peer_id_copy, sender_ip_copy, peer_tls_port);
+            }).detach();
+        }
     }
 }
 
@@ -959,7 +1028,25 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
 
     std::string payload = "VOTE|" + stage_str + "|" + m_node_id + "|" + std::to_string(seq) + "|" +
                           std::to_string(view) + "|" + target_id + "|" + evidence_json + "|" + encoded_sig;
-    send_udp_broadcast(payload);
+
+    // Prefer TLS to known peers, fall back to UDP broadcast
+    bool tls_sent = false;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_peers_mtx);
+        for (auto& [peer_id, info] : m_peers) {
+            if (info.tls_fd >= 0 && m_transport) {
+                ssize_t sent = m_transport->send(info.tls_fd, payload.data(), payload.size());
+                if (sent == static_cast<ssize_t>(payload.size())) {
+                    tls_sent = true;
+                } else {
+                    info.tls_fd = -1;
+                }
+            }
+        }
+    }
+    if (!tls_sent) {
+        send_udp_broadcast(payload);
+    }
 
     P2PMessage self_msg{stage_str, m_node_id, target_id, evidence_json, signature, prev_hash, seq, view};
     if (m_pbft.verify_message(self_msg)) {
@@ -1004,6 +1091,125 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
 }
 
 // =============================================================================
+// TLS Acceptor — accepts incoming TLS connections from peers
+// =============================================================================
+
+void MeshNode::tls_acceptor_loop() {
+    if (!m_transport) return;
+
+    for (int port = TLS_PORT_START; port < TLS_PORT_START + 100; ++port) {
+        if (m_transport->bind("0.0.0.0", static_cast<uint16_t>(port))) {
+            m_tls_port = port;
+            break;
+        }
+    }
+
+    if (m_tls_port == 0) {
+        std::cerr << "[TLS] Failed to bind TLS acceptor." << std::endl;
+        return;
+    }
+
+    if (!m_transport->listen(8)) {
+        std::cerr << "[TLS] listen() failed on TLS port " << m_tls_port << std::endl;
+        return;
+    }
+
+    std::cout << "[TLS] Acceptor listening on port " << m_tls_port << std::endl;
+
+    while (m_running) {
+        int fd = m_transport->accept();
+        if (fd < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        auto conn_info = m_transport->get_connection_info(fd);
+        if (conn_info && conn_info->verified) {
+            std::unique_lock<std::shared_mutex> lock(m_peers_mtx);
+            for (auto& [peer_id, info] : m_peers) {
+                if (info.ip == conn_info->peer_ip && info.tls_port == conn_info->peer_port) {
+                    if (info.tls_fd >= 0) {
+                        m_transport->close(info.tls_fd);
+                    }
+                    info.tls_fd = fd;
+                    std::cout << "[TLS] Accepted connection from " << peer_id
+                              << " (" << conn_info->peer_ip << ":" << conn_info->peer_port << ")" << std::endl;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// TLS Transport Helpers
+// =============================================================================
+
+bool MeshNode::send_tls_to_peer(const std::string& peer_id, const std::string& payload) {
+    if (!m_transport) return false;
+
+    int fd = -1;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_peers_mtx);
+        auto it = m_peers.find(peer_id);
+        if (it == m_peers.end() || it->second.tls_fd < 0) return false;
+        fd = it->second.tls_fd;
+    }
+
+    ssize_t sent = m_transport->send(fd, payload.data(), payload.size());
+    return sent == static_cast<ssize_t>(payload.size());
+}
+
+void MeshNode::send_tls_broadcast(const std::string& payload) {
+    if (!m_transport) return;
+
+    std::shared_lock<std::shared_mutex> lock(m_peers_mtx);
+    for (auto& [peer_id, info] : m_peers) {
+        if (info.tls_fd >= 0) {
+            ssize_t sent = m_transport->send(info.tls_fd, payload.data(), payload.size());
+            if (sent < 0 && sent != static_cast<ssize_t>(payload.size())) {
+                m_transport->close(info.tls_fd);
+                info.tls_fd = -1;
+            }
+        }
+    }
+}
+
+bool MeshNode::connect_tls_to_peer(const std::string& peer_id, const std::string& ip, int port) {
+    if (!m_transport) return false;
+
+    {
+        std::shared_lock<std::shared_mutex> lock(m_peers_mtx);
+        auto it = m_peers.find(peer_id);
+        if (it != m_peers.end() && it->second.tls_fd >= 0) return true;
+    }
+
+    if (!m_transport->connect(ip, static_cast<uint16_t>(port))) {
+        return false;
+    }
+
+    int fd = -1;
+    {
+        std::unique_lock<std::shared_mutex> lock(m_peers_mtx);
+        auto it = m_peers.find(peer_id);
+        if (it != m_peers.end()) {
+            it->second.tls_fd = fd;
+        }
+    }
+
+    return true;
+}
+
+void MeshNode::disconnect_tls_peer(const std::string& peer_id) {
+    std::unique_lock<std::shared_mutex> lock(m_peers_mtx);
+    auto it = m_peers.find(peer_id);
+    if (it != m_peers.end() && it->second.tls_fd >= 0) {
+        if (m_transport) m_transport->close(it->second.tls_fd);
+        it->second.tls_fd = -1;
+    }
+}
+
+// =============================================================================
 // Liveness Monitor — prunes peers with stale heartbeats (> LIVENESS_SEC)
 // =============================================================================
 
@@ -1036,6 +1242,10 @@ void MeshNode::prune_stale_peers() {
     {
         std::unique_lock<std::shared_mutex> lock(m_peers_mtx);
         for (const auto& id : to_prune) {
+            auto it = m_peers.find(id);
+            if (it != m_peers.end() && it->second.tls_fd >= 0 && m_transport) {
+                m_transport->close(it->second.tls_fd);
+            }
             m_peers.erase(id);
             m_pbft.prune_peer(id);
         }

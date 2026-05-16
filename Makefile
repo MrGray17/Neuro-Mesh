@@ -40,7 +40,11 @@ AGENT_SRCS = main.cpp \
              enforcer/PolicyEnforcer.cpp \
              enforcer/MitigationEngine.cpp \
              crypto/CryptoCore.cpp \
+             crypto/KeyManager.cpp \
+             net/TransportLayer.cpp \
+             attacks/AttackSimulator.cpp \
              telemetry/AuditLogger.cpp \
+             telemetry/Observability.cpp \
              telemetry/TelemetryBridge.cpp
 
 AGENT_OBJS = $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(AGENT_SRCS))
@@ -53,7 +57,7 @@ all: directories kernel/sensor.skel.h $(AGENT_TARGET) tools
 directories:
 	@mkdir -p $(OBJ_DIR) $(BIN_DIR)
 	@mkdir -p $(OBJ_DIR)/cell $(OBJ_DIR)/consensus $(OBJ_DIR)/enforcer
-	@mkdir -p $(OBJ_DIR)/crypto $(OBJ_DIR)/telemetry
+	@mkdir -p $(OBJ_DIR)/crypto $(OBJ_DIR)/telemetry $(OBJ_DIR)/net $(OBJ_DIR)/attacks
 	@mkdir -p $(OBJ_DIR)/usockets/eventing
 
 # ---- eBPF skeleton generation ----
@@ -110,9 +114,18 @@ $(ENFORCER_TEST_TARGET): tools/test_enforcer.cpp $(OBJ_DIR)/enforcer/PolicyEnfor
 	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/enforcer/PolicyEnforcer.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(BPF_LIBS)
 
 MESHNODE_TEST_TARGET = $(BIN_DIR)/test_meshnode
-$(MESHNODE_TEST_TARGET): tools/test_meshnode.cpp $(OBJ_DIR)/consensus/MeshNode.o $(OBJ_DIR)/enforcer/PolicyEnforcer.o $(OBJ_DIR)/enforcer/MitigationEngine.o $(OBJ_DIR)/telemetry/TelemetryBridge.o $(OBJ_DIR)/crypto/CryptoCore.o $(USOCK_OBJS)
+MESHNODE_TEST_OBJS = $(OBJ_DIR)/consensus/MeshNode.o \
+                      $(OBJ_DIR)/enforcer/PolicyEnforcer.o \
+                      $(OBJ_DIR)/enforcer/MitigationEngine.o \
+                      $(OBJ_DIR)/telemetry/TelemetryBridge.o \
+                      $(OBJ_DIR)/telemetry/Observability.o \
+                      $(OBJ_DIR)/crypto/CryptoCore.o \
+                      $(OBJ_DIR)/crypto/KeyManager.o \
+                      $(OBJ_DIR)/net/TransportLayer.o \
+                      $(OBJ_DIR)/attacks/AttackSimulator.o
+$(MESHNODE_TEST_TARGET): tools/test_meshnode.cpp $(MESHNODE_TEST_OBJS) $(USOCK_OBJS)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $< $(USOCK_OBJS) $(OBJ_DIR)/consensus/MeshNode.o $(OBJ_DIR)/enforcer/PolicyEnforcer.o $(OBJ_DIR)/enforcer/MitigationEngine.o $(OBJ_DIR)/telemetry/TelemetryBridge.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(BPF_LIBS) $(SECC_LIBS)
+	$(CXX) $(CXXFLAGS) $< $(USOCK_OBJS) $(MESHNODE_TEST_OBJS) -o $@ $(SSL_LIBS) $(BPF_LIBS) $(SECC_LIBS)
 
 INFERENCE_TEST_TARGET = $(BIN_DIR)/test_inference
 $(INFERENCE_TEST_TARGET): tools/test_inference.cpp $(OBJ_DIR)/cell/InferenceEngine.o

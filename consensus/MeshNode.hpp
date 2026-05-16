@@ -10,6 +10,8 @@
 #include <chrono>
 #include "consensus/PBFT.hpp"
 #include "crypto/CryptoCore.hpp"
+#include "crypto/KeyManager.hpp"
+#include "net/TransportLayer.hpp"
 #include "common/StateJournal.hpp"
 #include "enforcer/PolicyEnforcer.hpp"
 
@@ -22,15 +24,18 @@ struct PeerInfo {
     std::string node_id;
     std::string ip;
     int tcp_port = 0;
+    int tls_port = 0;
     std::string public_key_pem;
     std::chrono::steady_clock::time_point last_heartbeat;
     bool verified = false;
+    int tls_fd = -1;
 };
 
 class MeshNode {
 public:
     static constexpr int DISCOVERY_UDP_PORT = 9998;
     static constexpr int TCP_PORT_START    = 10000;
+    static constexpr int TLS_PORT_START    = 10500;
     static constexpr int HEARTBEAT_SEC          = 5;
     static constexpr int LIVENESS_SEC           = 30;
     static constexpr int CONSENSUS_COOLDOWN_SEC = 30;
@@ -51,6 +56,7 @@ public:
     std::string get_mesh_telemetry() const;  // aggregated JSON of all known node telemetry
 
     int tcp_port() const { return m_tcp_port; }
+    int tls_port() const { return m_tls_port; }
     int peer_count() const;
     std::vector<std::string> get_active_peer_ids() const;
 
@@ -65,9 +71,10 @@ public:
 
 private:
     // === Threads ===
-    void p2p_listener_loop();        // PBFT consensus (UDP :9999)
+    void p2p_listener_loop();        // PBFT consensus (UDP :9999 + TLS)
     void discovery_beacon_loop();    // UDP heartbeat broadcast (UDP :9998)
     void tcp_listener_loop();        // PEX handshake server (TCP auto-port)
+    void tls_acceptor_loop();        // TLS acceptor for incoming peer connections
     void liveness_monitor();         // Peer timeout detection
 
     // === Messaging ===
@@ -80,6 +87,12 @@ private:
     void send_udp_discovery(const std::string& payload);
     void send_udp_unicast(const std::string& ip, int port, const std::string& payload);
 
+    // === TLS transport ===
+    bool send_tls_to_peer(const std::string& peer_id, const std::string& payload);
+    void send_tls_broadcast(const std::string& payload);
+    bool connect_tls_to_peer(const std::string& peer_id, const std::string& ip, int port);
+    void disconnect_tls_peer(const std::string& peer_id);
+
     // === Discovery / PEX ===
     void send_discovery_beacon();
     void announce_identity();
@@ -90,6 +103,7 @@ private:
     std::string m_node_id;
     int m_udp_port;                // PBFT consensus port (9999)
     int m_tcp_port;                // PEX handshake port (auto-assigned)
+    int m_tls_port;                // TLS acceptor port (auto-assigned)
     std::atomic<bool> m_running;
 
     crypto::UniquePKEY m_private_key;
@@ -98,10 +112,19 @@ private:
     PBFTConsensus m_pbft;
     uint64_t m_sequence_number{0};
 
+    // === TLS infrastructure ===
+    net::TLSConfig m_tls_config;
+    std::unique_ptr<net::TransportLayer> m_transport;
+    std::unique_ptr<net::PeerDiscovery> m_discovery;
+    crypto::KeyManager m_key_manager;
+    std::string m_tls_cert_path;
+    std::string m_tls_key_path;
+
     // === Thread handles ===
     std::thread m_listener_thread;
     std::thread m_discovery_thread;
     std::thread m_tcp_thread;
+    std::thread m_tls_thread;
     std::thread m_liveness_thread;
     std::chrono::steady_clock::time_point m_last_announce_time;
     std::chrono::steady_clock::time_point m_last_targeted_at;  // last PBFT round targeting self

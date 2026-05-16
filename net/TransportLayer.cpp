@@ -1,742 +1,673 @@
 #include "net/TransportLayer.hpp"
-#include "common/Base64.hpp"
-#include <iostream>
 #include <cstring>
 #include <unistd.h>
 #include <sys/socket.h>
-#include <netinet/tcp.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h>
 #include <fcntl.h>
-#include <errno.h>
+#include <chrono>
+#include <thread>
+#include <sstream>
+#include <iomanip>
+#include <fstream>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/tls1.h>
+#include <openssl/obj_mac.h>
 
 namespace neuro_mesh::net {
 
-TLSContext::TLSContext(const TLSConfig& config) : m_config(config) {
-    m_valid = configure_server_ctx() && configure_client_ctx();
+namespace {
+
+int set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+} // namespace
+
+TLSContext::TLSContext(const TLSConfig& config)
+    : m_config(config)
+    , m_server_ctx(nullptr, SSLCTXDeleter())
+    , m_client_ctx(nullptr, SSLCTXDeleter()) {
+
+    SSL_CTX* server = SSL_CTX_new(TLS_server_method());
+    SSL_CTX* client = SSL_CTX_new(TLS_client_method());
+
+    if (!server || !client) {
+        if (server) SSL_CTX_free(server);
+        if (client) SSL_CTX_free(client);
+        throw std::runtime_error("Failed to create SSL contexts");
+    }
+
+    m_server_ctx.reset(server);
+    m_client_ctx.reset(client);
+
+    if (m_config.enable_tls13) {
+        SSL_CTX_set_min_proto_version(m_server_ctx.get(), TLS1_3_VERSION);
+        SSL_CTX_set_min_proto_version(m_client_ctx.get(), TLS1_3_VERSION);
+    }
+
+    SSL_CTX_set_cipher_list(m_server_ctx.get(), m_config.ciphers.c_str());
+    SSL_CTX_set_cipher_list(m_client_ctx.get(), m_config.ciphers.c_str());
+
+    SSL_CTX_set_security_level(m_server_ctx.get(), 2);
+    SSL_CTX_set_security_level(m_client_ctx.get(), 2);
 }
 
 TLSContext::~TLSContext() = default;
 
-bool TLSContext::configure_server_ctx() {
-    const SSL_METHOD* method = TLS_server_method();
-    m_server_ctx.reset(SSL_CTX_new(method));
-    if (!m_server_ctx) {
-        std::cerr << "[TLS] Failed to create server context" << std::endl;
+bool TLSContext::load_certificate() {
+    if (m_config.cert_path.empty() || m_config.key_path.empty()) {
         return false;
     }
 
-    SSL_CTX_set_min_proto_version(m_server_ctx.get(), m_config.min_tls_version);
-    SSL_CTX_set_cipher_list(m_server_ctx.get(), "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS");
-
-    if (SSL_CTX_use_certificate_file(m_server_ctx.get(), m_config.node_cert_pem.c_str(), SSL_FILETYPE_PEM) <= 0) {
-        std::cerr << "[TLS] Failed to load server certificate" << std::endl;
+    if (SSL_CTX_use_certificate_file(m_server_ctx.get(), m_config.cert_path.c_str(), SSL_FILETYPE_PEM) != 1) {
+        ERR_print_errors_fp(stderr);
         return false;
     }
 
-    if (SSL_CTX_use_PrivateKey_file(m_server_ctx.get(), m_config.node_key_pem.c_str(), SSL_FILETYPE_PEM) <= 0) {
-        std::cerr << "[TLS] Failed to load server key" << std::endl;
+    if (SSL_CTX_use_PrivateKey_file(m_server_ctx.get(), m_config.key_path.c_str(), SSL_FILETYPE_PEM) != 1) {
+        ERR_print_errors_fp(stderr);
         return false;
     }
 
-    if (SSL_CTX_check_private_key(m_server_ctx.get()) <= 0) {
-        std::cerr << "[TLS] Private key does not match certificate" << std::endl;
+    if (SSL_CTX_check_private_key(m_server_ctx.get()) != 1) {
+        ERR_print_errors_fp(stderr);
         return false;
     }
 
-    if (!m_config.ca_cert_pem.empty()) {
-        SSL_CTX_load_verify_locations(m_server_ctx.get(), m_config.ca_cert_pem.c_str(), nullptr);
+    return true;
+}
+
+bool TLSContext::load_ca_certificate() {
+    if (m_config.ca_path.empty()) {
+        return false;
+    }
+
+    if (SSL_CTX_load_verify_locations(m_server_ctx.get(), m_config.ca_path.c_str(), nullptr) != 1) {
+        ERR_print_errors_fp(stderr);
+        return false;
+    }
+
+    if (m_config.verify_client) {
         SSL_CTX_set_verify(m_server_ctx.get(), SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
-    }
-
-    SSL_CTX_set_alpn_protos(m_server_ctx.get(), (const unsigned char*)"\x08http/1.1", 9);
-
-    return true;
-}
-
-bool TLSContext::configure_client_ctx() {
-    const SSL_METHOD* method = TLS_client_method();
-    m_client_ctx.reset(SSL_CTX_new(method));
-    if (!m_client_ctx) {
-        std::cerr << "[TLS] Failed to create client context" << std::endl;
-        return false;
-    }
-
-    SSL_CTX_set_min_proto_version(m_client_ctx.get(), m_config.min_tls_version);
-    SSL_CTX_set_cipher_list(m_client_ctx.get(), "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS");
-
-    if (SSL_CTX_use_certificate_file(m_client_ctx.get(), m_config.node_cert_pem.c_str(), SSL_FILETYPE_PEM) <= 0) {
-        std::cerr << "[TLS] Failed to load client certificate" << std::endl;
-        return false;
-    }
-
-    if (SSL_CTX_use_PrivateKey_file(m_client_ctx.get(), m_config.node_key_pem.c_str(), SSL_FILETYPE_PEM) <= 0) {
-        std::cerr << "[TLS] Failed to load client key" << std::endl;
-        return false;
-    }
-
-    if (!m_config.ca_cert_pem.empty()) {
-        SSL_CTX_load_verify_locations(m_client_ctx.get(), m_config.ca_cert_pem.c_str(), nullptr);
-        SSL_CTX_set_verify(m_client_ctx.get(), SSL_VERIFY_PEER, nullptr);
+        SSL_CTX_set_client_CA_list(m_server_ctx.get(), SSL_load_client_CA_file(m_config.ca_path.c_str()));
     }
 
     return true;
 }
 
-TLSSocket::TLSSocket(SSL* ssl, int fd, bool is_server)
-    : m_ssl(ssl, SSL_free)
-    , m_fd(fd)
-    , m_is_server(is_server) {
+SSL* TLSContext::create_server_ssl() {
+    SSL* ssl = SSL_new(m_server_ctx.get());
+    return ssl;
 }
 
-TLSSocket::~TLSSocket() {
-    close();
+SSL* TLSContext::create_client_ssl() {
+    SSL* ssl = SSL_new(m_client_ctx.get());
+    return ssl;
 }
 
-bool TLSSocket::handshake() {
-    int ret = SSL_accept(m_ssl.get()) if (m_is_server) else SSL_connect(m_ssl.get());
-    if (ret != 1) {
-        int err = SSL_get_error(m_ssl.get(), ret);
-        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
-            std::cerr << "[TLS] Handshake failed: " << err << std::endl;
-            return false;
-        }
-
-        fd_set read_fds, write_fds;
-        FD_ZERO(&read_fds);
-        FD_ZERO(&write_fds);
-
-        if (err == SSL_ERROR_WANT_READ) FD_SET(m_fd, &read_fds);
-        if (err == SSL_ERROR_WANT_WRITE) FD_SET(m_fd, &write_fds);
-
-        struct timeval tv = {5, 0};
-        if (select(m_fd + 1, &read_fds, &write_fds, nullptr, &tv) <= 0) {
-            std::cerr << "[TLS] Handshake timeout" << std::endl;
-            return false;
-        }
-
-        ret = SSL_accept(m_ssl.get()) if (m_is_server) else SSL_connect(m_ssl.get());
-        if (ret != 1) {
-            std::cerr << "[TLS] Handshake retry failed: " << SSL_get_error(m_ssl.get(), ret) << std::endl;
-            return false;
-        }
-    }
-
-    m_connected = true;
-    return true;
-}
-
-bool TLSSocket::write(const uint8_t* data, size_t len) {
-    if (!m_connected) return false;
-
-    int written = SSL_write(m_ssl.get(), data, len);
-    if (written <= 0) {
-        int err = SSL_get_error(m_ssl.get(), written);
-        if (err != SSL_ERROR_WANT_WRITE) {
-            std::cerr << "[TLS] Write failed: " << err << std::endl;
-            m_connected = false;
-            return false;
-        }
-    }
-    return true;
-}
-
-std::optional<std::vector<uint8_t>> TLSSocket::read(size_t max_len) {
-    if (!m_connected) return std::nullopt;
-
-    std::vector<uint8_t> buffer(max_len);
-    int bytes = SSL_read(m_ssl.get(), buffer.data(), max_len);
-
-    if (bytes <= 0) {
-        int err = SSL_get_error(m_ssl.get(), bytes);
-        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_ZERO_RETURN) {
-            std::cerr << "[TLS] Read failed: " << err << std::endl;
-            m_connected = false;
-        }
-        return std::nullopt;
-    }
-
-    buffer.resize(bytes);
-    return buffer;
-}
-
-void TLSSocket::close() {
-    if (m_connected) {
-        SSL_shutdown(m_ssl.get());
-        m_connected = false;
-    }
-    if (m_fd >= 0) {
-        ::close(m_fd);
-        m_fd = -1;
-    }
-}
-
-PeerConnection::PeerConnection(const PeerEndpoint& endpoint, std::unique_ptr<TLSSocket> socket)
-    : m_endpoint(endpoint)
-    , m_socket(std::move(socket))
-    , m_state(ConnectionState::CONNECTING)
-    , m_last_activity(std::chrono::steady_clock::now())
-    , m_messages_sent(0)
-    , m_messages_received(0) {
-}
-
-PeerConnection::~PeerConnection() = default;
-
-void PeerConnection::set_state(ConnectionState state) {
-    m_state = state;
-    update_activity();
-}
-
-void PeerConnection::update_activity() {
-    m_last_activity = std::chrono::steady_clock::now();
-}
-
-bool PeerConnection::send_message(const std::vector<uint8_t>& data) {
-    std::lock_guard<std::mutex> lock(m_send_mutex);
-    return m_socket->write(data.data(), data.size());
-}
-
-TransportLayer::TransportLayer(const TLSConfig& tls_config, uint16_t listen_port)
-    : m_tls_config(tls_config)
-    , m_listen_port(listen_port)
+TransportLayer::TransportLayer(const TLSConfig& config)
+    : m_tls_ctx(config)
     , m_running(false) {
-    m_tls_context = std::make_unique<TLSContext>(tls_config);
+
+    if (!initialize_openssl()) {
+        throw std::runtime_error("Failed to initialize OpenSSL");
+    }
 }
 
 TransportLayer::~TransportLayer() {
-    stop();
+    shutdown();
 }
 
-bool TransportLayer::start() {
-    if (m_running) return false;
+bool TransportLayer::initialize_openssl() {
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    return true;
+}
 
-    m_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (m_listen_fd < 0) {
-        std::cerr << "[TRANSPORT] Failed to create socket" << std::endl;
+
+
+bool TransportLayer::bind(const std::string& address, uint16_t port) {
+    m_server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (m_server_fd < 0) {
         return false;
     }
 
     int opt = 1;
-    setsockopt(m_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(m_listen_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(m_listen_port);
-
-    if (bind(m_listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "[TRANSPORT] Failed to bind to port " << m_listen_port << std::endl;
-        close(m_listen_fd);
+    if (setsockopt(m_server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        close(m_server_fd);
+        m_server_fd = -1;
         return false;
     }
 
-    if (listen(m_listen_fd, 128) < 0) {
-        std::cerr << "[TRANSPORT] Failed to listen" << std::endl;
-        close(m_listen_fd);
+    struct sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+
+    if (address.empty() || address == "0.0.0.0" || address == "::") {
+        addr.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        inet_pton(AF_INET, address.c_str(), &addr.sin_addr);
+    }
+
+    if (::bind(m_server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(m_server_fd);
+        m_server_fd = -1;
         return false;
     }
 
     m_running = true;
-    m_accept_thread = std::thread(&TransportLayer::accept_loop, this);
-    m_send_thread = std::thread(&TransportLayer::send_loop, this);
-    m_heartbeat_thread = std::thread(&TransportLayer::heartbeat_loop, this);
-
-    std::cout << "[TRANSPORT] Listening on port " << m_listen_port << std::endl;
     return true;
 }
 
-void TransportLayer::stop() {
-    if (!m_running) return;
-    m_running = false;
-
-    m_queue_cv.notify_all();
-    if (m_accept_thread.joinable()) m_accept_thread.join();
-    if (m_send_thread.joinable()) m_send_thread.join();
-    if (m_heartbeat_thread.joinable()) m_heartbeat_thread.join();
-
-    {
-        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-        for (auto& [id, conn] : m_peers) {
-            if (conn->socket()) conn->socket()->close();
-        }
-    }
-
-    if (m_listen_fd >= 0) {
-        close(m_listen_fd);
-        m_listen_fd = -1;
-    }
-
-    std::cout << "[TRANSPORT] Stopped" << std::endl;
+bool TransportLayer::listen(int backlog) {
+    if (m_server_fd < 0) return false;
+    return ::listen(m_server_fd, backlog) == 0;
 }
 
-bool TransportLayer::connect_to_peer(const PeerEndpoint& endpoint) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return false;
+int TransportLayer::accept() {
+    if (m_server_fd < 0) return -1;
 
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(endpoint.port);
+    struct sockaddr_in client_addr {};
+    socklen_t client_len = sizeof(client_addr);
 
-    if (inet_pton(AF_INET, endpoint.ip_address.c_str(), &addr.sin_addr) <= 0) {
-        struct hostent* he = gethostbyname(endpoint.ip_address.c_str());
-        if (!he) {
-            close(fd);
-            return false;
-        }
-        memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+    int client_fd = accept4(m_server_fd, (struct sockaddr*)&client_addr, &client_len, SOCK_NONBLOCK);
+    if (client_fd < 0) return -1;
+
+    SSL* ssl = m_tls_ctx.create_server_ssl();
+    if (!ssl) {
+        close(client_fd);
+        return -1;
     }
 
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return false;
-    }
-
-    int opt = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-
-    SSL* ssl = SSL_new(m_tls_context->client_context());
-    SSL_set_fd(ssl, fd);
-
-    auto socket = std::make_unique<TLSSocket>(ssl, fd, false);
-    if (!socket->handshake()) {
-        return false;
-    }
-
-    auto conn = std::make_unique<PeerConnection>(endpoint, std::move(socket));
-    conn->set_state(ConnectionState::CONNECTED);
-
-    {
-        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-        m_peers[endpoint.node_id] = std::move(conn);
-    }
-
-    std::cout << "[TRANSPORT] Connected to " << endpoint.node_id << " at " << endpoint.ip_address << ":" << endpoint.port << std::endl;
-
-    if (m_connection_callback) {
-        m_connection_callback(endpoint.node_id, ConnectionState::CONNECTED);
-    }
-
-    std::thread(&TransportLayer::receive_loop, this, endpoint.node_id,
-        m_peers.at(endpoint.node_id).get()).detach();
-
-    return true;
-}
-
-void TransportLayer::disconnect_peer(const std::string& node_id) {
-    std::unique_lock<std::shared_mutex> lock(m_peers_mutex);
-    auto it = m_peers.find(node_id);
-    if (it != m_peers.end()) {
-        it->second->socket()->close();
-        m_peers.erase(it);
-        lock.unlock();
-
-        if (m_connection_callback) {
-            m_connection_callback(node_id, ConnectionState::DISCONNECTED);
-        }
-    }
-}
-
-bool TransportLayer::send_message(const std::string& target_node_id, const void* data, size_t len) {
-    OutgoingMessage msg;
-    msg.target_node_id = target_node_id;
-    msg.data.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + len);
-    msg.enqueued_at = std::chrono::steady_clock::now();
-
-    std::lock_guard<std::mutex> lock(m_queue_mutex);
-    if (m_outgoing_queue.size() >= MAX_QUEUE_SIZE) {
-        std::cerr << "[TRANSPORT] Message queue full" << std::endl;
-        return false;
-    }
-    m_outgoing_queue.push(std::move(msg));
-    m_queue_cv.notify_one();
-    return true;
-}
-
-bool TransportLayer::broadcast_message(const void* data, size_t len) {
-    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-    for (const auto& [id, _] : m_peers) {
-        send_message(id, data, len);
-    }
-    return true;
-}
-
-void TransportLayer::set_message_callback(MessageCallback callback) {
-    m_message_callback = std::move(callback);
-}
-
-void TransportLayer::set_connection_callback(ConnectionCallback callback) {
-    m_connection_callback = std::move(callback);
-}
-
-void TransportLayer::set_error_callback(ErrorCallback callback) {
-    m_error_callback = std::move(callback);
-}
-
-std::vector<std::string> TransportLayer::get_connected_peers() const {
-    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-    std::vector<std::string> peers;
-    for (const auto& [id, conn] : m_peers) {
-        if (conn->state() == ConnectionState::CONNECTED) {
-            peers.push_back(id);
-        }
-    }
-    return peers;
-}
-
-size_t TransportLayer::peer_count() const {
-    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-    return m_peers.size();
-}
-
-bool TransportLayer::is_connected(const std::string& node_id) const {
-    std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-    auto it = m_peers.find(node_id);
-    return it != m_peers.end() && it->second->state() == ConnectionState::CONNECTED;
-}
-
-void TransportLayer::accept_loop() {
-    while (m_running) {
-        struct sockaddr_in cliaddr{};
-        socklen_t len = sizeof(cliaddr);
-        int client_fd = accept(m_listen_fd, (struct sockaddr*)&cliaddr, &len);
-
-        if (client_fd < 0) {
-            if (errno == EINTR || errno == EAGAIN) continue;
-            break;
-        }
-
-        handle_incoming_connection(client_fd);
-    }
-}
-
-bool TransportLayer::handle_incoming_connection(int client_fd) {
-    int opt = 1;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-
-    SSL* ssl = SSL_new(m_tls_context->server_context());
     SSL_set_fd(ssl, client_fd);
-
-    auto socket = std::make_unique<TLSSocket>(ssl, client_fd, true);
-    if (!socket->handshake()) {
-        return false;
+    if (SSL_accept(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        close(client_fd);
+        return -1;
     }
 
-    std::string peer_id = "unknown";
-    {
-        X509* cert = SSL_get_peer_certificate(ssl->ssl());
-        if (cert) {
-            char* cn = nullptr;
-            X509_NAME_get_text_by_nid(X509_get_subject_name(cert), NID_commonName, nullptr, 0);
-            X509_NAME_get_text_by_nid(X509_get_subject_name(cert), NID_commonName, cn, 256);
-            if (cn) peer_id = cn;
-            X509_free(cert);
-        }
-    }
-
-    PeerEndpoint endpoint;
-    endpoint.node_id = peer_id;
-    endpoint.ip_address = inet_ntoa(cliaddr.sin_addr);
-
-    auto conn = std::make_unique<PeerConnection>(endpoint, std::move(socket));
-    conn->set_state(ConnectionState::CONNECTED);
-
-    {
-        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
-        m_peers[peer_id] = std::move(conn);
-    }
-
-    if (m_connection_callback) {
-        m_connection_callback(peer_id, ConnectionState::CONNECTED);
-    }
-
-    std::thread(&TransportLayer::receive_loop, this, peer_id,
-        m_peers.at(peer_id).get()).detach();
-
-    return true;
+    m_active_ssl[client_fd] = std::unique_ptr<SSL, SSLDeleter>(ssl, SSLDeleter());
+    return client_fd;
 }
 
-void TransportLayer::receive_loop(const std::string& node_id, PeerConnection* conn) {
-    while (m_running && conn->socket() && conn->socket()->is_connected()) {
-        auto data = conn->socket()->read(MAX_MESSAGE_SIZE);
-        if (!data) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
+int TransportLayer::connect(const std::string& host, uint16_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
 
-        conn->increment_received();
-        conn->update_activity();
+    struct sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
 
-        IncomingMessage msg;
-        msg.sender_node_id = node_id;
-        msg.data = std::move(*data);
-        msg.received_at = std::chrono::steady_clock::now();
-
-        if (m_message_callback) {
-            m_message_callback(msg);
-        }
+    if (::connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -1;
     }
 
-    conn->set_state(ConnectionState::DISCONNECTED);
-    if (m_connection_callback) {
-        m_connection_callback(node_id, ConnectionState::DISCONNECTED);
+    SSL* ssl = m_tls_ctx.create_client_ssl();
+    if (!ssl) {
+        close(fd);
+        return -1;
     }
+
+    SSL_set_fd(ssl, fd);
+    if (SSL_connect(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        close(fd);
+        return -1;
+    }
+
+    m_active_ssl[fd] = std::unique_ptr<SSL, SSLDeleter>(ssl, SSLDeleter());
+    return fd;
 }
 
-void TransportLayer::send_loop() {
-    while (m_running) {
-        std::unique_lock<std::mutex> lock(m_queue_mutex);
-        m_queue_cv.wait_for(lock, std::chrono::seconds(1), [this] {
-            return !m_outgoing_queue.empty() || !m_running;
-        });
+ssize_t TransportLayer::send(int fd, const void* buf, size_t len) {
+    auto it = m_active_ssl.find(fd);
+    if (it == m_active_ssl.end()) {
+        return ::send(fd, buf, len, 0);
+    }
+    return SSL_write(it->second.get(), buf, len);
+}
 
-        if (!m_running) break;
-        if (m_outgoing_queue.empty()) continue;
+ssize_t TransportLayer::recv(int fd, void* buf, size_t len) {
+    auto it = m_active_ssl.find(fd);
+    if (it == m_active_ssl.end()) {
+        return ::recv(fd, buf, len, 0);
+    }
+    return SSL_read(it->second.get(), buf, len);
+}
 
-        OutgoingMessage msg = std::move(m_outgoing_queue.front());
-        m_outgoing_queue.pop();
-        lock.unlock();
-
-        std::shared_lock<std::shared_mutex> peer_lock(m_peers_mutex);
-        auto it = m_peers.find(msg.target_node_id);
-        if (it == m_peers.end() || it->second->state() != ConnectionState::CONNECTED) {
-            continue;
-        }
-
-        if (it->second->send_message(msg.data)) {
-            it->second->increment_sent();
-        }
+void TransportLayer::close(int fd) {
+    auto it = m_active_ssl.find(fd);
+    if (it != m_active_ssl.end()) {
+        it->second.reset();
+        m_active_ssl.erase(it);
+    }
+    if (fd >= 0) {
+        ::close(fd);
     }
 }
 
-void TransportLayer::heartbeat_loop() {
-    while (m_running) {
-        std::this_thread::sleep_for(HEARTBEAT_INTERVAL);
+void TransportLayer::shutdown() {
+    m_running = false;
+    for (auto& [fd, ssl] : m_active_ssl) {
+        if (ssl) {
+            SSL_shutdown(ssl.get());
+        }
+        if (fd >= 0) {
+            ::close(fd);
+        }
+    }
+    m_active_ssl.clear();
 
-        auto now = std::chrono::steady_clock::now();
-        std::shared_lock<std::shared_mutex> lock(m_peers_mutex);
+    if (m_server_fd >= 0) {
+        ::close(m_server_fd);
+        m_server_fd = -1;
+    }
+}
 
-        for (auto& [id, conn] : m_peers) {
-            auto elapsed = now - conn->last_activity();
-            if (elapsed > CONNECTION_TIMEOUT) {
-                std::cerr << "[TRANSPORT] Peer " << id << " timed out" << std::endl;
-                conn->socket()->close();
-                if (m_connection_callback) {
-                    m_connection_callback(id, ConnectionState::DISCONNECTED);
+std::optional<ConnectionInfo> TransportLayer::get_connection_info(int fd) const {
+    auto it = m_active_ssl.find(fd);
+    if (it == m_active_ssl.end()) {
+        return std::nullopt;
+    }
+
+    SSL* ssl = it->second.get();
+    X509* cert = SSL_get_peer_certificate(ssl);
+    if (!cert) {
+        return std::nullopt;
+    }
+
+    ConnectionInfo info;
+    info.verified = (SSL_get_verify_result(ssl) == X509_V_OK);
+
+    X509_NAME* subject = X509_get_subject_name(cert);
+    if (subject) {
+        int nid = OBJ_txt2nid("commonName");
+        if (nid != NID_undef) {
+            int idx = X509_NAME_get_index_by_NID(subject, nid, -1);
+            if (idx >= 0) {
+                X509_NAME_ENTRY* entry = X509_NAME_get_entry(subject, idx);
+                if (entry) {
+                    ASN1_STRING* asn1_str = X509_NAME_ENTRY_get_data(entry);
+                    if (asn1_str) {
+                        unsigned char* utf8_str = nullptr;
+                        int len = ASN1_STRING_to_UTF8(&utf8_str, asn1_str);
+                        if (len > 0 && utf8_str) {
+                            info.subject_cn = reinterpret_cast<char*>(utf8_str);
+                            OPENSSL_free(utf8_str);
+                        }
+                    }
                 }
             }
         }
     }
+
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    if (getpeername(fd, (struct sockaddr*)&addr, &len) == 0) {
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+        info.peer_ip = ip;
+        info.peer_port = ntohs(addr.sin_port);
+    }
+
+    X509_free(cert);
+    return info;
 }
 
-PeerDiscovery::PeerDiscovery(TransportLayer* transport) : m_transport(transport), m_running(false) {}
+MTLSAuth::MTLSAuth(const MTLSConfig& config) : m_config(config) {}
+
+MTLSAuth::~MTLSAuth() = default;
+
+bool MTLSAuth::initialize_server_context(SSL_CTX* ctx) {
+    if (!ctx) return false;
+
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
+
+    if (m_config.check_cert_validity) {
+        SSL_CTX_set_verify_depth(ctx, 3);
+    }
+
+    return true;
+}
+
+bool MTLSAuth::initialize_client_context(SSL_CTX* ctx) {
+    if (!ctx) return false;
+    return true;
+}
+
+bool MTLSAuth::verify_client_certificate(SSL* ssl) {
+    if (!ssl) return false;
+
+    X509* cert = SSL_get_peer_certificate(ssl);
+    if (!cert) return false;
+
+    if (SSL_get_verify_result(ssl) != X509_V_OK) {
+        X509_free(cert);
+        return false;
+    }
+
+    std::string cn = get_client_cert_cn(ssl);
+    if (m_config.require_client_cert && !is_client_allowed(cn)) {
+        X509_free(cert);
+        return false;
+    }
+
+    char* serial_hex = nullptr;
+    ASN1_INTEGER* serial = X509_get_serialNumber(cert);
+    if (serial) {
+        BIGNUM* bn = ASN1_INTEGER_to_BN(serial, nullptr);
+        if (bn) {
+            serial_hex = BN_bn2hex(bn);
+            BN_free(bn);
+        }
+    }
+
+    bool revoked = false;
+    if (serial_hex) {
+        revoked = is_cert_revoked(serial_hex);
+        OPENSSL_free(serial_hex);
+    }
+
+    X509_free(cert);
+    return !revoked;
+}
+
+bool MTLSAuth::load_crl(const std::string& crl_path) {
+    if (crl_path.empty()) return true;
+
+    std::ifstream in(crl_path, std::ios::binary);
+    if (!in) return false;
+
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    std::string pem = buffer.str();
+
+    BIO* bio = BIO_new_mem_buf(pem.data(), pem.size());
+    if (!bio) return false;
+
+    X509_CRL* crl = PEM_read_bio_X509_CRL(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+
+    if (!crl) return false;
+
+    X509_CRL_free(crl);
+    return true;
+}
+
+bool MTLSAuth::is_cert_revoked(const std::string& serial) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_revoked_serials.count(serial) > 0;
+}
+
+bool MTLSAuth::is_client_allowed(const std::string& cn) const {
+    if (m_config.allowed_client_cns.empty()) return true;
+    return m_config.allowed_client_cns.count(cn) > 0;
+}
+
+std::string MTLSAuth::get_client_cert_cn(SSL* ssl) const {
+    X509* cert = SSL_get_peer_certificate(ssl);
+    if (!cert) return "";
+
+    X509_NAME* subject = X509_get_subject_name(cert);
+    if (!subject) {
+        X509_free(cert);
+        return "";
+    }
+
+    int nid = OBJ_txt2nid("commonName");
+    if (nid == NID_undef) {
+        X509_free(cert);
+        return "";
+    }
+
+    int idx = X509_NAME_get_index_by_NID(subject, nid, -1);
+    if (idx < 0) {
+        X509_free(cert);
+        return "";
+    }
+
+    X509_NAME_ENTRY* entry = X509_NAME_get_entry(subject, idx);
+    if (!entry) {
+        X509_free(cert);
+        return "";
+    }
+
+    ASN1_STRING* asn1_str = X509_NAME_ENTRY_get_data(entry);
+    if (!asn1_str) {
+        X509_free(cert);
+        return "";
+    }
+
+    unsigned char* utf8 = nullptr;
+    int len = ASN1_STRING_to_UTF8(&utf8, asn1_str);
+    std::string cn;
+    if (len > 0 && utf8) {
+        cn = std::string(reinterpret_cast<char*>(utf8), len);
+        OPENSSL_free(utf8);
+    }
+
+    X509_free(cert);
+    return cn;
+}
+
+std::string MTLSAuth::get_peer_cert_fingerprint(SSL* ssl) const {
+    X509* cert = SSL_get_peer_certificate(ssl);
+    if (!cert) return "";
+
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+
+    X509_digest(cert, EVP_sha256(), md, &md_len);
+    X509_free(cert);
+
+    std::ostringstream oss;
+    for (unsigned int i = 0; i < md_len; ++i) {
+        oss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(md[i]);
+    }
+
+    return oss.str();
+}
+
+PeerDiscovery::PeerDiscovery(const DiscoveryConfig& config, const std::string& node_id, const std::string& public_key)
+    : m_config(config), m_node_id(node_id), m_public_key(public_key), m_beacon_sock(-1) {}
 
 PeerDiscovery::~PeerDiscovery() {
     stop();
 }
 
-void PeerDiscovery::start() {
-    if (m_running) return;
-    m_running = true;
-    m_discovery_thread = std::thread(&PeerDiscovery::discovery_loop, this);
-    std::cout << "[DISCOVERY] Started" << std::endl;
+bool PeerDiscovery::start() {
+    if (m_running.load()) return true;
+
+    m_beacon_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (m_beacon_sock < 0) return false;
+
+    int opt = 1;
+    setsockopt(m_beacon_sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+
+    struct sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(m_config.beacon_port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(m_beacon_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(m_beacon_sock);
+        m_beacon_sock = -1;
+        return false;
+    }
+
+    m_running.store(true);
+    m_beacon_thread = std::thread(&PeerDiscovery::beacon_loop, this);
+
+    return true;
 }
 
 void PeerDiscovery::stop() {
-    m_running = false;
-    if (m_discovery_thread.joinable()) {
-        m_discovery_thread.join();
+    if (!m_running.load()) return;
+
+    m_running.store(false);
+
+    if (m_beacon_thread.joinable()) {
+        m_beacon_thread.join();
+    }
+
+    if (m_beacon_sock >= 0) {
+        close(m_beacon_sock);
+        m_beacon_sock = -1;
     }
 }
 
-void PeerDiscovery::add_seed_node(const std::string& ip, uint16_t port) {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
-    m_seed_nodes.emplace_back(ip, port);
-}
+void PeerDiscovery::beacon_loop() {
+    char buffer[4096];
+    struct sockaddr_in src_addr;
+    socklen_t addr_len = sizeof(src_addr);
 
-void PeerDiscovery::remove_seed_node(const std::string& ip, uint16_t port) {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
-    m_seed_nodes.erase(
-        std::remove_if(m_seed_nodes.begin(), m_seed_nodes.end(),
-            [&](const auto& p) { return p.first == ip && p.second == port; }),
-        m_seed_nodes.end()
-    );
-}
+    while (m_running.load()) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(m_beacon_sock, &fds);
 
-void PeerDiscovery::request_peers_from(const std::string& node_id) {
-    std::string msg = "PEER_QUERY|" + m_transport->get_local_node_id();
-    m_transport->send_message(node_id, msg.data(), msg.size());
-}
+        struct timeval tv = {1, 0};
+        int ret = select(m_beacon_sock + 1, &fds, nullptr, nullptr, &tv);
 
-std::vector<PeerEndpoint> PeerDiscovery::get_discovered_peers() const {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
-    std::vector<PeerEndpoint> peers;
-    for (const auto& [id, endpoint] : m_discovered_peers) {
-        peers.push_back(endpoint);
-    }
-    return peers;
-}
-
-void PeerDiscovery::on_peer_announce(const std::string& node_id, const PeerEndpoint& endpoint) {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
-    m_discovered_peers[node_id] = endpoint;
-
-    if (m_discovery_callback) {
-        m_discovery_callback(endpoint);
-    }
-}
-
-void PeerDiscovery::on_peer_disconnect(const std::string& node_id) {
-    std::lock_guard<std::mutex> lock(m_peers_mutex);
-    m_discovered_peers.erase(node_id);
-}
-
-void PeerDiscovery::set_discovery_callback(std::function<void(const PeerEndpoint&)> callback) {
-    m_discovery_callback = std::move(callback);
-}
-
-void PeerDiscovery::discovery_loop() {
-    while (m_running) {
-        for (const auto& [ip, port] : m_seed_nodes) {
-            PeerEndpoint endpoint;
-            endpoint.node_id = "seed_" + std::to_string(port);
-            endpoint.ip_address = ip;
-            endpoint.port = port;
-            m_transport->connect_to_peer(endpoint);
+        if (ret > 0 && FD_ISSET(m_beacon_sock, &fds)) {
+            ssize_t len = recvfrom(m_beacon_sock, buffer, sizeof(buffer) - 1, 0,
+                                   (struct sockaddr*)&src_addr, &addr_len);
+            if (len > 0) {
+                buffer[len] = '\0';
+                handle_incoming_beacon(buffer, len, src_addr);
+            }
         }
 
-        std::this_thread::sleep_for(ANNOUNCE_INTERVAL);
+        cleanup_stale_peers();
     }
 }
 
-void PeerDiscovery::announce_presence() {}
+bool PeerDiscovery::handle_incoming_beacon(const char* data, size_t len, const sockaddr_in& src) {
+    std::string payload(data, len);
 
-void PeerDiscovery::query_peers() {}
+    size_t sep1 = payload.find('|');
+    size_t sep2 = payload.find('|', sep1 + 1);
+    if (sep1 == std::string::npos || sep2 == std::string::npos) return false;
 
-MessageRouter::MessageRouter(TransportLayer* transport, PeerDiscovery* discovery)
-    : m_transport(transport), m_discovery(discovery) {}
+    std::string node_id = payload.substr(0, sep1);
+    std::string ip = payload.substr(sep1 + 1, sep2 - sep1 - 1);
+    uint16_t port = static_cast<uint16_t>(std::stoi(payload.substr(sep2 + 1)));
 
-MessageRouter::~MessageRouter() = default;
+    if (node_id == m_node_id) return false;
 
-void MessageRouter::route_message(const std::string& sender_id, const std::vector<uint8_t>& payload) {
-    if (payload.size() < 2) return;
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
 
-    uint16_t msg_type = (payload[0] << 8) | payload[1];
-    std::vector<uint8_t> data(payload.begin() + 2, payload.end());
+    auto it = m_peers.find(node_id);
+    if (it == m_peers.end()) {
+        PeerInfo peer;
+        peer.node_id = node_id;
+        peer.ip = inet_ntoa(src.sin_addr);
+        peer.port = port;
+        peer.last_seen = std::chrono::steady_clock::now();
+        peer.is_verified = false;
 
-    std::lock_guard<std::mutex> lock(m_handlers_mutex);
-    auto it = m_handlers.find(msg_type);
-    if (it != m_handlers.end()) {
-        it->second(sender_id, data);
-    }
-}
+        m_peers[node_id] = peer;
 
-bool MessageRouter::send_to(const std::string& target_id, const void* data, size_t len) {
-    std::vector<uint8_t> payload(len + 2);
-    payload[0] = 0x00;
-    payload[1] = 0x01;
-    memcpy(payload.data() + 2, data, len);
-
-    return m_transport->send_message(target_id, payload.data(), payload.size());
-}
-
-bool MessageRouter::send_via(const std::string& via_node_id, const std::string& ultimate_target,
-                              const void* data, size_t len) {
-    return send_to(via_node_id, data, len);
-}
-
-void MessageRouter::register_handler(uint16_t message_type,
-    std::function<void(const std::string&, const std::vector<uint8_t>&)> handler) {
-    std::lock_guard<std::mutex> lock(m_handlers_mutex);
-    m_handlers[message_type] = std::move(handler);
-}
-
-void MessageRouter::unregister_handler(uint16_t message_type) {
-    std::lock_guard<std::mutex> lock(m_handlers_mutex);
-    m_handlers.erase(message_type);
-}
-
-std::optional<std::string> MessageRouter::find_route_to(const std::string& target_id) const {
-    std::lock_guard<std::mutex> lock(m_routing_mutex);
-    auto it = m_routing_table.find(target_id);
-    if (it != m_routing_table.end()) {
-        return it->second.next_hop;
-    }
-    return std::nullopt;
-}
-
-NetworkStack::NetworkStack(const NetworkConfig& config)
-    : m_config(config)
-    , m_transport(std::make_unique<TransportLayer>(config.tls, config.listen_port))
-    , m_discovery(std::make_unique<PeerDiscovery>(m_transport.get()))
-    , m_router(std::make_unique<MessageRouter>(m_transport.get(), m_discovery.get())) {
-}
-
-NetworkStack::~NetworkStack() = default;
-
-bool NetworkStack::start() {
-    if (!m_transport->start()) return false;
-
-    if (m_config.enable_peer_discovery) {
-        for (const auto& [ip, port] : m_config.seed_nodes) {
-            m_discovery->add_seed_node(ip, port);
+        if (m_on_peer_discovered) {
+            m_on_peer_discovered(peer);
         }
-        m_discovery->start();
+    } else {
+        it->second.last_seen = std::chrono::steady_clock::now();
+        it->second.ip = inet_ntoa(src.sin_addr);
+        it->second.port = port;
     }
 
     return true;
 }
 
-void NetworkStack::stop() {
-    m_discovery->stop();
-    m_transport->stop();
+void PeerDiscovery::cleanup_stale_peers() {
+    auto now = std::chrono::steady_clock::now();
+    std::vector<std::string> lost_peers;
+
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
+
+    for (auto it = m_peers.begin(); it != m_peers.end(); ) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - it->second.last_seen).count();
+
+        if (elapsed > m_config.peer_timeout_ms) {
+            lost_peers.push_back(it->first);
+            it = m_peers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (const auto& node_id : lost_peers) {
+        if (m_on_peer_lost) {
+            m_on_peer_lost(node_id);
+        }
+    }
 }
 
-bool NetworkStack::connect(const std::string& ip, uint16_t port, const std::string& expected_node_id) {
-    PeerEndpoint endpoint;
-    endpoint.node_id = expected_node_id;
-    endpoint.ip_address = ip;
-    endpoint.port = port;
-    return m_transport->connect_to_peer(endpoint);
+std::vector<PeerInfo> PeerDiscovery::get_active_peers() {
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
+
+    std::vector<PeerInfo> peers;
+    for (const auto& [id, peer] : m_peers) {
+        peers.push_back(peer);
+    }
+    return peers;
 }
 
-void NetworkStack::disconnect(const std::string& node_id) {
-    m_transport->disconnect_peer(node_id);
+std::optional<PeerInfo> PeerDiscovery::get_peer(const std::string& node_id) {
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
+
+    auto it = m_peers.find(node_id);
+    if (it != m_peers.end()) {
+        return it->second;
+    }
+    return std::nullopt;
 }
 
-bool NetworkStack::send(uint16_t message_type, const std::string& target_node_id, const void* data, size_t len) {
-    std::vector<uint8_t> payload(len + 2);
-    payload[0] = (message_type >> 8) & 0xFF;
-    payload[1] = message_type & 0xFF;
-    memcpy(payload.data() + 2, data, len);
+bool PeerDiscovery::announce_peer(const PeerInfo& peer) {
+    if (m_beacon_sock < 0) return false;
 
-    return m_transport->send_message(target_node_id, payload.data(), payload.size());
+    std::string payload = m_node_id + "|" + peer.ip + "|" + std::to_string(peer.port);
+
+    struct sockaddr_in dest {};
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(m_config.beacon_port);
+    dest.sin_addr.s_addr = INADDR_BROADCAST;
+
+    ssize_t sent = sendto(m_beacon_sock, payload.c_str(), payload.size(), 0,
+                          (struct sockaddr*)&dest, sizeof(dest));
+
+    return sent == static_cast<ssize_t>(payload.size());
 }
 
-bool NetworkStack::broadcast(uint16_t message_type, const void* data, size_t len) {
-    std::vector<uint8_t> payload(len + 2);
-    payload[0] = (message_type >> 8) & 0xFF;
-    payload[1] = message_type & 0xFF;
-    memcpy(payload.data() + 2, data, len);
+bool PeerDiscovery::verify_peer(const std::string& node_id, const std::string& public_key_pem) {
+    std::lock_guard<std::mutex> lock(m_peers_mutex);
 
-    return m_transport->broadcast_message(payload.data(), payload.size());
+    auto it = m_peers.find(node_id);
+    if (it != m_peers.end()) {
+        it->second.public_key_pem = public_key_pem;
+        it->second.is_verified = true;
+        return true;
+    }
+    return false;
 }
 
-void NetworkStack::register_message_handler(uint16_t message_type,
-    std::function<void(const std::string&, const std::vector<uint8_t>&)> handler) {
-    m_router->register_handler(message_type, std::move(handler));
+void PeerDiscovery::set_on_peer_discovered(std::function<void(const PeerInfo&)> cb) {
+    m_on_peer_discovered = cb;
 }
 
-size_t NetworkStack::connected_peers() const {
-    return m_transport->peer_count();
-}
-
-bool NetworkStack::is_connected(const std::string& node_id) const {
-    return m_transport->is_connected(node_id);
-}
-
-std::vector<std::string> NetworkStack::get_connected_peer_ids() const {
-    return m_transport->get_connected_peers();
+void PeerDiscovery::set_on_peer_lost(std::function<void(const std::string&)> cb) {
+    m_on_peer_lost = cb;
 }
 
 } // namespace neuro_mesh::net
