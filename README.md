@@ -84,17 +84,33 @@ Three binaries land in `bin/`: `neuro_agent` (the node), `inject_event` (threat 
 
 ```bash
 # Single node
-./bin/neuro_agent NODE_1
+./bin/neuro_agent ALPHA
 
-# 5-node mesh in a tmux grid
+# 5-node mesh (background processes)
+for node in ALPHA BRAVO CHARLIE DELTA ECHO; do
+    ./bin/neuro_agent $node &>/tmp/neuro_$node.log &
+done
+
+# Or via tmux grid
 ./mesh_dashboard.sh
 
-# Python-managed mesh
-python3 orchestration/mesh_manager.py
-
-# See the dashboard
-open http://localhost:8080
+# Serve the dashboard (static HTML + WebSocket)
+python3 -m http.server 8888 -d dashboard/ &
+# Dashboard: http://localhost:8888
+# Connects to ws://localhost:9000–9040 for live telemetry
 ```
+
+Each node binds a unique WebSocket port for its TelemetryBridge:
+
+| Node | WebSocket | IPC Socket |
+|------|-----------|------------|
+| ALPHA | 9000 | `/tmp/neuro_mesh_ALPHA.sock` |
+| BRAVO | 9010 | `/tmp/neuro_mesh_BRAVO.sock` |
+| CHARLIE | 9020 | `/tmp/neuro_mesh_CHARLIE.sock` |
+| DELTA | 9030 | `/tmp/neuro_mesh_DELTA.sock` |
+| ECHO | 9040 | `/tmp/neuro_mesh_ECHO.sock` |
+
+A stateless WS proxy (`orchestration/ws_proxy.py`) on port 9001 tries all 5 backends with failover — useful when the browser can't reach host-network ports directly (Docker/WSL2). On native Linux the dashboard connects straight to node IPs.
 
 ### Docker
 
@@ -154,12 +170,17 @@ Every push to `main` triggers [GitHub Actions](.github/workflows/build.yml):
 ### Targeted injection — make one node accuse another
 
 ```bash
+# Native (IPC socket)
+./bin/inject_event --node CHARLIE --target DELTA \
+  --event entropy_spike --verdict CRITICAL --tag mytest
+
+# Docker
 docker exec neuro_charlie /app/inject_event \
   --node CHARLIE --target ALPHA \
   --event entropy_spike --verdict CRITICAL
 ```
 
-The injector sends `CMD:INJECT` over Charlie's Unix socket. Charlie fakes CRITICAL telemetry for 10s and kicks off a PBFT round against ALPHA. Watch the dashboard — you'll see the consensus stages fire, votes flood the mesh, and ALPHA get isolated.
+The injector sends `CMD:INJECT` over the node's Unix socket. The node kicks off a PBFT round against the target. Watch the dashboard — consensus stages fire, votes flood the mesh, and the target gets isolated (on a real Linux host with CAP_NET_ADMIN).
 
 ### Full-mesh chaos — trigger eBPF entropy on every node
 
@@ -199,7 +220,9 @@ PolicyEnforcer probes available backends at startup and picks the best:
 | 2 | nftables | Dedicated `neuro_mesh` chain |
 | 3 | iptables | `fork()` + `execv()` — no shell, no injection |
 
-MitigationEngine extends this with process termination (SIGSTOP → SIGKILL, 46-syscall seccomp sandbox) and network isolation in detached threads.
+MitigationEngine extends this with process termination (SIGSTOP → SIGKILL) and network isolation in detached threads.
+
+The TelemetryBridge runs as a sandboxed child process: `fork()` → `prctl(PR_SET_NO_NEW_PRIVS)` → `chroot("/var/empty")` → uid/gid drop to `nobody` → 47-syscall seccomp-BPF default-kill filter. On WSL2 or unprivileged containers, sandbox stages degrade gracefully (warn-and-continue) so the WebSocket bridge stays operational.
 
 **Safe list** — `add_safe_node()` prevents self-isolation. Loopback (`127.0.0.0/8`) is always refused.
 
@@ -226,15 +249,17 @@ MitigationEngine extends this with process termination (SIGSTOP → SIGKILL, 46-
 neuro_mesh/
 ├── kernel/            eBPF probes (sensor.bpf.c, neuro_bpf.c XDP filter)
 ├── cell/              NodeAgent + InferenceEngine (entropy scoring)
-├── consensus/         MeshNode (UDP P2P gossip) + PBFT state machine
-├── crypto/            Ed25519 keygen, sign, verify (OpenSSL EVP)
+├── consensus/         MeshNode (UDP P2P gossip) + PeerManager + PBFT state machine
+├── crypto/            Ed25519 keygen, sign, verify (OpenSSL EVP) + KeyManager (PKCS#11)
 ├── enforcer/          PolicyEnforcer (3-tier block) + MitigationEngine (process kill)
-├── telemetry/         AuditLogger (UDP JSON) + TelemetryBridge (WebSocket)
+├── telemetry/         AuditLogger (UDP JSON) + TelemetryBridge (sandboxed WS child, seccomp)
+├── net/               TLS transport layer (tofu certificate pinning)
 ├── common/            StateJournal, UniqueFD, Result<T,E>, Base64
+├── attacks/           AttackSimulator (synthetic threat patterns)
 ├── orchestration/     Python tools — ws_proxy, mesh_manager, anomaly_classifier
 ├── tools/             inject_event, test_crypto, traffic_generator, benchmark_mesh
 ├── dashboard/         Vanilla JS dashboard (Canvas + WebSocket, zero dependencies)
-├── main.cpp           Entry point — wires PolicyEnforcer + MeshNode + InferenceEngine
+├── main.cpp           Entry point — wires all subsystems
 └── docker-compose.yml 5-node decentralized mesh
 ```
 
@@ -253,6 +278,24 @@ Neuro-Mesh maps to the **D3FEND** countermeasure framework and the **NIST Cybers
 | **RECOVER** | `CMD:RESET` releases all blocks, StateJournal provides full forensic audit trail |
 
 Full D3FEND technique mapping (D3-PT, D3-NTF, D3-IPI, D3-SEA, D3-PM, D3-IRA) with file:line references is in [CLAUDE.md](CLAUDE.md).
+
+---
+
+## Platform Notes
+
+### WSL2 / Unprivileged Containers
+
+Running without full root capabilities (WSL2, restricted Docker containers) has known limitations:
+
+| Feature | Native Linux | WSL2 |
+|---------|-------------|------|
+| eBPF sensors | Full kernel probes | Falls back to `/proc/net/dev` entropy |
+| iptables enforcement | Works | Requires `sudo` / `CAP_NET_ADMIN` |
+| TelemetryBridge sandbox | Full chroot + seccomp + uid drop | Sandbox degrades gracefully (warn-and-continue) |
+| PBFT consensus | Full | Full — no root needed for voting |
+| Dashboard + telemetry | Full | Full |
+
+PBFT consensus, telemetry gossip, and the dashboard work identically on WSL2. Only kernel-level enforcement and eBPF probing are degraded.
 
 ---
 
