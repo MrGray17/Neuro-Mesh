@@ -34,6 +34,10 @@ spec:
           capabilities:
             drop:
             - ALL
+            add:
+            - BPF
+            - NET_ADMIN
+            - PERFMON
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
         env:

@@ -8,6 +8,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+declare -a TEST_PIDS=()
+
 PASS=0
 FAIL=0
 
@@ -27,7 +29,9 @@ info() {
 
 cleanup() {
     info "Cleaning up..."
-    pkill -f "neuro_agent" 2>/dev/null || true
+    for pid in "${TEST_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
     rm -f /tmp/neuro_mesh_*.sock /tmp/test_*.log
     sleep 1
 }
@@ -53,6 +57,7 @@ cleanup
 info "Test 1: Single node boot"
 ./bin/neuro_agent TEST_NODE > /tmp/test_node1.log 2>&1 &
 PID1=$!
+TEST_PIDS+=($PID1)
 sleep 3
 
 if kill -0 $PID1 2>/dev/null; then

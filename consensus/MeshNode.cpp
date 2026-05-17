@@ -180,7 +180,6 @@ void MeshNode::stop() {
     if (m_tcp_thread.joinable())       m_tcp_thread.join();
     if (m_tls_thread.joinable())       m_tls_thread.join();
     if (m_liveness_thread.joinable())  m_liveness_thread.join();
-    // Signal TLS worker to exit and join
     m_tls_queue_cv.notify_one();
     if (m_tls_worker_thread.joinable()) m_tls_worker_thread.join();
     if (m_broadcast_fd >= 0) { ::close(m_broadcast_fd); m_broadcast_fd = -1; }
@@ -274,8 +273,7 @@ void MeshNode::discovery_beacon_loop() {
 // =============================================================================
 
 void MeshNode::send_udp_broadcast(const std::string& payload) {
-    static thread_local std::random_device rd;
-    static thread_local std::mt19937 gen(rd());
+    static thread_local std::mt19937 gen{std::random_device{}()};
     std::uniform_int_distribution<> dis(10, 80);
     std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
 
@@ -284,15 +282,17 @@ void MeshNode::send_udp_broadcast(const std::string& payload) {
     struct sockaddr_in broadcast_addr{};
     broadcast_addr.sin_family = AF_INET;
     broadcast_addr.sin_port = htons(m_udp_port);
-    broadcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+    inet_pton(AF_INET, "255.255.255.255", &broadcast_addr.sin_addr);
 
-    sendto(m_broadcast_fd, payload.c_str(), payload.length(), 0,
+    ssize_t sent = sendto(m_broadcast_fd, payload.c_str(), payload.length(), 0,
            (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    if (sent < 0) {
+        std::cerr << "[NETWORK] UDP broadcast sendto failed: " << strerror(errno) << std::endl;
+    }
 }
 
 void MeshNode::send_udp_discovery(const std::string& payload) {
-    static thread_local std::random_device rd;
-    static thread_local std::mt19937 gen(rd());
+    static thread_local std::mt19937 gen{std::random_device{}()};
     std::uniform_int_distribution<> dis(5, 50);
     std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
 
@@ -300,10 +300,13 @@ void MeshNode::send_udp_discovery(const std::string& payload) {
         struct sockaddr_in broadcast_addr{};
         broadcast_addr.sin_family = AF_INET;
         broadcast_addr.sin_port = htons(DISCOVERY_UDP_PORT);
-        broadcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+        inet_pton(AF_INET, "255.255.255.255", &broadcast_addr.sin_addr);
 
-        sendto(m_discovery_fd, payload.c_str(), payload.length(), 0,
+        ssize_t sent = sendto(m_discovery_fd, payload.c_str(), payload.length(), 0,
                (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+        if (sent < 0) {
+            std::cerr << "[NETWORK] Discovery sendto (v4) failed: " << strerror(errno) << std::endl;
+        }
     }
 
     // IPv6 multicast discovery (ff02::1 = all-nodes link-local)
@@ -314,14 +317,16 @@ void MeshNode::send_udp_discovery(const std::string& payload) {
         struct ipv6_mreq mreq{};
         inet_pton(AF_INET6, "ff02::1", &mreq.ipv6mr_multiaddr);
         mcast_addr.sin6_addr = mreq.ipv6mr_multiaddr;
-        sendto(m_discovery6_fd, payload.c_str(), payload.length(), 0,
+        ssize_t sent = sendto(m_discovery6_fd, payload.c_str(), payload.length(), 0,
                (struct sockaddr*)&mcast_addr, sizeof(mcast_addr));
+        if (sent < 0) {
+            std::cerr << "[NETWORK] Discovery sendto (v6) failed: " << strerror(errno) << std::endl;
+        }
     }
 }
 
 void MeshNode::send_udp_unicast(const std::string& ip, int port, const std::string& payload) {
-    static thread_local std::random_device rd;
-    static thread_local std::mt19937 gen(rd());
+    static thread_local std::mt19937 gen{std::random_device{}()};
     std::uniform_int_distribution<> dis(15, 100);
     std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
 
@@ -335,8 +340,11 @@ void MeshNode::send_udp_unicast(const std::string& ip, int port, const std::stri
     if (inet_pton(AF_INET, ip.c_str(), &inaddr) != 1) return;
     addr.sin_addr = inaddr;
 
-    sendto(m_broadcast_fd, payload.c_str(), payload.length(), 0,
+    ssize_t sent = sendto(m_broadcast_fd, payload.c_str(), payload.length(), 0,
            (struct sockaddr*)&addr, sizeof(addr));
+    if (sent < 0) {
+        std::cerr << "[NETWORK] Unicast sendto failed: " << strerror(errno) << std::endl;
+    }
 }
 
 // =============================================================================
@@ -404,7 +412,9 @@ void MeshNode::p2p_listener_loop() {
 
         if (n > 0) {
             buffer[n] = '\0';
-            process_message(std::string(buffer), inet_ntoa(cliaddr.sin_addr));
+            char addr_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &cliaddr.sin_addr, addr_str, sizeof(addr_str));
+            process_message(std::string(buffer), addr_str);
         }
 
         // Poll discovery socket — drain ALL queued datagrams, not just one.
@@ -412,6 +422,7 @@ void MeshNode::p2p_listener_loop() {
         // single recvfrom() per iteration creates unbounded backlog.
         if (disc_sock >= 0) {
             for (;;) {
+                if (!m_running) break;
                 struct sockaddr_in daddr{};
                 socklen_t dlen = sizeof(daddr);
                 int dn = recvfrom(disc_sock, buffer, sizeof(buffer) - 1,
@@ -420,9 +431,13 @@ void MeshNode::p2p_listener_loop() {
                 buffer[dn] = '\0';
                 std::string dmsg(buffer);
                 if (dmsg.rfind("TELEMETRY|", 0) == 0) {
-                    process_telemetry_gossip(dmsg, inet_ntoa(daddr.sin_addr));
+                    char addr_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &daddr.sin_addr, addr_str, sizeof(addr_str));
+                    process_telemetry_gossip(dmsg, addr_str);
                 } else {
-                    process_discovery_beacon(dmsg, inet_ntoa(daddr.sin_addr));
+                    char addr_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &daddr.sin_addr, addr_str, sizeof(addr_str));
+                    process_discovery_beacon(dmsg, addr_str);
                 }
             }
         }
@@ -652,6 +667,7 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     if (tokens[0] != "DISCOVERY") return;
 
     bool has_tls_fingerprint = tokens.size() >= 7;
+    bool has_signature = tokens.size() >= 8;
     if (tokens.size() < 6) return;
 
     const std::string& peer_id   = tokens[1];
@@ -663,7 +679,7 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     if (!try_parse_long(tokens[has_tls_fingerprint ? 4 : 3], timestamp)) return;
     const std::string& b64_pubkey = tokens[has_tls_fingerprint ? 5 : 4];
     const std::string& tls_fingerprint = has_tls_fingerprint ? tokens[6] : "";
-    const std::string& b64_sig    = tokens[has_tls_fingerprint ? 7 : 5];
+    const std::string& b64_sig    = has_signature ? tokens[7] : "";
 
     if (peer_id == m_node_id) return;
 
@@ -919,7 +935,7 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
             announce_identity();
         }
     }
-    else if (cmd == "VOTE" && tokens.size() >= 8) {
+    else if (cmd == "VOTE" && tokens.size() >= 9) {
         const std::string& stage_str    = tokens[1];
         const std::string& sender_id    = tokens[2];
         const std::string& seq_str      = tokens[3];
@@ -1346,7 +1362,24 @@ void MeshNode::notify_webhook(const std::string& url, const std::string& target_
     // Build JSON payload
     std::string escaped_evidence = evidence_json;
     for (size_t i = 0; i < escaped_evidence.size(); ++i) {
-        if (escaped_evidence[i] == '"') { escaped_evidence.insert(i++, 1, '\\'); }
+        char c = escaped_evidence[i];
+        if (c == '"' || c == '\\') {
+            escaped_evidence.insert(i++, 1, '\\');
+        } else if (c == '\n') {
+            escaped_evidence.replace(i, 1, "\\n");
+            ++i;
+        } else if (c == '\t') {
+            escaped_evidence.replace(i, 1, "\\t");
+            ++i;
+        } else if (c == '\r') {
+            escaped_evidence.replace(i, 1, "\\r");
+            ++i;
+        } else if (static_cast<unsigned char>(c) < 0x20) {
+            char buf[8];
+            int n = std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+            escaped_evidence.replace(i, 1, std::string(buf, n));
+            i += n - 1;
+        }
     }
 
     std::ostringstream payload;
@@ -1358,25 +1391,47 @@ void MeshNode::notify_webhook(const std::string& url, const std::string& target_
             << "\"evidence\":" << escaped_evidence
             << "}";
 
-    // fork+exec curl — same pattern as PolicyEnforcer iptables (no shell injection)
+    // Validate URL: reject spaces, control chars, and non-http(s) schemes
+    if (url.empty() || url.find(' ') != std::string::npos ||
+        (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0)) {
+        std::cerr << "[ALERT] Webhook URL rejected (invalid): " << url.substr(0, 64) << std::endl;
+        return;
+    }
+
+    // fork+exec curl with absolute path to prevent PATH hijacking
     std::string payload_str = payload.str();
     pid_t pid = fork();
     if (pid == 0) {
+        // Close all inherited FDs >= 3 to prevent FD leak to child
+        int max_fd = sysconf(_SC_OPEN_MAX);
+        for (int fd = 3; fd < max_fd; ++fd) {
+            if (fd != STDERR_FILENO) ::close(fd);
+        }
         const char* args[] = {
-            "curl", "-s", "-X", "POST",
+            "/usr/bin/curl", "-s", "-X", "POST",
             "-H", "Content-Type: application/json",
             "-d", payload_str.c_str(),
             url.c_str(),
             nullptr
         };
-        execvp("curl", const_cast<char* const*>(args));
+        execv(args[0], const_cast<char* const*>(args));
         _exit(1);
     } else if (pid > 0) {
+        struct sigaction sa, old_sa;
+        sa.sa_handler = SIG_IGN;
+        sa.sa_flags = 0;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGCHLD, &sa, &old_sa);
+
         int status;
-        waitpid(pid, &status, 0);
-        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        int ret = waitpid(pid, &status, WNOHANG);
+        if (ret == 0) {
+            std::cout << "[ALERT] Webhook POST initiated asynchronously (pid=" << pid << ")" << std::endl;
+        } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
             std::cerr << "[ALERT] Webhook POST failed (exit=" << WEXITSTATUS(status) << ")" << std::endl;
         }
+
+        sigaction(SIGCHLD, &old_sa, nullptr);
     }
 }
 

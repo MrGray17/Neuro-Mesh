@@ -50,18 +50,18 @@ def tcp_scan(target: str, port_range: list[int], timeout: float = 0.3) -> None:
     """Aggressive TCP connect() scan cycling through the port range."""
     while not STOP.is_set():
         port = random.choice(port_range)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             sock.connect((target, port))
-            # Send a benign probe payload
             try:
                 sock.sendall(b"PROBE\x00")
             except OSError:
                 pass
-            sock.close()
         except (OSError, TimeoutError):
             pass
+        finally:
+            sock.close()
 
 
 def banner(target: str, duration: int, threads: int) -> None:

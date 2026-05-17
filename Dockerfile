@@ -13,9 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libelf-dev \
     libssl-dev \
     libseccomp-dev \
-    linux-headers-generic \
     linux-tools-common \
-    linux-tools-generic \
     git \
     zlib1g-dev \
     python3 \

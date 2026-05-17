@@ -31,9 +31,9 @@ static constexpr int AES_KEY_BYTES = 32;
 static constexpr int GCM_IV_BYTES = 12;
 static constexpr int GCM_TAG_BYTES = 16;
 
-static bool derive_aes_key(const std::string& passphrase, unsigned char* key, int key_bytes) {
+static bool derive_aes_key(const std::string& passphrase, const unsigned char* salt, int salt_len, unsigned char* key, int key_bytes) {
     return PKCS5_PBKDF2_HMAC_SHA1(passphrase.data(), static_cast<int>(passphrase.size()),
-                                   (const unsigned char*)"NeuroMeshSalt", 13, 100000,
+                                   salt, salt_len, 100000,
                                    key_bytes, key) == 1;
 }
 
@@ -108,18 +108,38 @@ static std::string aes_gcm_decrypt(const std::string& ciphertext, const unsigned
 
 std::string KeyManager::encrypt_blob(const std::string& plaintext) {
     if (m_passphrase.empty()) return plaintext;
+
+    unsigned char salt[16];
+    if (RAND_bytes(salt, sizeof(salt)) != 1) return {};
+
     unsigned char key[AES_KEY_BYTES];
-    if (!derive_aes_key(m_passphrase, key, AES_KEY_BYTES)) return {};
-    std::string result = aes_gcm_encrypt(plaintext, key);
+    if (!derive_aes_key(m_passphrase, salt, sizeof(salt), key, AES_KEY_BYTES)) return {};
+
+    std::string encrypted = aes_gcm_encrypt(plaintext, key);
     OPENSSL_cleanse(key, AES_KEY_BYTES);
+
+    if (encrypted.empty()) return {};
+
+    std::string result;
+    result.append(reinterpret_cast<const char*>(salt), sizeof(salt));
+    result += encrypted;
     return result;
 }
 
 std::string KeyManager::decrypt_blob(const std::string& ciphertext) {
     if (m_passphrase.empty()) return ciphertext;
+
+    constexpr size_t salt_len = 16;
+    if (ciphertext.size() < salt_len) return {};
+
+    const unsigned char* salt = reinterpret_cast<const unsigned char*>(ciphertext.data());
+    const unsigned char* encrypted_data = salt + salt_len;
+    size_t encrypted_len = ciphertext.size() - salt_len;
+
     unsigned char key[AES_KEY_BYTES];
-    if (!derive_aes_key(m_passphrase, key, AES_KEY_BYTES)) return {};
-    std::string result = aes_gcm_decrypt(ciphertext, key);
+    if (!derive_aes_key(m_passphrase, salt, salt_len, key, AES_KEY_BYTES)) return {};
+
+    std::string result = aes_gcm_decrypt(std::string(reinterpret_cast<const char*>(encrypted_data), encrypted_len), key);
     OPENSSL_cleanse(key, AES_KEY_BYTES);
     return result;
 }
@@ -243,9 +263,19 @@ X509* create_x509_cert(const CertificateConfig& config, EVP_PKEY* pub_key, EVP_P
     }
 
     if (ca_key) {
-        X509_sign(cert, ca_key, EVP_sha256());
+        int key_type = EVP_PKEY_base_id(ca_key);
+        if (key_type == EVP_PKEY_ED25519 || key_type == EVP_PKEY_ED448) {
+            X509_sign(cert, ca_key, nullptr);
+        } else {
+            X509_sign(cert, ca_key, EVP_sha256());
+        }
     } else {
-        X509_sign(cert, pub_key, EVP_sha256());
+        int key_type = EVP_PKEY_base_id(pub_key);
+        if (key_type == EVP_PKEY_ED25519 || key_type == EVP_PKEY_ED448) {
+            X509_sign(cert, pub_key, nullptr);
+        } else {
+            X509_sign(cert, pub_key, EVP_sha256());
+        }
     }
 
     X509_NAME_free(name);
@@ -537,7 +567,10 @@ bool KeyManager::store_certificate(const Certificate& cert) {
     BIO* bio = BIO_new(BIO_s_mem());
     if (!bio) return false;
 
-    PEM_write_bio_X509(bio, cert.certificate.get());
+    if (PEM_write_bio_X509(bio, cert.certificate.get()) <= 0) {
+        BIO_free(bio);
+        return false;
+    }
     char* data = nullptr;
     long len = BIO_get_mem_data(bio, &data);
     std::string blob(data, len);

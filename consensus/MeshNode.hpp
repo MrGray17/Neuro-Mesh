@@ -86,8 +86,8 @@ private:
     // === Identity ===
     std::string m_node_id;
     int m_udp_port;
-    int m_tcp_port;
-    int m_tls_port;
+    std::atomic<int> m_tcp_port;
+    std::atomic<int> m_tls_port;
     int m_broadcast_fd = -1;
     int m_discovery_fd = -1;
     int m_discovery6_fd = -1;

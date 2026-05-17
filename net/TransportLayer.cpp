@@ -1,6 +1,8 @@
 #include "net/TransportLayer.hpp"
 #include <cstring>
+#include <iostream>
 #include <unistd.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
@@ -42,13 +44,15 @@ TLSContext::TLSContext(const TLSConfig& config)
     if (m_config.enable_tls13) {
         SSL_CTX_set_min_proto_version(m_server_ctx.get(), TLS1_3_VERSION);
         SSL_CTX_set_min_proto_version(m_client_ctx.get(), TLS1_3_VERSION);
+        SSL_CTX_set_ciphersuites(m_server_ctx.get(), "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256");
+        SSL_CTX_set_ciphersuites(m_client_ctx.get(), "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256");
     }
 
     SSL_CTX_set_cipher_list(m_server_ctx.get(), m_config.ciphers.c_str());
     SSL_CTX_set_cipher_list(m_client_ctx.get(), m_config.ciphers.c_str());
 
-    SSL_CTX_set_security_level(m_server_ctx.get(), 2);
-    SSL_CTX_set_security_level(m_client_ctx.get(), 2);
+    SSL_CTX_set_security_level(m_server_ctx.get(), 1);
+    SSL_CTX_set_security_level(m_client_ctx.get(), 1);
 }
 
 TLSContext::~TLSContext() = default;
@@ -138,6 +142,11 @@ bool TransportLayer::bind(const std::string& address, uint16_t port) {
         return false;
     }
 
+    // Non-blocking server socket so accept4() returns -1/EAGAIN immediately
+    // when no connections are pending (required for clean shutdown).
+    int fl = fcntl(m_server_fd, F_GETFL, 0);
+    fcntl(m_server_fd, F_SETFL, fl | O_NONBLOCK);
+
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -179,13 +188,35 @@ int TransportLayer::accept() {
     }
 
     SSL_set_fd(ssl, client_fd);
-    if (SSL_accept(ssl) <= 0) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(ssl);
-        close(client_fd);
-        return -1;
+    SSL_set_accept_state(ssl);
+
+    struct pollfd pfd;
+    pfd.fd = client_fd;
+    pfd.events = POLLIN;
+
+    int ret;
+    while ((ret = SSL_do_handshake(ssl)) != 1) {
+        int err = SSL_get_error(ssl, ret);
+        if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            close(client_fd);
+            return -1;
+        }
+        pfd.events = (err == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN;
+        int pr = poll(&pfd, 1, 3000);
+        if (pr <= 0) {
+            if (pr == 0) {
+                std::cerr << "[TLS] Handshake timeout from "
+                          << inet_ntoa(client_addr.sin_addr) << std::endl;
+            }
+            SSL_free(ssl);
+            close(client_fd);
+            return -1;
+        }
     }
 
+    std::lock_guard<std::mutex> lock(m_ssl_mtx);
     m_active_ssl[client_fd] = std::unique_ptr<SSL, SSLDeleter>(ssl, SSLDeleter());
     return client_fd;
 }
@@ -197,6 +228,7 @@ int TransportLayer::connect(const std::string& host, uint16_t port) {
     struct timeval tv{};
     tv.tv_sec = 5;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
@@ -222,31 +254,70 @@ int TransportLayer::connect(const std::string& host, uint16_t port) {
         return -1;
     }
 
+    std::lock_guard<std::mutex> lock(m_ssl_mtx);
     m_active_ssl[fd] = std::unique_ptr<SSL, SSLDeleter>(ssl, SSLDeleter());
     return fd;
 }
 
 ssize_t TransportLayer::send(int fd, const void* buf, size_t len) {
-    auto it = m_active_ssl.find(fd);
-    if (it == m_active_ssl.end()) {
-        return ::send(fd, buf, len, 0);
+    std::unique_ptr<SSL, SSLDeleter> ssl_ref;
+    {
+        std::lock_guard<std::mutex> lock(m_ssl_mtx);
+        auto it = m_active_ssl.find(fd);
+        if (it != m_active_ssl.end()) {
+            ssl_ref.reset(it->second.release());
+        }
     }
-    return SSL_write(it->second.get(), buf, len);
+    if (!ssl_ref) {
+        size_t total = 0;
+        while (total < len) {
+            ssize_t n = ::send(fd, static_cast<const char*>(buf) + total, len - total, MSG_NOSIGNAL);
+            if (n <= 0) return total > 0 ? static_cast<ssize_t>(total) : -1;
+            total += n;
+        }
+        return static_cast<ssize_t>(total);
+    }
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = SSL_write(ssl_ref.get(), static_cast<const char*>(buf) + total, len - total);
+        if (n <= 0) return total > 0 ? static_cast<ssize_t>(total) : -1;
+        total += n;
+    }
+    std::lock_guard<std::mutex> lock(m_ssl_mtx);
+    m_active_ssl[fd] = std::move(ssl_ref);
+    return static_cast<ssize_t>(total);
 }
 
 ssize_t TransportLayer::recv(int fd, void* buf, size_t len) {
-    auto it = m_active_ssl.find(fd);
-    if (it == m_active_ssl.end()) {
+    std::unique_ptr<SSL, SSLDeleter> ssl_ref;
+    {
+        std::lock_guard<std::mutex> lock(m_ssl_mtx);
+        auto it = m_active_ssl.find(fd);
+        if (it != m_active_ssl.end()) {
+            ssl_ref.reset(it->second.release());
+        }
+    }
+    if (!ssl_ref) {
         return ::recv(fd, buf, len, 0);
     }
-    return SSL_read(it->second.get(), buf, len);
+    ssize_t n = SSL_read(ssl_ref.get(), buf, len);
+    std::lock_guard<std::mutex> lock(m_ssl_mtx);
+    m_active_ssl[fd] = std::move(ssl_ref);
+    return n;
 }
 
 void TransportLayer::close(int fd) {
-    auto it = m_active_ssl.find(fd);
-    if (it != m_active_ssl.end()) {
-        it->second.reset();
-        m_active_ssl.erase(it);
+    std::unique_ptr<SSL, SSLDeleter> ssl;
+    {
+        std::lock_guard<std::mutex> lock(m_ssl_mtx);
+        auto it = m_active_ssl.find(fd);
+        if (it != m_active_ssl.end()) {
+            ssl = std::move(it->second);
+            m_active_ssl.erase(it);
+        }
+    }
+    if (ssl) {
+        SSL_shutdown(ssl.get());
     }
     if (fd >= 0) {
         ::close(fd);
@@ -255,15 +326,15 @@ void TransportLayer::close(int fd) {
 
 void TransportLayer::shutdown() {
     m_running = false;
-    for (auto& [fd, ssl] : m_active_ssl) {
-        if (ssl) {
-            SSL_shutdown(ssl.get());
-        }
+    std::lock_guard<std::mutex> lock(m_ssl_mtx);
+    for (auto it = m_active_ssl.begin(); it != m_active_ssl.end(); ) {
+        SSL_shutdown(it->second.get());
+        int fd = it->first;
+        it = m_active_ssl.erase(it);
         if (fd >= 0) {
             ::close(fd);
         }
     }
-    m_active_ssl.clear();
 
     if (m_server_fd >= 0) {
         ::close(m_server_fd);
@@ -272,6 +343,7 @@ void TransportLayer::shutdown() {
 }
 
 std::optional<ConnectionInfo> TransportLayer::get_connection_info(int fd) const {
+    std::lock_guard<std::mutex> lock(m_ssl_mtx);
     auto it = m_active_ssl.find(fd);
     if (it == m_active_ssl.end()) {
         return std::nullopt;
@@ -502,8 +574,9 @@ PeerDiscovery::~PeerDiscovery() {
 bool PeerDiscovery::start() {
     if (m_running.load()) return true;
 
-    m_beacon_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (m_beacon_sock < 0) return false;
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return false;
+    m_beacon_sock = sock;
 
     int opt = 1;
     setsockopt(m_beacon_sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));

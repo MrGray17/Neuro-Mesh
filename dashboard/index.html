@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ws: wss:;">
 <title>Neuro-Mesh Monitor</title>
 <style>
 /* ==========================================================================
@@ -1088,8 +1089,8 @@ function getMitreTags(data) {
    ========================================================================== */
 function triggerAlert(detail) {
   dom.alertDetail.textContent = detail || 'Mitigation Active';
-  dom.alert.classList.add('active');
-  setTimeout(() => dom.alert.classList.remove('active'), 500);
+  dom.alertOverlay.classList.add('active');
+  setTimeout(() => dom.alertOverlay.classList.remove('active'), 500);
 }
 
 /* ==========================================================================

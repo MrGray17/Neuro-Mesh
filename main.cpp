@@ -111,8 +111,9 @@ static float onnx_to_entropy(float score) {
     return std::min(1.0f, t);
 }
 
-void signal_handler(int signum) {
-    std::cout << "\n[SYS] Interrupt signal (" << signum << ") received. Initiating shutdown..." << std::endl;
+void signal_handler(int /*signum*/) {
+    const char msg[] = "\n[SYS] Interrupt signal received. Initiating shutdown...\n";
+    ::write(STDERR_FILENO, msg, sizeof(msg) - 1);
     global_running = false;
 }
 
@@ -217,10 +218,7 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
         // Map current threat posture to MITRE ATT&CK technique IDs
         std::string mitre_tags;
         if (strcmp(threat, "CRITICAL") == 0 || strcmp(threat, "ALERT") == 0) {
-            // High-entropy lateral movement or C2-like traffic detected
             mitre_tags = "\"mitre_attack\":[\"T1021\",\"T1571\",\"T1059\"]";
-        } else if (entropy > 0.6f) {
-            mitre_tags = "\"mitre_attack\":[\"T1571\"]";
         } else {
             mitre_tags = "\"mitre_attack\":[]";
         }

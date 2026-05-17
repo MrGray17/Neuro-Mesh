@@ -510,6 +510,10 @@ static void pipe_read_callback(struct us_internal_callback_t *cb) {
     }
 
     struct us_poll_t *pipe_poll = us_create_poll(loop, 0, calc_size);
+    if (!pipe_poll) {
+        std::cerr << "[TELEMETRY_BRIDGE] FATAL: us_create_poll returned nullptr" << std::endl;
+        _exit(1);
+    }
 
     us_poll_init(pipe_poll, pipe_read_fd, POLL_TYPE_CALLBACK);
 

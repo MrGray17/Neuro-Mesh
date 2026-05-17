@@ -2,7 +2,6 @@
 #include <string>
 #include <string_view>
 #include <cstdint>
-#include <cstdint>
 
 namespace neuro_mesh {
 

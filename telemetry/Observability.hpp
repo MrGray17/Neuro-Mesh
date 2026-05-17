@@ -135,16 +135,16 @@ public:
     std::string get_trace_id(Span* span) const { return span->trace_id; }
     std::string get_span_id(Span* span) const { return span->span_id; }
 
-    void set_exporter(std::function<void(const std::vector<Span>&)> exporter);
+    void set_exporter(std::function<void(const std::vector<Span*>&)> exporter);
 
     static std::string generate_id();
 
 private:
     std::string m_service_name;
-    std::vector<Span> m_active_spans;
-    std::vector<Span> m_completed_spans;
+    std::vector<std::unique_ptr<Span>> m_active_spans;
+    std::vector<std::unique_ptr<Span>> m_completed_spans;
     mutable std::mutex m_mutex;
-    std::function<void(const std::vector<Span>&)> m_exporter;
+    std::function<void(const std::vector<Span*>&)> m_exporter;
 };
 
 class DetailedAuditLogger {

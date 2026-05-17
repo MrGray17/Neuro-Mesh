@@ -120,6 +120,8 @@ spec:
           capabilities:
             drop:
             {{- toYaml .Values.securityCapabilities.capabilities.drop | nindent 12 }}
+            add:
+            {{- toYaml .Values.securityCapabilities.capabilities.add | default (list "BPF" "NET_ADMIN" "PERFMON") | nindent 12 }}
           allowPrivilegeEscalation: {{ .Values.securityCapabilities.allowPrivilegeEscalation }}
           readOnlyRootFilesystem: {{ .Values.securityCapabilities.readOnlyRootFilesystem }}
         env:
@@ -138,7 +140,7 @@ spec:
         - name: NEURO_UDP_CONSENSUS
           value: "{{ .Values.service.consensusPort }}"
         - name: NEURO_KEY_MANAGER
-          value: {{ .Values.security.keyManagement.provider }}
+          value: "{{ .Values.security.keyManagement.provider }}"
         ports:
         - name: ws
           containerPort: {{ .Values.service.wsPort }}

@@ -45,10 +45,22 @@ spec:
     - protocol: UDP
       port: 9999
   - to:
-    - namespaceSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
     ports:
+    - protocol: UDP
+      port: 53
     - protocol: TCP
       port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+    ports:
     - protocol: TCP
       port: 443
 ---

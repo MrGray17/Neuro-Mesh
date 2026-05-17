@@ -1,38 +1,70 @@
-# Archived experiments
-_archive_old/
-
-# Build artifacts (rebuilt in container)
-bin/
-obj/
-*.skel.h
-
-# Node modules and Python venv
-node_modules/
-venv/
-dashboard-react/node_modules/
-orchestration/__pycache__/
-
-# Git metadata
-.git/
+# Git
+.git
 .gitignore
 
-# Logs, env, trained models
-*.log
+# Build artifacts
+bin/
+obj/
+*.o
+*.skel.h
+
+# Keystore and secrets
+keystore_*/
+*.pem
+*.key
+*.p12
+*.jks
 .env
-trained_models/
+.env.*
 api.json
 api_tmp.json
-classifier_commands.txt
+ia_commands.txt
 
-# IDE / OS
+# Logs
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
+Thumbs.db
 
-# Large archives and dumps
-*.tar.gz
-neuro_mesh_full_*.txt
-neuro_mesh_pure_code*.txt
+# Documentation
+README.md
+CLAUDE.md
+AGENTS.md
 
-# Old dashboard (replaced by dashboard)
-dashboard-react/
-web/
+# Tests
+tests/
+*_test.sh
+final_stress_test.sh
+
+# Orchestration (not needed in container build)
+orchestration/
+
+# Dashboard (served separately)
+dashboard/
+
+# K8s
+k8s/
+
+# CI
+.github/
+
+# Node modules
+node_modules/
+package.json
+package-lock.json
+
+# Pre-commit
+.pre-commit-config.yaml

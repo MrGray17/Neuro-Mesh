@@ -35,8 +35,11 @@ def listen_p2p_telemetry() -> None:
         try:
             data, _ = sock.recvfrom(65536)
             msg = data.decode("utf-8")
-            if msg.startswith("TELEMETRY:"):
-                node_data = json.loads(msg[10:])
+            if msg.startswith("TELEMETRY|"):
+                tokens = msg.split("|", 2)
+                if len(tokens) < 3:
+                    continue
+                node_data = json.loads(tokens[2])
                 nid = node_data.get("ID")
                 if nid:
                     with p2p_lock:

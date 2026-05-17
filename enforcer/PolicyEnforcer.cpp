@@ -1,6 +1,7 @@
 #include "enforcer/PolicyEnforcer.hpp"
 #include <iostream>
 #include <cstring>
+#include <csignal>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -135,6 +136,11 @@ std::pair<bool, std::string> PolicyEnforcer::fork_exec_capture(const char* path,
         close(STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
+        // Close all inherited FDs >= 3 to prevent FD leak to child
+        int max_fd = sysconf(_SC_OPEN_MAX);
+        for (int fd = 3; fd < max_fd; ++fd) {
+            if (fd != STDERR_FILENO) ::close(fd);
+        }
         execv(path, const_cast<char* const*>(argv));
         _exit(1);
     }

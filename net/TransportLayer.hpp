@@ -182,7 +182,8 @@ private:
     TLSContext m_tls_ctx;
     int m_server_fd = -1;
     std::unordered_map<int, std::unique_ptr<SSL, SSLDeleter>> m_active_ssl;
-    bool m_running = false;
+    mutable std::mutex m_ssl_mtx;
+    std::atomic<bool> m_running{false};
 
     bool initialize_openssl();
 };

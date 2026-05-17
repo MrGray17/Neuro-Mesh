@@ -17,8 +17,8 @@ namespace neuro_mesh::telemetry {
 namespace {
 
 std::string generate_uuid() {
-    static std::random_device rd;
-    static std::mt19937_64 gen(rd());
+    thread_local std::random_device rd;
+    thread_local std::mt19937_64 gen(rd());
     std::uniform_int_distribution<uint64_t> dist;
     std::ostringstream oss;
     oss << std::hex << std::setfill('0') << std::setw(16) << dist(gen)
@@ -46,7 +46,15 @@ std::string escape_json(const std::string& s) {
             case '\n': out += "\\n"; break;
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
-            default:   out += c;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    int n = std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out.append(buf, n);
+                } else {
+                    out += c;
+                }
+                break;
         }
     }
     return out;
@@ -275,9 +283,20 @@ void PrometheusExporter::register_collector(MetricsCollector* collector) {
     m_collectors.push_back(collector);
 }
 
-void PrometheusExporter::unregister_collector(const std::string&) {
+void PrometheusExporter::unregister_collector(const std::string& token) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_collectors.clear();
+    m_collectors.erase(
+        std::remove_if(m_collectors.begin(), m_collectors.end(),
+            [&token](MetricsCollector* c) {
+                if (!token.empty() && c) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%p", (void*)c);
+                    return token == buf;
+                }
+                return false;
+            }),
+        m_collectors.end()
+    );
 }
 
 std::string PrometheusExporter::get_metrics() const {
@@ -290,6 +309,10 @@ std::string PrometheusExporter::get_metrics() const {
 }
 
 void PrometheusExporter::metrics_loop() {
+    std::chrono::steady_clock::time_point last_request;
+    int requests_this_second = 0;
+    constexpr int kMaxRequestsPerSecond = 100;
+
     while (m_running.load()) {
         fd_set fds;
         FD_ZERO(&fds);
@@ -301,12 +324,25 @@ void PrometheusExporter::metrics_loop() {
         if (ret > 0 && FD_ISSET(m_fd, &fds)) {
             int client = accept(m_fd, nullptr, nullptr);
             if (client >= 0) {
-                std::string metrics = get_metrics();
-                std::string response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n";
-                response += "Content-Length: " + std::to_string(metrics.size()) + "\r\n";
-                response += "Connection: close\r\n\r\n";
-                response += metrics;
-                write(client, response.data(), response.size());
+                auto now = std::chrono::steady_clock::now();
+                if (last_request.time_since_epoch().count() == 0 ||
+                    std::chrono::duration_cast<std::chrono::seconds>(now - last_request).count() >= 1) {
+                    requests_this_second = 0;
+                    last_request = now;
+                }
+
+                if (requests_this_second >= kMaxRequestsPerSecond) {
+                    const char* resp = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n";
+                    write(client, resp, strlen(resp));
+                } else {
+                    ++requests_this_second;
+                    std::string metrics = get_metrics();
+                    std::string response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n";
+                    response += "Content-Length: " + std::to_string(metrics.size()) + "\r\n";
+                    response += "Connection: close\r\n\r\n";
+                    response += metrics;
+                    write(client, response.data(), response.size());
+                }
                 close(client);
             }
         }
@@ -321,46 +357,47 @@ DistributedTracer::~DistributedTracer() = default;
 DistributedTracer::Span* DistributedTracer::start_span(const std::string& operation_name) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    Span span;
-    span.trace_id = generate_uuid();
-    span.span_id = generate_uuid();
-    span.operation_name = operation_name;
-    span.parent_span_id = "";
-    span.start_time = std::chrono::steady_clock::now();
+    auto span = std::make_unique<Span>();
+    span->trace_id = generate_uuid();
+    span->span_id = generate_uuid();
+    span->operation_name = operation_name;
+    span->parent_span_id = "";
+    span->start_time = std::chrono::steady_clock::now();
 
     m_active_spans.push_back(std::move(span));
-    return &m_active_spans.back();
+    return m_active_spans.back().get();
 }
 
 DistributedTracer::Span* DistributedTracer::start_span(const std::string& operation_name, Span* parent) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    Span span;
-    span.trace_id = parent ? parent->trace_id : generate_uuid();
-    span.span_id = generate_uuid();
-    span.parent_span_id = parent ? parent->span_id : "";
-    span.operation_name = operation_name;
-    span.start_time = std::chrono::steady_clock::now();
-    span.parent = parent;
+    auto span = std::make_unique<Span>();
+    span->trace_id = parent ? parent->trace_id : generate_uuid();
+    span->span_id = generate_uuid();
+    span->parent_span_id = parent ? parent->span_id : "";
+    span->operation_name = operation_name;
+    span->start_time = std::chrono::steady_clock::now();
+    span->parent = parent;
 
     m_active_spans.push_back(std::move(span));
-    Span* s = &m_active_spans.back();
-
-    return s;
+    return m_active_spans.back().get();
 }
 
 void DistributedTracer::end_span(Span* span) {
     if (!span) return;
-    span->end_time = std::chrono::steady_clock::now();
 
     std::lock_guard<std::mutex> lock(m_mutex);
     for (auto it = m_active_spans.begin(); it != m_active_spans.end(); ++it) {
-        if (&(*it) == span) {
+        if (it->get() == span) {
+            it->get()->end_time = std::chrono::steady_clock::now();
             m_completed_spans.push_back(std::move(*it));
             m_active_spans.erase(it);
 
             if (m_exporter && m_completed_spans.size() >= 10) {
-                m_exporter(m_completed_spans);
+                std::vector<Span*> raw_spans;
+                raw_spans.reserve(m_completed_spans.size());
+                for (const auto& s : m_completed_spans) raw_spans.push_back(s.get());
+                m_exporter(raw_spans);
                 m_completed_spans.clear();
             }
             return;
@@ -369,14 +406,18 @@ void DistributedTracer::end_span(Span* span) {
 }
 
 void DistributedTracer::set_tag(Span* span, const std::string& key, const std::string& value) {
-    if (span) span->tags[key] = value;
+    if (!span) return;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    span->tags[key] = value;
 }
 
 void DistributedTracer::add_log(Span* span, const std::string& key, const std::string& value) {
-    if (span) span->logs[key] = value;
+    if (!span) return;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    span->logs[key] = value;
 }
 
-void DistributedTracer::set_exporter(std::function<void(const std::vector<Span>&)> exporter) {
+void DistributedTracer::set_exporter(std::function<void(const std::vector<Span*>&)> exporter) {
     m_exporter = std::move(exporter);
 }
 

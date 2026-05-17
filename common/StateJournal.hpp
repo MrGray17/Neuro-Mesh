@@ -52,11 +52,31 @@ public:
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
+        // Escape evidence to prevent JSON injection
+        std::string escaped_evidence = evidence_json;
+        for (size_t i = 0; i < escaped_evidence.size(); ++i) {
+            char c = escaped_evidence[i];
+            if (c == '"' || c == '\\') {
+                escaped_evidence.insert(i++, 1, '\\');
+            } else if (c == '\n') {
+                escaped_evidence.replace(i, 1, "\\n");
+                ++i;
+            } else if (c == '\t') {
+                escaped_evidence.replace(i, 1, "\\t");
+                ++i;
+            } else if (static_cast<unsigned char>(c) < 0x20) {
+                char buf[8];
+                int n = std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                escaped_evidence.replace(i, 1, std::string(buf, n));
+                i += n - 1;
+            }
+        }
+
         std::string line = "{\"seq\":" + std::to_string(seq)
                          + ",\"ts\":" + std::to_string(now_ms)
                          + ",\"stage\":\"" + stage + "\""
                          + ",\"target\":\"" + target_id + "\""
-                         + ",\"evidence\":" + evidence_json
+                         + ",\"evidence\":\"" + escaped_evidence + "\""
                          + ",\"hash\":\"" + hash + "\"}\n";
 
         std::lock_guard<std::mutex> lock(m_write_mtx);
@@ -79,10 +99,12 @@ public:
                 ::lseek(fd, 0, SEEK_SET);
                 std::string backup = m_path + ".1";
                 ::rename(m_path.c_str(), backup.c_str());
-                // Close old fd, reopen new file
+                // Close old fd, reopen new file — lock is still held via mutex
                 ::close(fd);
                 fd = ::open(m_path.c_str(), O_RDWR | O_CREAT | O_APPEND, 0644);
                 if (fd < 0) return seq;
+                // Re-acquire lock on new fd
+                fcntl(fd, F_SETLK, &fl);
             }
             fl.l_type = F_UNLCK;
             fcntl(fd, F_SETLK, &fl);

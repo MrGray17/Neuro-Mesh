@@ -236,7 +236,7 @@ public:
     }
 
     int peer_count() const { return m_total_nodes; }
-    int quorum_size() const { return (2 * std::max(1, m_total_nodes) + 2) / 3; }
+    int quorum_size() const { return 2 * ((std::max(1, m_total_nodes) - 1) / 3) + 1; }
 
     void set_peer_count(int n) {
         std::lock_guard<std::mutex> lock(m_mtx);
@@ -352,7 +352,10 @@ private:
     }
 
     bool verify_quorum_intersection(const std::string& evidence, const std::string& expected_hash) const {
-        (void)expected_hash;
+        if (!expected_hash.empty() && evidence != expected_hash) {
+            return false;
+        }
+
         auto prep_it = m_vote_registry.find(evidence);
         if (prep_it == m_vote_registry.end()) return true;
 

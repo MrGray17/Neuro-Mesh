@@ -91,7 +91,7 @@ public:
     std::vector<KernelEventData> poll_events();
 
     // True if eBPF probes are loaded and operational
-    bool is_operational() const noexcept { return m_skel != nullptr && m_ringbuf != nullptr; }
+    bool is_operational() const noexcept { return m_loaded && m_skel != nullptr && m_ringbuf != nullptr; }
 
 private:
     explicit NodeAgent(std::string id);

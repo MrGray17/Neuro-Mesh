@@ -46,8 +46,11 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         try:
             msg = data.decode("utf-8")
-            if msg.startswith("TELEMETRY:"):
-                payload = json.loads(msg[10:])
+            if msg.startswith("TELEMETRY|"):
+                tokens = msg.split("|", 2)
+                if len(tokens) < 3:
+                    return
+                payload = json.loads(tokens[2])
                 nid = payload.get("ID")
                 if nid:
                     asyncio.create_task(self.update_node(nid, payload))

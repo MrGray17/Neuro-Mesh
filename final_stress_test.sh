@@ -23,14 +23,16 @@ pass() { echo -e "${GREEN}[PASS]${NC} $1"; }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 
+declare -a STRESS_PIDS=()
+
 cleanup() {
     say "Cleaning up..."
-    pkill -f "neuro_agent" 2>/dev/null || true
+    for pid in "${STRESS_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
     pkill -f "inject_event" 2>/dev/null || true
     rm -f /tmp/neuro_mesh_*.sock "${LOG_DIR}"/*.log
-    # Clean iptables rule we might have added
     iptables -D INPUT -s "${TARGET_IP}" -j DROP 2>/dev/null || true
-    # Clean nftables rule
     nft delete rule ip neuro_mesh INPUT ip saddr "${TARGET_IP}" counter drop 2>/dev/null || true
     echo ""
 }
@@ -58,11 +60,11 @@ mkdir -p "${LOG_DIR}"
 # ---------------------------------------------------------------------------
 say "Phase 1: Launching 3-node P2P mesh..."
 "${BIN_DIR}/neuro_agent" NODE_1 > "${LOG_DIR}/node1.log" 2>&1 &
-PID1=$!
+PID1=$!; STRESS_PIDS+=($PID1)
 "${BIN_DIR}/neuro_agent" NODE_2 > "${LOG_DIR}/node2.log" 2>&1 &
-PID2=$!
+PID2=$!; STRESS_PIDS+=($PID2)
 "${BIN_DIR}/neuro_agent" NODE_3 > "${LOG_DIR}/node3.log" 2>&1 &
-PID3=$!
+PID3=$!; STRESS_PIDS+=($PID3)
 sleep 4
 
 # Verify all nodes booted
@@ -105,7 +107,7 @@ pass "Pre-enforcement state clean — no existing rule for ${TARGET_IP}"
 # ---------------------------------------------------------------------------
 say "Phase 3: Launching event injection targeting ${TARGET_IP}..."
 "${BIN_DIR}/inject_event" "${TARGET_IP}" "${EVIDENCE}" > "${LOG_DIR}/simulator.log" 2>&1 &
-SIM_PID=$!
+SIM_PID=$!; STRESS_PIDS+=($SIM_PID)
 
 # Wait for consensus to propagate
 sleep 12

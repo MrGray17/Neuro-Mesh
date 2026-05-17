@@ -1,11 +1,23 @@
 // ============================================================
 // NEURO-MESH : KERNEL eBPF SENSOR & XDP DROPPER (HARDENED)
 // ============================================================
+// NOTE: This eBPF sensor uses x86_64 tracepoint argument offsets.
+// For ARM/other architectures, rebuild on target or use BTF-based
+// tracepoint access (requires kernel with BTF info).
+// ============================================================
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
+
+#ifndef AF_INET
+#define AF_INET 2
+#endif
+
+#ifndef AF_INET6
+#define AF_INET6 10
+#endif
 
 struct KernelEvent {
     __u32 pid;
@@ -68,7 +80,7 @@ int trace_execve(void *ctx) {
         return 0;
     }
 
-    // Read binary path (null-terminated string — _str is correct here)
+    // Read binary path (x86_64 tracepoint offset 16)
     const char *pathname = NULL;
     bpf_core_read(&pathname, sizeof(pathname), (void *)((char *)ctx + 16));
     if (pathname) {
@@ -79,10 +91,7 @@ int trace_execve(void *ctx) {
     return 0;
 }
 
-// Network sendto tracepoint args layout (x86_64):
-//   offset 16: fd (u32)      | offset 24: buff (u64 ptr)
-//   offset 32: len (u64)     | offset 40: flags (u32)
-//   offset 48: addr (u64 ptr) | offset 56: addr_len (u32)
+// Network sendto tracepoint args (x86_64)
 SEC("tracepoint/syscalls/sys_enter_sendto")
 int trace_sendto(void *ctx) {
     struct KernelEvent *event;
@@ -93,14 +102,14 @@ int trace_sendto(void *ctx) {
     __builtin_memset(event, 0, sizeof(struct KernelEvent));
 
     event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->event_type = 2;  // network send
+    event->event_type = 2;
 
     if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
         bpf_ringbuf_discard(event, 0);
         return 0;
     }
 
-    // Read binary data buffer — use bpf_probe_read_user (not _str) for binary data
+    // Read buffer: x86_64 offset 24=buff, offset 32=len
     __u64 len = 0;
     bpf_core_read(&len, sizeof(len), (void *)((char *)ctx + 32));
     if (len > 0) {
@@ -116,9 +125,7 @@ int trace_sendto(void *ctx) {
     return 0;
 }
 
-// Network sendmsg tracepoint args layout (x86_64):
-//   offset 16: fd (u32)   | offset 24: msg (u64 ptr → struct msghdr)
-//   offset 32: flags (u32)
+// Network sendmsg tracepoint (x86_64)
 SEC("tracepoint/syscalls/sys_enter_sendmsg")
 int trace_sendmsg(void *ctx) {
     struct KernelEvent *event;
@@ -169,9 +176,7 @@ int trace_sendmsg(void *ctx) {
     return 0;
 }
 
-// Network sendmmsg tracepoint args layout (x86_64):
-//   offset 16: fd (u32)   | offset 24: msgvec (u64 ptr → struct mmsghdr)
-//   offset 32: vlen (u32) | offset 40: flags (u32)
+// Network sendmmsg tracepoint (x86_64)
 SEC("tracepoint/syscalls/sys_enter_sendmmsg")
 int trace_sendmmsg(void *ctx) {
     struct KernelEvent *event;
@@ -222,9 +227,6 @@ int trace_sendmmsg(void *ctx) {
     return 0;
 }
 
-// Network connect tracepoint args layout (x86_64):
-//   offset 16: fd (u32)   | offset 24: addr (u64 ptr)
-//   offset 32: addr_len (u32)
 SEC("tracepoint/syscalls/sys_enter_connect")
 int trace_connect(void *ctx) {
     struct KernelEvent *event;
@@ -235,14 +237,13 @@ int trace_connect(void *ctx) {
     __builtin_memset(event, 0, sizeof(struct KernelEvent));
 
     event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->event_type = 3;  // network connect
+    event->event_type = 3;
 
     if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
         bpf_ringbuf_discard(event, 0);
         return 0;
     }
 
-    // Read binary sockaddr — use bpf_probe_read_user (not _str)
     __u32 addr_len = 0;
     bpf_core_read(&addr_len, sizeof(addr_len), (void *)((char *)ctx + 32));
     const char *addr_ptr = NULL;

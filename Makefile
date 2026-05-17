@@ -243,23 +243,25 @@ tools: $(SIM_TARGET) $(CRYPTO_TEST_TARGET) $(PBFT_TEST_TARGET) \
 # ============================================================
 test: tools
 	@echo "=== Running Unit Tests ==="
-	@echo "--- test_crypto ---"
-	@$(CRYPTO_TEST_TARGET) && echo "PASS" || echo "FAIL"
-	@echo "--- test_pbft ---"
-	@$(PBFT_TEST_TARGET) && echo "PASS" || echo "FAIL"
-	@echo "--- test_enforcer ---"
-	@$(ENFORCER_TEST_TARGET) && echo "PASS" || echo "FAIL"
-	@echo "--- test_meshnode ---"
-	@$(MESHNODE_TEST_TARGET) && echo "PASS" || echo "FAIL"
-	@echo "--- test_inference ---"
-	@$(INFERENCE_TEST_TARGET) && echo "PASS" || echo "FAIL"
-	@echo "--- test_common (gtest) ---"
-	@$(BIN_DIR)/test_common && echo "PASS" || echo "FAIL"
-	@echo "--- test_mitigation (gtest) ---"
-	@$(BIN_DIR)/test_mitigation && echo "PASS" || echo "FAIL"
-	@echo "--- test_auditlogger (gtest) ---"
-	@$(BIN_DIR)/test_auditlogger && echo "PASS" || echo "FAIL"
-	@echo "=== All Tests Complete ==="
+	@FAILED=0; \
+	echo "--- test_crypto ---"; \
+	$(CRYPTO_TEST_TARGET) || FAILED=1; \
+	echo "--- test_pbft ---"; \
+	$(PBFT_TEST_TARGET) || FAILED=1; \
+	echo "--- test_enforcer ---"; \
+	$(ENFORCER_TEST_TARGET) || FAILED=1; \
+	echo "--- test_meshnode ---"; \
+	$(MESHNODE_TEST_TARGET) || FAILED=1; \
+	echo "--- test_inference ---"; \
+	$(INFERENCE_TEST_TARGET) || FAILED=1; \
+	echo "--- test_common (gtest) ---"; \
+	$(BIN_DIR)/test_common || FAILED=1; \
+	echo "--- test_mitigation (gtest) ---"; \
+	$(BIN_DIR)/test_mitigation || FAILED=1; \
+	echo "--- test_auditlogger (gtest) ---"; \
+	$(BIN_DIR)/test_auditlogger || FAILED=1; \
+	echo "=== All Tests Complete ==="; \
+	if [ $$FAILED -ne 0 ]; then echo "FAIL: Some tests failed"; exit 1; fi
 
 # Fuzz targets — build all and optionally run (make fuzz RUN_FUZZ=1 for execution)
 FUZZ_TARGETS := $(BIN_DIR)/fuzz_beacon_parser $(BIN_DIR)/fuzz_json_parser $(BIN_DIR)/fuzz_pbft_message
