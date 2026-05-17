@@ -182,6 +182,7 @@ public:
 private:
     std::string m_keystore_path;
     std::optional<KeyPair> m_cached_key;
+    mutable std::mutex m_cached_key_mtx;
     std::unique_ptr<HSMAccess> m_hsm;
     HSMBackend m_hsm_backend = HSMBackend::None;
     std::string m_ca_key_id;

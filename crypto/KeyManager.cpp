@@ -147,11 +147,15 @@ std::string KeyManager::decrypt_blob(const std::string& ciphertext) {
 namespace {
 
 std::string random_hex(size_t bytes) {
-    std::random_device rd;
-    std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFF);
+    std::vector<unsigned char> buf(bytes);
+    if (RAND_bytes(buf.data(), static_cast<int>(bytes)) != 1) {
+        std::random_device rd;
+        for (size_t i = 0; i < bytes; ++i) buf[i] = static_cast<unsigned char>(rd());
+    }
     std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
     for (size_t i = 0; i < bytes; ++i) {
-        oss << std::hex << std::setfill('0') << std::setw(2) << (dist(rd) & 0xFF);
+        oss << std::setw(2) << static_cast<int>(buf[i]);
     }
     return oss.str();
 }
@@ -409,7 +413,10 @@ bool KeyManager::store_key(const KeyPair& key_pair) {
 
     ::chmod(key_file.c_str(), 0600);
 
-    m_cached_key.emplace(key_pair);
+    {
+        std::lock_guard<std::mutex> lock(m_cached_key_mtx);
+        m_cached_key.emplace(key_pair);
+    }
     return true;
 }
 
@@ -435,7 +442,17 @@ std::unique_ptr<KeyPair> KeyManager::load_key(const std::string& key_id) {
     UniquePKEY priv_key(key);
     UniquePKEY pub_key(EVP_PKEY_dup(key));
 
-    return std::make_unique<KeyPair>(key_id, std::move(pub_key), std::move(priv_key), KeyType::Ed25519);
+    KeyType actual_type = KeyType::Ed25519;
+    int key_type_id = EVP_PKEY_base_id(key);
+    if (key_type_id == EVP_PKEY_RSA) {
+        actual_type = KeyType::RSA;
+    } else if (key_type_id == EVP_PKEY_ED25519) {
+        actual_type = KeyType::Ed25519;
+    } else if (key_type_id == EVP_PKEY_ED448) {
+        actual_type = KeyType::Ed448;
+    }
+
+    return std::make_unique<KeyPair>(key_id, std::move(pub_key), std::move(priv_key), actual_type);
 }
 
 bool KeyManager::delete_key(const std::string& key_id) {
@@ -444,8 +461,11 @@ bool KeyManager::delete_key(const std::string& key_id) {
 }
 
 std::string KeyManager::get_public_key_pem(const std::string& key_id) {
-    if (m_cached_key && m_cached_key->key_id == key_id) {
-        return IdentityCore::get_pem_from_pubkey(m_cached_key->public_key.get());
+    {
+        std::lock_guard<std::mutex> lock(m_cached_key_mtx);
+        if (m_cached_key && m_cached_key->key_id == key_id) {
+            return IdentityCore::get_pem_from_pubkey(m_cached_key->public_key.get());
+        }
     }
     auto key = load_key(key_id);
     if (!key) return "";
@@ -453,15 +473,18 @@ std::string KeyManager::get_public_key_pem(const std::string& key_id) {
 }
 
 std::string KeyManager::get_private_key_pem(const std::string& key_id) {
-    if (m_cached_key && m_cached_key->key_id == key_id) {
-        BIO* bio = BIO_new(BIO_s_mem());
-        if (!bio) return "";
-        PEM_write_bio_PrivateKey(bio, m_cached_key->private_key.get(), nullptr, nullptr, 0, nullptr, nullptr);
-        char* data = nullptr;
-        long len = BIO_get_mem_data(bio, &data);
-        std::string pem(data, len);
-        BIO_free(bio);
-        return pem;
+    {
+        std::lock_guard<std::mutex> lock(m_cached_key_mtx);
+        if (m_cached_key && m_cached_key->key_id == key_id) {
+            BIO* bio = BIO_new(BIO_s_mem());
+            if (!bio) return "";
+            PEM_write_bio_PrivateKey(bio, m_cached_key->private_key.get(), nullptr, nullptr, 0, nullptr, nullptr);
+            char* data = nullptr;
+            long len = BIO_get_mem_data(bio, &data);
+            std::string pem(data, len);
+            BIO_free(bio);
+            return pem;
+        }
     }
     auto key = load_key(key_id);
     if (!key) return "";
@@ -476,7 +499,10 @@ std::string KeyManager::get_private_key_pem(const std::string& key_id) {
 }
 
 bool KeyManager::has_key(const std::string& key_id) const {
-    if (m_cached_key && m_cached_key->key_id == key_id) return true;
+    {
+        std::lock_guard<std::mutex> lock(m_cached_key_mtx);
+        if (m_cached_key && m_cached_key->key_id == key_id) return true;
+    }
     if (m_keystore_path.empty()) return false;
     return path_exists(m_keystore_path + "/" + key_id + ".pem");
 }

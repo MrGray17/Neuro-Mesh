@@ -12,6 +12,7 @@
 #include <openssl/rsa.h>
 #include <openssl/ec.h>
 #include <openssl/err.h>
+#include "crypto/KeyManager.hpp"
 
 namespace neuro_mesh::crypto {
 

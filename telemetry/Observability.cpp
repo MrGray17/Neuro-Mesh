@@ -60,10 +60,27 @@ std::string escape_json(const std::string& s) {
     return out;
 }
 
+std::string sanitize_label_value(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value) {
+        if (c == '\r' || c == '\n') {
+            out += ' ';
+        } else if (c == '"') {
+            out += "\\\"";
+        } else if (c == '\\') {
+            out += "\\\\";
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
 std::string sorted_labels_key(const std::map<std::string, std::string>& labels) {
     std::ostringstream oss;
     for (const auto& [k, v] : labels) {
-        oss << k << "=" << v << ",";
+        oss << sanitize_label_value(k) << "=" << sanitize_label_value(v) << ",";
     }
     if (oss.tellp() > 0) {
         std::string s = oss.str();
@@ -354,7 +371,7 @@ DistributedTracer::DistributedTracer(const std::string& service_name)
 
 DistributedTracer::~DistributedTracer() = default;
 
-DistributedTracer::Span* DistributedTracer::start_span(const std::string& operation_name) {
+size_t DistributedTracer::start_span(const std::string& operation_name) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto span = std::make_unique<Span>();
@@ -364,12 +381,20 @@ DistributedTracer::Span* DistributedTracer::start_span(const std::string& operat
     span->parent_span_id = "";
     span->start_time = std::chrono::steady_clock::now();
 
+    size_t idx = m_active_spans.size();
     m_active_spans.push_back(std::move(span));
-    return m_active_spans.back().get();
+    return idx;
 }
 
-DistributedTracer::Span* DistributedTracer::start_span(const std::string& operation_name, Span* parent) {
+size_t DistributedTracer::start_span(const std::string& operation_name, size_t parent_idx) {
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    Span* parent = nullptr;
+    if (parent_idx < m_active_spans.size()) {
+        parent = m_active_spans[parent_idx].get();
+    } else if (parent_idx < m_active_spans.size() + m_completed_spans.size()) {
+        parent = m_completed_spans[parent_idx - m_active_spans.size()].get();
+    }
 
     auto span = std::make_unique<Span>();
     span->trace_id = parent ? parent->trace_id : generate_uuid();
@@ -379,42 +404,45 @@ DistributedTracer::Span* DistributedTracer::start_span(const std::string& operat
     span->start_time = std::chrono::steady_clock::now();
     span->parent = parent;
 
+    size_t idx = m_active_spans.size();
     m_active_spans.push_back(std::move(span));
-    return m_active_spans.back().get();
+    return idx;
 }
 
-void DistributedTracer::end_span(Span* span) {
-    if (!span) return;
-
+void DistributedTracer::end_span(size_t span_idx) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    for (auto it = m_active_spans.begin(); it != m_active_spans.end(); ++it) {
-        if (it->get() == span) {
-            it->get()->end_time = std::chrono::steady_clock::now();
-            m_completed_spans.push_back(std::move(*it));
-            m_active_spans.erase(it);
+    if (span_idx >= m_active_spans.size()) return;
 
-            if (m_exporter && m_completed_spans.size() >= 10) {
-                std::vector<Span*> raw_spans;
-                raw_spans.reserve(m_completed_spans.size());
-                for (const auto& s : m_completed_spans) raw_spans.push_back(s.get());
-                m_exporter(raw_spans);
-                m_completed_spans.clear();
-            }
-            return;
-        }
+    m_active_spans[span_idx]->end_time = std::chrono::steady_clock::now();
+    m_completed_spans.push_back(std::move(m_active_spans[span_idx]));
+
+    size_t last = m_active_spans.size() - 1;
+    if (span_idx != last) {
+        m_active_spans[span_idx] = std::move(m_active_spans[last]);
+    }
+    m_active_spans.pop_back();
+
+    if (m_exporter && m_completed_spans.size() >= 10) {
+        std::vector<Span*> raw_spans;
+        raw_spans.reserve(m_completed_spans.size());
+        for (const auto& s : m_completed_spans) raw_spans.push_back(s.get());
+        m_exporter(raw_spans);
+        m_completed_spans.clear();
     }
 }
 
-void DistributedTracer::set_tag(Span* span, const std::string& key, const std::string& value) {
-    if (!span) return;
+void DistributedTracer::set_tag(size_t span_idx, const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    span->tags[key] = value;
+    if (span_idx < m_active_spans.size()) {
+        m_active_spans[span_idx]->tags[key] = value;
+    }
 }
 
-void DistributedTracer::add_log(Span* span, const std::string& key, const std::string& value) {
-    if (!span) return;
+void DistributedTracer::add_log(size_t span_idx, const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    span->logs[key] = value;
+    if (span_idx < m_active_spans.size()) {
+        m_active_spans[span_idx]->logs[key] = value;
+    }
 }
 
 void DistributedTracer::set_exporter(std::function<void(const std::vector<Span*>&)> exporter) {
@@ -488,10 +516,26 @@ void DetailedAuditLogger::log_key_event(const std::string& key_id,
     log_event("key_management", "key_manager", operation, key_id, details);
 }
 
-std::vector<std::string> DetailedAuditLogger::query_events(const std::string&, const std::string&) const {
+std::vector<std::string> DetailedAuditLogger::query_events(const std::string& start_time, const std::string& end_time) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     std::vector<std::string> result;
+
+    auto parse_ts = [](const std::string& s) -> std::optional<std::chrono::system_clock::time_point> {
+        if (s.empty()) return std::nullopt;
+        try {
+            auto epoch_ms = std::stoll(s);
+            return std::chrono::system_clock::time_point(std::chrono::milliseconds(epoch_ms));
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+
+    auto start = parse_ts(start_time);
+    auto end = parse_ts(end_time);
+
     for (const auto& entry : m_entries) {
+        if (start && entry.timestamp < *start) continue;
+        if (end && entry.timestamp > *end) continue;
         result.push_back(entry.event_id + ": " + entry.event_type + " by " + entry.actor);
     }
     return result;
@@ -728,7 +772,19 @@ void SLI_SLOTracker::record_message_latency(std::chrono::milliseconds duration) 
 }
 
 double SLI_SLOTracker::get_availability() const {
-    return 99.95;
+    auto it = m_measurements.find("bft_consensus");
+    if (it == m_measurements.end() || it->second.empty()) return 100.0;
+
+    auto target_it = m_slo_targets.find("consensus_latency_p99");
+    if (target_it == m_slo_targets.end()) return 100.0;
+
+    double threshold_ms = target_it->second;
+    int total = static_cast<int>(it->second.size());
+    int within_slo = 0;
+    for (const auto& d : it->second) {
+        if (static_cast<double>(d.count()) <= threshold_ms) ++within_slo;
+    }
+    return (static_cast<double>(within_slo) / total) * 100.0;
 }
 
 double SLI_SLOTracker::get_consensus_latency_p99() const {

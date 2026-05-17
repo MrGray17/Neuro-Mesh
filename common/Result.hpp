@@ -2,6 +2,9 @@
 #include <variant>
 #include <optional>
 #include <string>
+#include <stdexcept>
+#include <utility>
+#include <functional>
 
 namespace neuro_mesh {
 
@@ -20,8 +23,47 @@ public:
     [[nodiscard]] E& error() { return std::get<E>(m_value); }
     [[nodiscard]] const E& error() const { return std::get<E>(m_value); }
 
+    [[nodiscard]] T& operator*() & { return value(); }
+    [[nodiscard]] const T& operator*() const& { return value(); }
+    [[nodiscard]] T&& operator*() && { return std::move(value()); }
+    [[nodiscard]] T* operator->() { return &value(); }
+    [[nodiscard]] const T* operator->() const { return &value(); }
+
     [[nodiscard]] T unwrap_or(T fallback) const {
         return ok() ? value() : std::move(fallback);
+    }
+
+    [[nodiscard]] T value_or(T fallback) const {
+        return ok() ? value() : std::move(fallback);
+    }
+
+    template<typename F>
+    [[nodiscard]] Result<std::invoke_result_t<F, const T&>, E> map(F&& f) const& {
+        if (ok()) return std::invoke(std::forward<F>(f), value());
+        return error();
+    }
+
+    template<typename F>
+    [[nodiscard]] Result<std::invoke_result_t<F, const T&>, E> map(F&& f) && {
+        if (ok()) return std::invoke(std::forward<F>(f), std::move(value()));
+        return std::move(error());
+    }
+
+    template<typename F>
+    [[nodiscard]] T map_or(T fallback, F&& f) const {
+        return ok() ? std::invoke(std::forward<F>(f), value()) : std::move(fallback);
+    }
+
+    template<typename F>
+    [[nodiscard]] Result<T, std::invoke_result_t<F, const E&>> map_err(F&& f) const& {
+        if (ok()) return value();
+        return std::invoke(std::forward<F>(f), error());
+    }
+
+    template<typename F>
+    [[nodiscard]] Result<T, std::invoke_result_t<F, const E&>> map_err(F&& f) && {
+        if (ok()) return std::move(value());
+        return std::invoke(std::forward<F>(f), std::move(error()));
     }
 };
 

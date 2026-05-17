@@ -80,9 +80,9 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
 
             _cooldown[nid] = cd
 
-            if anomaly == "TRUE" and entropy > 0.65:
+            if anomaly == "TRUE":
                 status = "FLAGGED"
-            elif reported_status == "SELF_ISOLATED" and entropy > 0.65:
+            elif reported_status == "SELF_ISOLATED":
                 status = "FLAGGED"
             else:
                 status = "STABLE"
@@ -98,7 +98,7 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
                 "mitre_attack": payload.get("mitre_attack", []),
                 "last_seen": now,
             }
-            if anomaly == "TRUE" and entropy > 0.65:
+            if anomaly == "TRUE":
                 add_log(f"ALERT: eBPF anomaly verified on {nid}")
 
 

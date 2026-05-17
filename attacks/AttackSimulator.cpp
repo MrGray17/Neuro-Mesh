@@ -191,7 +191,7 @@ ThreatSimulator::~ThreatSimulator() = default;
 bool ThreatSimulator::simulate_network_attack(const std::string& target_ip, int target_port,
                                                const std::string& attack_type) {
     std::vector<uint8_t> payload(1024, 0x41);
-    if (attack_type == "syn_flood") {
+    if (attack_type == "syn_flood" || attack_type == "syn_probe") {
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) return false;
         struct sockaddr_in addr{};
@@ -356,6 +356,9 @@ std::string BypassTechniques::encode_payload(const std::string& payload, const s
 }
 
 std::string BypassTechniques::encrypt_payload(const std::string& payload, const std::string& key) {
+    // NOTE: This is XOR-based obfuscation for testing purposes only.
+    // It provides ZERO cryptographic security and must not be used
+    // in production. Real deployments should use AES-GCM or ChaCha20-Poly1305.
     std::string encrypted;
     encrypted.reserve(payload.size());
     for (size_t i = 0; i < payload.size(); ++i) {
@@ -486,12 +489,37 @@ AssessmentEngine::~AssessmentEngine() = default;
 void AssessmentEngine::run_coverage_assessment() {
     m_technique_rates.clear();
     m_phase_rates.clear();
+
+    std::map<std::string, int> technique_total;
+    std::map<std::string, int> technique_detected;
+    std::map<AttackPhase, int> phase_total;
+    std::map<AttackPhase, int> phase_detected;
+
+    for (const auto& r : m_baseline_results) {
+        technique_total[r.scenario_id]++;
+        phase_total[AttackPhase::RECONNAISSANCE]++;
+        if (r.detection == DetectionResult::DETECTED || r.detection == DetectionResult::BLOCKED) {
+            technique_detected[r.scenario_id]++;
+            phase_detected[AttackPhase::RECONNAISSANCE]++;
+        }
+    }
+
+    for (const auto& [tech, total] : technique_total) {
+        int det = technique_detected.count(tech) ? technique_detected.at(tech) : 0;
+        m_technique_rates[tech] = total > 0 ? static_cast<double>(det) / total : 0.0;
+    }
+    for (const auto& [phase, total] : phase_total) {
+        int det = phase_detected.count(phase) ? phase_detected.at(phase) : 0;
+        m_phase_rates[phase] = total > 0 ? static_cast<double>(det) / total : 0.0;
+    }
 }
 
 void AssessmentEngine::run_detection_rate_assessment() {
+    run_coverage_assessment();
 }
 
 void AssessmentEngine::run_impact_assessment() {
+    run_coverage_assessment();
 }
 
 double AssessmentEngine::calculate_detection_coverage() {

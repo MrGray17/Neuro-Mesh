@@ -10,7 +10,13 @@
 
 namespace neuro_mesh::telemetry {
 
-static UniqueFD s_udp_socket; // RAII-managed static socket
+static UniqueFD* s_udp_socket_ptr = nullptr;
+
+static UniqueFD& s_udp_socket() {
+    static UniqueFD socket;
+    s_udp_socket_ptr = &socket;
+    return socket;
+}
 
 static std::string json_escape(const std::string& raw) {
     std::string out;
@@ -36,7 +42,10 @@ static std::string json_escape(const std::string& raw) {
 }
 
 void AuditLogger::initialize() {
-    s_udp_socket = UniqueFD(socket(AF_INET, SOCK_DGRAM, 0));
+    if (s_udp_socket().valid()) {
+        s_udp_socket() = UniqueFD();
+    }
+    s_udp_socket() = UniqueFD(socket(AF_INET, SOCK_DGRAM, 0));
 }
 
 void AuditLogger::emit_json(AuditLevel level, const std::string& component,
@@ -62,12 +71,12 @@ void AuditLogger::emit_json(AuditLevel level, const std::string& component,
 
     std::cout << json << std::endl;
 
-    if (s_udp_socket.valid()) {
+    if (s_udp_socket().valid()) {
         struct sockaddr_in servaddr{};
         servaddr.sin_family = AF_INET;
         servaddr.sin_port = htons(50052);
         inet_pton(AF_INET, "127.0.0.1", &servaddr.sin_addr);
-        sendto(s_udp_socket.get(), json.c_str(), json.length(), 0,
+        sendto(s_udp_socket().get(), json.c_str(), json.length(), 0,
                (const struct sockaddr*)&servaddr, sizeof(servaddr));
     }
 }
@@ -83,12 +92,12 @@ void AuditLogger::emit_metric(double cpu_percent, double ram_mb, int active_agen
                        ",\"ram\":" + safe_num(ram_mb) +
                        ",\"agents\":" + std::to_string(active_agents) + "}";
 
-    if (s_udp_socket.valid()) {
+    if (s_udp_socket().valid()) {
         struct sockaddr_in servaddr{};
         servaddr.sin_family = AF_INET;
         servaddr.sin_port = htons(50052);
         inet_pton(AF_INET, "127.0.0.1", &servaddr.sin_addr);
-        sendto(s_udp_socket.get(), json.c_str(), json.length(), 0,
+        sendto(s_udp_socket().get(), json.c_str(), json.length(), 0,
                (const struct sockaddr*)&servaddr, sizeof(servaddr));
     }
 }

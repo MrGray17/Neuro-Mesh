@@ -4,6 +4,7 @@
 #include <shared_mutex>
 #include <set>
 #include <unordered_map>
+#include <chrono>
 #include <cstdint>
 
 namespace neuro_mesh {
@@ -28,7 +29,9 @@ public:
     ~PolicyEnforcer();
 
     void register_peer_ip(const std::string& node_id, const std::string& ip);
+    void register_peer_port(const std::string& node_id, uint16_t port);
     std::string resolve_target(const std::string& target) const;
+    uint16_t resolve_port(const std::string& target) const;
 
     // Execute network isolation against a target (called from PBFT consensus at EXECUTED stage).
     // Resolution flow: safe-list check → loopback check → IP resolution → backends in priority order.
@@ -67,11 +70,13 @@ private:
     // Enforcement backends — tried in priority order
     static bool apply_ebpf_drop(const std::string& ip);
     static bool apply_nftables_drop(const std::string& ip);
+    static bool apply_nftables_port_drop(const std::string& ip, uint16_t port);
     static bool apply_iptables_drop(const std::string& ip);
 
     // Removal backends
     static bool remove_ebpf_drop(const std::string& ip);
     static bool remove_nftables_drop(const std::string& ip);
+    static bool remove_nftables_port_drop(const std::string& ip, uint16_t port);
     static bool remove_iptables_drop(const std::string& ip);
 
     // Fork+exec helpers
@@ -85,6 +90,10 @@ private:
 
     mutable std::shared_mutex m_ip_map_mtx;
     std::unordered_map<std::string, std::string> m_peer_ip_map;
+    std::unordered_map<std::string, uint16_t> m_peer_port_map;
+
+    std::chrono::steady_clock::time_point m_last_enforce_time;
+    static constexpr int ENFORCE_COOLDOWN_SEC = 5;
 };
 
 } // namespace neuro_mesh

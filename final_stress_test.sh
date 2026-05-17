@@ -69,7 +69,8 @@ sleep 4
 
 # Verify all nodes booted
 for id in NODE_1 NODE_2 NODE_3; do
-    logfile="${LOG_DIR}/node$(echo $id | cut -c6).log"
+    num="${id#NODE_}"
+    logfile="${LOG_DIR}/node${num}.log"
     if grep -q "System fully operational" "${logfile}" 2>/dev/null; then
         pass "${id} booted successfully"
     else
@@ -106,7 +107,7 @@ pass "Pre-enforcement state clean — no existing rule for ${TARGET_IP}"
 # Phase 3: Launch Threat Simulation
 # ---------------------------------------------------------------------------
 say "Phase 3: Launching event injection targeting ${TARGET_IP}..."
-"${BIN_DIR}/inject_event" "${TARGET_IP}" "${EVIDENCE}" > "${LOG_DIR}/simulator.log" 2>&1 &
+"${BIN_DIR}/inject_event" --node NODE_1 --target "${TARGET_IP}" --event entropy_spike --verdict CRITICAL > "${LOG_DIR}/simulator.log" 2>&1 &
 SIM_PID=$!; STRESS_PIDS+=($SIM_PID)
 
 # Wait for consensus to propagate
@@ -120,7 +121,8 @@ for id in NODE_1 NODE_2 NODE_3 NODE_SIMULATOR; do
     if [[ "$id" == "NODE_SIMULATOR" ]]; then
         logfile="${LOG_DIR}/simulator.log"
     else
-        logfile="${LOG_DIR}/node$(echo $id | cut -c6).log"
+        num="${id#NODE_}"
+        logfile="${LOG_DIR}/node${num}.log"
     fi
 
     if grep -q "CRITICAL.*PBFT Final Quorum Reached" "${logfile}" 2>/dev/null; then
@@ -167,7 +169,8 @@ for id in NODE_1 NODE_2 NODE_3 NODE_SIMULATOR; do
     if [[ "$id" == "NODE_SIMULATOR" ]]; then
         logfile="${LOG_DIR}/simulator.log"
     else
-        logfile="${LOG_DIR}/node$(echo $id | cut -c6).log"
+        num="${id#NODE_}"
+        logfile="${LOG_DIR}/node${num}.log"
     fi
 
     if grep -q "Zero-Trust Rule Applied" "${logfile}" 2>/dev/null; then

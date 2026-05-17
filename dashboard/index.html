@@ -770,12 +770,11 @@ function switchNodeContext(nodeId) {
 }
 
 function matchesSelectedNode(data) {
-  // When no node is explicitly selected, follow the self node
   const target = state.selectedNode || state.nodeId;
   if (!target) return true;
   const selected = target.toUpperCase();
   const incoming = (data.node || data.ID || data.node_id || '').toUpperCase();
-  return incoming === selected || incoming.includes(selected);
+  return incoming === selected;
 }
 
 function stepMeshForces() {

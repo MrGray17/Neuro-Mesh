@@ -185,6 +185,9 @@ private:
     mutable std::mutex m_ssl_mtx;
     std::atomic<bool> m_running{false};
 
+    std::chrono::steady_clock::time_point m_rate_ts;
+    int m_accept_rate = 0;
+
     bool initialize_openssl();
 };
 

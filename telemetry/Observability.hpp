@@ -124,16 +124,26 @@ public:
         Span* parent = nullptr;
     };
 
-    Span* start_span(const std::string& operation_name);
-    Span* start_span(const std::string& operation_name, Span* parent);
+    size_t start_span(const std::string& operation_name);
+    size_t start_span(const std::string& operation_name, size_t parent_idx);
 
-    void end_span(Span* span);
+    void end_span(size_t span_idx);
 
-    void set_tag(Span* span, const std::string& key, const std::string& value);
-    void add_log(Span* span, const std::string& key, const std::string& value);
+    void set_tag(size_t span_idx, const std::string& key, const std::string& value);
+    void add_log(size_t span_idx, const std::string& key, const std::string& value);
 
-    std::string get_trace_id(Span* span) const { return span->trace_id; }
-    std::string get_span_id(Span* span) const { return span->span_id; }
+    Span* get_span(size_t idx) {
+        if (idx < m_active_spans.size()) return m_active_spans[idx].get();
+        if (idx < m_active_spans.size() + m_completed_spans.size())
+            return m_completed_spans[idx - m_active_spans.size()].get();
+        return nullptr;
+    }
+    const Span* get_span(size_t idx) const {
+        if (idx < m_active_spans.size()) return m_active_spans[idx].get();
+        if (idx < m_active_spans.size() + m_completed_spans.size())
+            return m_completed_spans[idx - m_active_spans.size()].get();
+        return nullptr;
+    }
 
     void set_exporter(std::function<void(const std::vector<Span*>&)> exporter);
 

@@ -1,7 +1,7 @@
 #include "consensus/PBFT.hpp"
 #include "crypto/CryptoCore.hpp"
 #include <iostream>
-#include <cassert>
+#include <stdexcept>
 #include <thread>
 
 using namespace neuro_mesh;
@@ -14,6 +14,9 @@ static int tests_failed = 0;
     do { \
         std::cout << "  " << (name) << "... "; \
         try
+
+#define ASSERT(cond) \
+        if (!(cond)) { throw std::runtime_error("assertion failed: " #cond); }
 
 #define END_TEST() \
         std::cout << "PASSED" << std::endl; \
@@ -29,19 +32,19 @@ int main() {
 
     TEST("quorum_size() computation") {
         PBFTConsensus pbft1(1);
-        assert(pbft1.quorum_size() == 1);
+        ASSERT(pbft1.quorum_size() == 1);
 
         PBFTConsensus pbft3(3);
-        assert(pbft3.quorum_size() == 2);
+        ASSERT(pbft3.quorum_size() == 2);
 
         PBFTConsensus pbft4(4);
-        assert(pbft4.quorum_size() == 3);
+        ASSERT(pbft4.quorum_size() == 3);
 
         PBFTConsensus pbft5(5);
-        assert(pbft5.quorum_size() == 4);
+        ASSERT(pbft5.quorum_size() == 4);
 
         PBFTConsensus pbft0(0);
-        assert(pbft0.quorum_size() == 1);
+        ASSERT(pbft0.quorum_size() == 1);
     END_TEST();
 
     TEST("verify_message with valid signature") {
@@ -60,7 +63,7 @@ int main() {
         std::string blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json;
         msg.signature = IdentityCore::sign_payload(key.get(), blob);
 
-        assert(pbft.verify_message(msg));
+        ASSERT(pbft.verify_message(msg));
     END_TEST();
 
     TEST("verify_message rejects unknown sender") {
@@ -79,7 +82,7 @@ int main() {
         std::string blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json;
         msg.signature = IdentityCore::sign_payload(key.get(), blob);
 
-        assert(!pbft.verify_message(msg));
+        ASSERT(!pbft.verify_message(msg));
     END_TEST();
 
     TEST("verify_message rejects tampered evidence") {
@@ -100,7 +103,7 @@ int main() {
 
         msg.evidence_json = "{\"entropy\":0.1}";
 
-        assert(!pbft.verify_message(msg));
+        ASSERT(!pbft.verify_message(msg));
     END_TEST();
 
     TEST("Signature binding prevents cross-stage replay") {
@@ -121,7 +124,7 @@ int main() {
         replayed.evidence_json = evidence;
         replayed.signature = sig;
 
-        assert(!pbft.verify_message(replayed));
+        ASSERT(!pbft.verify_message(replayed));
     END_TEST();
 
     TEST("Full PBFT state machine: PRE_PREPARE → PREPARE → COMMIT → EXECUTED") {
@@ -152,24 +155,24 @@ int main() {
         };
 
         auto msg1 = make_msg("PRE_PREPARE", "A", "B", key_a.get());
-        assert(pbft.verify_message(msg1));
-        assert(pbft.advance_state(msg1) == PBFTStage::PREPARE);
+        ASSERT(pbft.verify_message(msg1));
+        ASSERT(pbft.advance_state(msg1) == PBFTStage::PREPARE);
 
         auto msg2 = make_msg("PREPARE", "B", "B", key_b.get());
-        assert(pbft.verify_message(msg2));
-        assert(pbft.advance_state(msg2) == PBFTStage::IDLE);
+        ASSERT(pbft.verify_message(msg2));
+        ASSERT(pbft.advance_state(msg2) == PBFTStage::IDLE);
 
         auto msg3 = make_msg("PREPARE", "C", "B", key_c.get());
-        assert(pbft.verify_message(msg3));
-        assert(pbft.advance_state(msg3) == PBFTStage::COMMIT);
+        ASSERT(pbft.verify_message(msg3));
+        ASSERT(pbft.advance_state(msg3) == PBFTStage::COMMIT);
 
         auto msg4 = make_msg("COMMIT", "A", "B", key_a.get());
-        assert(pbft.verify_message(msg4));
-        assert(pbft.advance_state(msg4) == PBFTStage::IDLE);
+        ASSERT(pbft.verify_message(msg4));
+        ASSERT(pbft.advance_state(msg4) == PBFTStage::IDLE);
 
         auto msg5 = make_msg("COMMIT", "B", "B", key_b.get());
-        assert(pbft.verify_message(msg5));
-        assert(pbft.advance_state(msg5) == PBFTStage::EXECUTED);
+        ASSERT(pbft.verify_message(msg5));
+        ASSERT(pbft.advance_state(msg5) == PBFTStage::EXECUTED);
     END_TEST();
 
     TEST("Duplicate votes are rejected (deduplication)") {
@@ -189,36 +192,36 @@ int main() {
         msg.evidence_json = evidence;
         msg.signature = IdentityCore::sign_payload(key_a.get(), blob);
 
-        assert(pbft.verify_message(msg));
-        assert(pbft.advance_state(msg) == PBFTStage::PREPARE);
+        ASSERT(pbft.verify_message(msg));
+        ASSERT(pbft.advance_state(msg) == PBFTStage::PREPARE);
 
-        assert(pbft.verify_message(msg));
-        assert(pbft.advance_state(msg) == PBFTStage::IDLE);
+        ASSERT(pbft.verify_message(msg));
+        ASSERT(pbft.advance_state(msg) == PBFTStage::IDLE);
     END_TEST();
 
     TEST("Dynamic peer count changes quorum") {
         PBFTConsensus pbft(1);
-        assert(pbft.quorum_size() == 1);
+        ASSERT(pbft.quorum_size() == 1);
 
         pbft.increment_peers();
-        assert(pbft.peer_count() == 2);
-        assert(pbft.quorum_size() == 2);
+        ASSERT(pbft.peer_count() == 2);
+        ASSERT(pbft.quorum_size() == 2);
 
         pbft.increment_peers();
-        assert(pbft.peer_count() == 3);
-        assert(pbft.quorum_size() == 2);
+        ASSERT(pbft.peer_count() == 3);
+        ASSERT(pbft.quorum_size() == 2);
 
         pbft.decrement_peers();
-        assert(pbft.peer_count() == 2);
-        assert(pbft.quorum_size() == 2);
+        ASSERT(pbft.peer_count() == 2);
+        ASSERT(pbft.quorum_size() == 2);
 
         pbft.decrement_peers();
-        assert(pbft.peer_count() == 1);
-        assert(pbft.quorum_size() == 1);
+        ASSERT(pbft.peer_count() == 1);
+        ASSERT(pbft.quorum_size() == 1);
 
         pbft.decrement_peers();
-        assert(pbft.peer_count() == 1);
-        assert(pbft.quorum_size() == 1);
+        ASSERT(pbft.peer_count() == 1);
+        ASSERT(pbft.quorum_size() == 1);
     END_TEST();
 
     TEST("prune_peer removes votes and keys") {
@@ -244,17 +247,17 @@ int main() {
         };
 
         auto msg_a = make_msg("A", key_a.get());
-        assert(pbft.verify_message(msg_a));
+        ASSERT(pbft.verify_message(msg_a));
         pbft.advance_state(msg_a);
 
         auto msg_b = make_msg("B", key_b.get());
-        assert(pbft.verify_message(msg_b));
+        ASSERT(pbft.verify_message(msg_b));
 
         pbft.prune_peer("A");
 
-        assert(!pbft.verify_message(msg_a));
-        assert(pbft.verify_message(msg_b));
-        assert(pbft.peer_count() == 2);
+        ASSERT(!pbft.verify_message(msg_a));
+        ASSERT(pbft.verify_message(msg_b));
+        ASSERT(pbft.peer_count() == 2);
     END_TEST();
 
     TEST("needs_view_change detects stale rounds") {
@@ -272,10 +275,10 @@ int main() {
         msg.evidence_json = evidence;
         msg.signature = IdentityCore::sign_payload(key.get(), blob);
 
-        assert(pbft.verify_message(msg));
+        ASSERT(pbft.verify_message(msg));
         pbft.advance_state(msg);
 
-        assert(!pbft.needs_view_change(evidence));
+        ASSERT(!pbft.needs_view_change(evidence));
         std::cout << "(timeout logic not waited) ";
     END_TEST();
 

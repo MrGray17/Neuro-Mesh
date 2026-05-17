@@ -5,6 +5,29 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+static std::string json_escape(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size() + 4);
+    for (char c : raw) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " --node <daemon_id> --target <target_id>"
@@ -55,22 +78,26 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Build evidence JSON
-    std::string evidence;
-    std::string tag_field = tag.empty() ? "" : R"(,"tag":")" + tag + R"(")";
-    if (event_type == "lateral_movement") {
-        evidence = R"({"event":"lateral_movement","src_ip":")" + target
-                 + R"(","pid":4201,"comm":"sshd","verdict":")" + verdict + R"(")" + tag_field + "}";
-    } else if (event_type == "privilege_escalation") {
-        evidence = R"({"event":"privilege_escalation","uid":0,"comm":"bash")"
-                   R"(,"parent_comm":"nginx","verdict":")" + verdict + R"(")" + tag_field + "}";
-    } else {
-        evidence = R"({"sensor":"ebpf_entropy","value":0.98,"threshold":0.85,"verdict":")"
-                 + verdict + R"(")" + tag_field + "}";
+    const std::string socket_path = "/tmp/neuro_mesh_" + node + ".sock";
+    if (socket_path.size() >= sizeof(((struct sockaddr_un*)nullptr)->sun_path)) {
+        std::cerr << "[SIM] Node name too long for Unix socket path (max "
+                  << sizeof(((struct sockaddr_un*)nullptr)->sun_path) - 1
+                  << " chars).\n";
+        return 1;
     }
 
-    // Connect to local daemon via Unix domain socket
-    std::string socket_path = "/tmp/neuro_mesh_" + node + ".sock";
+    std::string evidence;
+    std::string tag_field = tag.empty() ? "" : R"(,"tag":")" + json_escape(tag) + R"(")";
+    if (event_type == "lateral_movement") {
+        evidence = R"({"event":"lateral_movement","src_ip":")" + json_escape(target)
+                 + R"(","pid":4201,"comm":"sshd","verdict":")" + json_escape(verdict) + R"(")" + tag_field + "}";
+    } else if (event_type == "privilege_escalation") {
+        evidence = R"({"event":"privilege_escalation","uid":0,"comm":"bash")"
+                   R"(,"parent_comm":"nginx","verdict":")" + json_escape(verdict) + R"(")" + tag_field + "}";
+    } else {
+        evidence = R"({"sensor":"ebpf_entropy","value":0.98,"threshold":0.85,"verdict":")"
+                 + json_escape(verdict) + R"(")" + tag_field + "}";
+    }
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -80,7 +107,8 @@ int main(int argc, char* argv[]) {
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+    std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+    addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
 
     if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "[SIM] Failed to connect to " << socket_path << std::endl;
@@ -88,17 +116,20 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Send injection command
     std::string cmd = "CMD:INJECT " + target + " " + evidence;
-    if (write(fd, cmd.c_str(), cmd.size()) < 0) {
-        std::cerr << "[SIM] Failed to send command." << std::endl;
-        close(fd);
-        return 1;
+    size_t written = 0;
+    while (written < cmd.size()) {
+        ssize_t n = write(fd, cmd.c_str() + written, cmd.size() - written);
+        if (n < 0) {
+            std::cerr << "[SIM] Failed to send command." << std::endl;
+            close(fd);
+            return 1;
+        }
+        written += static_cast<size_t>(n);
     }
 
     std::cout << "[SIM] Sent: " << cmd << std::endl;
 
-    // Read acknowledgment
     char buf[256];
     ssize_t n = read(fd, buf, sizeof(buf) - 1);
     if (n > 0) {

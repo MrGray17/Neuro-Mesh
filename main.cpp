@@ -114,7 +114,7 @@ static float onnx_to_entropy(float score) {
 void signal_handler(int /*signum*/) {
     const char msg[] = "\n[SYS] Interrupt signal received. Initiating shutdown...\n";
     ::write(STDERR_FILENO, msg, sizeof(msg) - 1);
-    global_running = false;
+    global_running.store(false, std::memory_order_release);
 }
 
 // =============================================================================
@@ -127,11 +127,11 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
     (void)bridge;
     int seq = 0;
     pid_t my_pid = getpid();  // filter eBPF events from our own traffic
-    while (global_running) {
-        for (int i = 0; i < 10 && global_running; ++i) {
+    while (global_running.load(std::memory_order_acquire)) {
+        for (int i = 0; i < 10 && global_running.load(std::memory_order_acquire); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        if (!global_running) break;
+        if (!global_running.load(std::memory_order_acquire)) break;
 
         // Build peer_list JSON array
         auto peer_ids = mesh.get_active_peer_ids();
@@ -295,7 +295,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
     tv.tv_sec = 1;
     tv.tv_usec = 0;
 
-    while (global_running) {
+    while (global_running.load(std::memory_order_acquire)) {
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(server_fd.get(), &fds);
@@ -303,7 +303,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
         tv.tv_usec = 0;
 
         int ret = select(server_fd.get() + 1, &fds, nullptr, nullptr, &tv);
-        if (ret <= 0) continue;
+        if (ret <= 0 || !global_running.load(std::memory_order_acquire)) continue;
 
         int client_fd = accept(server_fd.get(), nullptr, nullptr);
         if (client_fd < 0) continue;
@@ -382,12 +382,31 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
             std::cout << "[IPC] Received command: " << cmd << std::endl;
 
             if (cmd.rfind("CMD:INJECT ", 0) == 0) {
-                // Format: CMD:INJECT <target> <evidence_json>
                 std::string payload = cmd.substr(strlen("CMD:INJECT "));
                 size_t space = payload.find(' ');
                 if (space != std::string::npos) {
                     std::string inject_target = payload.substr(0, space);
                     std::string evidence = payload.substr(space + 1);
+
+                    if (inject_target.empty() || inject_target.size() > 64) {
+                        const char* reject = "REJECT:INVALID_TARGET\n";
+                        write(client_fd, reject, strlen(reject));
+                        close(client_fd);
+                        continue;
+                    }
+                    if (evidence.empty() || evidence.size() > 65536) {
+                        const char* reject = "REJECT:EVIDENCE_TOO_LARGE\n";
+                        write(client_fd, reject, strlen(reject));
+                        close(client_fd);
+                        continue;
+                    }
+                    if (evidence[0] != '{' || evidence.find('\0') != std::string::npos) {
+                        const char* reject = "REJECT:INVALID_EVIDENCE\n";
+                        write(client_fd, reject, strlen(reject));
+                        close(client_fd);
+                        continue;
+                    }
+
                     std::cout << "[IPC] INJECT: initiating consensus against "
                               << inject_target << std::endl;
                     mesh.initiate_consensus(inject_target, evidence);
@@ -396,12 +415,31 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                     write(client_fd, ack, strlen(ack));
                 }
             } else if (cmd.rfind("CMD:ISOLATE ", 0) == 0) {
-                // Format: CMD:ISOLATE <target> <evidence_json>
                 std::string payload = cmd.substr(strlen("CMD:ISOLATE "));
                 size_t space = payload.find(' ');
                 if (space != std::string::npos) {
                     std::string isolate_target = payload.substr(0, space);
                     std::string evidence = payload.substr(space + 1);
+
+                    if (isolate_target.empty() || isolate_target.size() > 64) {
+                        const char* reject = "REJECT:INVALID_TARGET\n";
+                        write(client_fd, reject, strlen(reject));
+                        close(client_fd);
+                        continue;
+                    }
+                    if (evidence.empty() || evidence.size() > 65536) {
+                        const char* reject = "REJECT:EVIDENCE_TOO_LARGE\n";
+                        write(client_fd, reject, strlen(reject));
+                        close(client_fd);
+                        continue;
+                    }
+                    if (evidence[0] != '{' || evidence.find('\0') != std::string::npos) {
+                        const char* reject = "REJECT:INVALID_EVIDENCE\n";
+                        write(client_fd, reject, strlen(reject));
+                        close(client_fd);
+                        continue;
+                    }
+
                     std::cout << "[IPC] ISOLATE: initiating PBFT consensus against "
                               << isolate_target << std::endl;
                     mesh.initiate_consensus(isolate_target, evidence);
@@ -563,7 +601,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[BOOT] System fully operational. Awaiting P2P telemetry..." << std::endl;
 
     // ---- Main idle loop ----
-    while (global_running) {
+    while (global_running.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 

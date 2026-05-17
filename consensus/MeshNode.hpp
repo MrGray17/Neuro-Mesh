@@ -91,6 +91,7 @@ private:
     int m_broadcast_fd = -1;
     int m_discovery_fd = -1;
     int m_discovery6_fd = -1;
+    int m_discovery_mcast_fd = -1;
     std::atomic<bool> m_running;
 
     crypto::UniquePKEY m_private_key;
@@ -115,6 +116,7 @@ private:
     std::thread m_tls_thread;
     std::thread m_liveness_thread;
     std::chrono::steady_clock::time_point m_last_announce_time;
+    mutable std::mutex m_targeted_mtx;
     std::chrono::steady_clock::time_point m_last_targeted_at;
 
     // === Dependencies ===

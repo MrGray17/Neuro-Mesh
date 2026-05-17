@@ -70,7 +70,7 @@ TEST(Base64Test, EncodeKnownVectors) {
 TEST(Base64Test, Roundtrip) {
     std::string original = "Hello, World! This is a test string with 12345.";
     std::string encoded = neuro_mesh::base64_encode(original);
-    std::string decoded = neuro_mesh::base64_decode(encoded);
+    std::string decoded = neuro_mesh::base64_decode(encoded).value_or("");
     EXPECT_EQ(decoded, original);
 }
 
@@ -80,25 +80,25 @@ TEST(Base64Test, RoundtripBinaryData) {
         binary += static_cast<char>(i);
     }
     std::string encoded = neuro_mesh::base64_encode(binary);
-    std::string decoded = neuro_mesh::base64_decode(encoded);
+    std::string decoded = neuro_mesh::base64_decode(encoded).value_or("");
     EXPECT_EQ(decoded, binary);
 }
 
-TEST(Base64Test, DecodeInvalidInputReturnsEmpty) {
-    EXPECT_TRUE(neuro_mesh::base64_decode("!!!invalid!!!").empty());
+TEST(Base64Test, DecodeInvalidInputReturnsNullopt) {
+    EXPECT_FALSE(neuro_mesh::base64_decode("!!!invalid!!!").has_value());
 }
 
 TEST(Base64Test, EncodeDecodeWithPadding) {
     std::string s = "a";
     std::string enc = neuro_mesh::base64_encode(s);
     EXPECT_EQ(enc.back(), '=');
-    EXPECT_EQ(neuro_mesh::base64_decode(enc), s);
+    EXPECT_EQ(neuro_mesh::base64_decode(enc).value_or(""), s);
 }
 
 TEST(Base64Test, DecodeIgnoresWhitespace) {
     std::string original = "Hello World";
     std::string encoded = neuro_mesh::base64_encode(original);
-    std::string decoded = neuro_mesh::base64_decode(encoded);
+    std::string decoded = neuro_mesh::base64_decode(encoded).value_or("");
     EXPECT_EQ(decoded, original);
 }
 

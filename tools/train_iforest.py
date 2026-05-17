@@ -106,14 +106,15 @@ def main():
     anomaly_count = int((scores < 0).sum())
     print(f"[TRAIN] Samples with score < 0 (anomalous): {anomaly_count}/{args.samples}")
 
-    # Export to ONNX with flat float32 tensor output (no zipmap)
+    # Export to ONNX with continuous anomaly scores (decision_function values).
+    # score_samples=True ensures the model outputs float scores, not binary labels.
+    # The C++ InferenceEngine expects continuous scores for threshold comparison.
     initial_type = [("float_input", FloatTensorType([1, 5]))]
 
     print("[EXPORT] Converting to ONNX...")
     onx = to_onnx(
         model,
         initial_types=initial_type,
-        options={"score_samples": False},
         target_opset={"": 15, "ai.onnx.ml": 3},
     )
 

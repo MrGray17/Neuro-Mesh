@@ -1,15 +1,16 @@
 // ============================================================
 // NEURO-MESH : KERNEL eBPF SENSOR & XDP DROPPER (HARDENED)
 // ============================================================
-// NOTE: This eBPF sensor uses x86_64 tracepoint argument offsets.
-// For ARM/other architectures, rebuild on target or use BTF-based
-// tracepoint access (requires kernel with BTF info).
+// Uses BPF_KPROBE macros from bpf_tracing.h for portable
+// syscall argument extraction.  PT_REGS_PARM* macros resolve
+// to the correct register for each architecture at compile time.
 // ============================================================
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_tracing.h>
 
 #ifndef AF_INET
 #define AF_INET 2
@@ -62,62 +63,105 @@ int xdp_neuro_mesh_dropper(struct xdp_md *ctx) {
     return XDP_PASS;
 }
 
-// TRACEPOINT: Secure Execution Monitoring
-SEC("tracepoint/syscalls/sys_enter_execve")
-int trace_execve(void *ctx) {
-    struct KernelEvent *event;
+// Helper: fill common event fields
+static __always_inline void init_event(struct KernelEvent *event, __u32 type) {
+    __builtin_memset(event, 0, sizeof(*event));
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->event_type = type;
+    bpf_get_current_comm(&event->comm, sizeof(event->comm));
+}
 
+// Architecture-specific pt_regs definition for kprobe argument extraction.
+// PT_REGS_PARM* macros from bpf_tracing.h need the full struct.
+#ifdef __TARGET_ARCH_x86
+struct pt_regs {
+    unsigned long r15;
+    unsigned long r14;
+    unsigned long r13;
+    unsigned long r12;
+    unsigned long bp;
+    unsigned long bx;
+    unsigned long r11;
+    unsigned long r10;
+    unsigned long r9;
+    unsigned long r8;
+    unsigned long ax;
+    unsigned long cx;
+    unsigned long rdx;
+    unsigned long rsi;
+    unsigned long rdi;
+    unsigned long orig_ax;
+    unsigned long ip;
+    unsigned long cs;
+    unsigned long flags;
+    unsigned long sp;
+    unsigned long ss;
+};
+#endif
+
+// KPROBE: sys_execve — uses PT_REGS_PARM1 for arch-portable arg extraction
+SEC("kprobe/__x64_sys_execve")
+int trace_execve(struct pt_regs *ctx) {
+    struct KernelEvent *event;
     event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
     if (!event) return 0;
 
-    __builtin_memset(event, 0, sizeof(struct KernelEvent));
+    init_event(event, 1);
 
-    event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->event_type = 1;
-
-    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
-        bpf_ringbuf_discard(event, 0);
-        return 0;
-    }
-
-    // Read binary path (x86_64 tracepoint offset 16)
-    const char *pathname = NULL;
-    bpf_core_read(&pathname, sizeof(pathname), (void *)((char *)ctx + 16));
-    if (pathname) {
-        bpf_probe_read_user_str(&event->payload, sizeof(event->payload), pathname);
+    const char *filename = (const char *)PT_REGS_PARM1(ctx);
+    if (filename) {
+        bpf_probe_read_user_str(&event->payload, sizeof(event->payload), filename);
     }
 
     bpf_ringbuf_submit(event, 0);
     return 0;
 }
 
-// Network sendto tracepoint args (x86_64)
-SEC("tracepoint/syscalls/sys_enter_sendto")
-int trace_sendto(void *ctx) {
+// KPROBE: sys_sendto — uses PT_REGS_PARM* for portable args
+SEC("kprobe/__x64_sys_sendto")
+int trace_sendto(struct pt_regs *ctx) {
     struct KernelEvent *event;
-
     event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
     if (!event) return 0;
 
-    __builtin_memset(event, 0, sizeof(struct KernelEvent));
+    init_event(event, 2);
 
-    event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->event_type = 2;
+    const void *buf = (const void *)PT_REGS_PARM2(ctx);
+    __u64 len = (__u64)PT_REGS_PARM3(ctx);
 
-    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
-        bpf_ringbuf_discard(event, 0);
-        return 0;
+    // Bounds: len capped to payload size so bpf_probe_read_user never overflows
+    if (len > 0 && buf && len <= sizeof(event->payload)) {
+        bpf_probe_read_user(&event->payload, len, buf);
     }
 
-    // Read buffer: x86_64 offset 24=buff, offset 32=len
-    __u64 len = 0;
-    bpf_core_read(&len, sizeof(len), (void *)((char *)ctx + 32));
-    if (len > 0) {
-        const char *buff = NULL;
-        bpf_core_read(&buff, sizeof(buff), (void *)((char *)ctx + 24));
-        if (buff) {
-            __u64 read_len = len < sizeof(event->payload) ? len : sizeof(event->payload);
-            bpf_probe_read_user(&event->payload, read_len, buff);
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+// KPROBE: sys_sendmsg — uses PT_REGS_PARM* for portable args
+SEC("kprobe/__x64_sys_sendmsg")
+int trace_sendmsg(struct pt_regs *ctx) {
+    struct KernelEvent *event;
+    event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
+    if (!event) return 0;
+
+    init_event(event, 2);
+
+    const void *msg = (const void *)PT_REGS_PARM2(ctx);
+    if (msg) {
+        struct {
+            void *msg_name;
+            __u32 msg_namelen;
+            void *msg_iov;
+            __u64 msg_iovlen;
+        } hdr;
+
+        if (bpf_probe_read_user(&hdr, sizeof(hdr), msg) == 0 && hdr.msg_iovlen > 0 && hdr.msg_iov) {
+            struct { void *iov_base; __u64 iov_len; } iov;
+            if (bpf_probe_read_user(&iov, sizeof(iov), hdr.msg_iov) == 0 && iov.iov_len > 0 && iov.iov_base) {
+                __u64 read_len = iov.iov_len < sizeof(event->payload) ? iov.iov_len : sizeof(event->payload);
+                bpf_probe_read_user(&event->payload, read_len, iov.iov_base);
+            }
         }
     }
 
@@ -125,133 +169,21 @@ int trace_sendto(void *ctx) {
     return 0;
 }
 
-// Network sendmsg tracepoint (x86_64)
-SEC("tracepoint/syscalls/sys_enter_sendmsg")
-int trace_sendmsg(void *ctx) {
+// KPROBE: sys_connect — uses PT_REGS_PARM* for portable args
+SEC("kprobe/__x64_sys_connect")
+int trace_connect(struct pt_regs *ctx) {
     struct KernelEvent *event;
     event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
     if (!event) return 0;
 
-    __builtin_memset(event, 0, sizeof(struct KernelEvent));
+    init_event(event, 3);
 
-    event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->event_type = 2;
+    const void *addr = (const void *)PT_REGS_PARM2(ctx);
+    int addr_len = (int)PT_REGS_PARM3(ctx);
 
-    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
-        bpf_ringbuf_discard(event, 0);
-        return 0;
-    }
-
-    // Read struct msghdr from userspace
-    struct msghdr {
-        void *msg_name;
-        __u32 msg_namelen;
-        __u32 _pad;
-        void *msg_iov;
-        __u64 msg_iovlen;
-        void *msg_control;
-        __u64 msg_controllen;
-        __u32 msg_flags;
-    } msg_hdr;
-
-    const struct msghdr *msg_ptr = NULL;
-    bpf_core_read(&msg_ptr, sizeof(msg_ptr), (void *)((char *)ctx + 24));
-    if (!msg_ptr) { bpf_ringbuf_discard(event, 0); return 0; }
-    bpf_probe_read_user(&msg_hdr, sizeof(msg_hdr), msg_ptr);
-
-    if (msg_hdr.msg_iovlen > 0 && msg_hdr.msg_iov) {
-        struct iovec {
-            void *iov_base;
-            __u64 iov_len;
-        } iov;
-        bpf_probe_read_user(&iov, sizeof(iov), msg_hdr.msg_iov);
-        if (iov.iov_len > 0 && iov.iov_base) {
-            __u64 read_len = iov.iov_len < sizeof(event->payload)
-                           ? iov.iov_len : sizeof(event->payload);
-            bpf_probe_read_user(&event->payload, read_len, iov.iov_base);
-        }
-    }
-
-    bpf_ringbuf_submit(event, 0);
-    return 0;
-}
-
-// Network sendmmsg tracepoint (x86_64)
-SEC("tracepoint/syscalls/sys_enter_sendmmsg")
-int trace_sendmmsg(void *ctx) {
-    struct KernelEvent *event;
-    event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
-    if (!event) return 0;
-
-    __builtin_memset(event, 0, sizeof(struct KernelEvent));
-
-    event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->event_type = 2;
-
-    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
-        bpf_ringbuf_discard(event, 0);
-        return 0;
-    }
-
-    struct mmsghdr {
-        void *msg_name;
-        __u32 msg_namelen;
-        __u32 _pad;
-        void *msg_iov;
-        __u64 msg_iovlen;
-        void *msg_control;
-        __u64 msg_controllen;
-        __u32 msg_flags;
-        __u32 msg_len;
-    } mm;
-
-    const struct mmsghdr *mm_ptr = NULL;
-    bpf_core_read(&mm_ptr, sizeof(mm_ptr), (void *)((char *)ctx + 24));
-    if (!mm_ptr) { bpf_ringbuf_discard(event, 0); return 0; }
-    bpf_probe_read_user(&mm, sizeof(mm), mm_ptr);
-
-    if (mm.msg_iovlen > 0 && mm.msg_iov) {
-        struct iovec {
-            void *iov_base;
-            __u64 iov_len;
-        } iov;
-        bpf_probe_read_user(&iov, sizeof(iov), mm.msg_iov);
-        if (iov.iov_len > 0 && iov.iov_base) {
-            __u64 read_len = iov.iov_len < sizeof(event->payload)
-                           ? iov.iov_len : sizeof(event->payload);
-            bpf_probe_read_user(&event->payload, read_len, iov.iov_base);
-        }
-    }
-
-    bpf_ringbuf_submit(event, 0);
-    return 0;
-}
-
-SEC("tracepoint/syscalls/sys_enter_connect")
-int trace_connect(void *ctx) {
-    struct KernelEvent *event;
-
-    event = bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(*event), 0);
-    if (!event) return 0;
-
-    __builtin_memset(event, 0, sizeof(struct KernelEvent));
-
-    event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->event_type = 3;
-
-    if (bpf_get_current_comm(&event->comm, sizeof(event->comm)) < 0) {
-        bpf_ringbuf_discard(event, 0);
-        return 0;
-    }
-
-    __u32 addr_len = 0;
-    bpf_core_read(&addr_len, sizeof(addr_len), (void *)((char *)ctx + 32));
-    const char *addr_ptr = NULL;
-    bpf_core_read(&addr_ptr, sizeof(addr_ptr), (void *)((char *)ctx + 24));
-    if (addr_ptr && addr_len > 0) {
-        __u64 read_len = addr_len < sizeof(event->payload)
-                       ? addr_len : sizeof(event->payload);
-        bpf_probe_read_user(&event->payload, read_len, addr_ptr);
+    if (addr && addr_len > 0) {
+        __u64 read_len = addr_len < sizeof(event->payload) ? addr_len : sizeof(event->payload);
+        bpf_probe_read_user(&event->payload, read_len, addr);
     } else {
         __builtin_memcpy(event->payload, "NET_CONNECT", 11);
     }

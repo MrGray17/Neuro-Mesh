@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <optional>
 
 namespace neuro_mesh {
 
@@ -32,7 +33,9 @@ inline std::string base64_encode(const std::string& data) {
     return out;
 }
 
-inline std::string base64_decode(const std::string& data) {
+enum class Base64Error { NONE, INVALID_CHAR, INVALID_LENGTH };
+
+inline std::optional<std::string> base64_decode(const std::string& data, Base64Error* err_out = nullptr) {
     static const int8_t lookup[128] = {
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
@@ -44,13 +47,24 @@ inline std::string base64_decode(const std::string& data) {
         41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1
     };
 
+    if (data.empty()) {
+        if (err_out) *err_out = Base64Error::NONE;
+        return std::string{};
+    }
+
+    if (data.size() % 4 != 0) {
+        if (err_out) *err_out = Base64Error::INVALID_LENGTH;
+        return std::nullopt;
+    }
+
     std::string out;
     out.reserve((data.size() / 4) * 3);
     int val = 0, valb = -8;
     for (char c : data) {
         if (c == '=') break;
         if (static_cast<size_t>(c) >= 128 || lookup[static_cast<size_t>(c)] == -1) {
-            return {};
+            if (err_out) *err_out = Base64Error::INVALID_CHAR;
+            return std::nullopt;
         }
         val = (val << 6) + lookup[static_cast<size_t>(c)];
         valb += 6;
@@ -59,7 +73,13 @@ inline std::string base64_decode(const std::string& data) {
             valb -= 8;
         }
     }
+    if (err_out) *err_out = Base64Error::NONE;
     return out;
+}
+
+inline std::string base64_decode_legacy(const std::string& data) {
+    auto result = base64_decode(data);
+    return result.value_or(std::string{});
 }
 
 } // namespace neuro_mesh

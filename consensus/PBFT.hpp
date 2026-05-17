@@ -53,6 +53,7 @@ private:
         int view = 0;
         uint64_t sequence = 0;
         std::string pre_prepare_hash;
+        std::string evidence_key;
         std::chrono::steady_clock::time_point started_at;
         std::chrono::steady_clock::time_point last_activity;
     };
@@ -96,6 +97,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mtx);
         m_peer_public_keys[node_id] = crypto::IdentityCore::get_pubkey_from_pem(pem_key);
         m_node_trust[node_id] = NodeTrustScore{};
+        m_registered_peers.insert(node_id);
     }
 
     void set_my_identity(const std::string& node_id) {
@@ -160,7 +162,6 @@ public:
 
         cleanup_stale_rounds();
 
-        // Rate limit: throttle PRE_PREPARE floods per sender
         if (msg.stage_str == "PRE_PREPARE") {
             if (!check_rate_limit(msg.sender_id)) {
                 std::cerr << "[PBFT] RATE LIMITED: " << msg.sender_id
@@ -171,21 +172,35 @@ public:
         }
 
         auto msg_hash = compute_message_hash(msg);
+
+        std::string round_key = crypto::IdentityCore::sha256_hex(msg.evidence_json);
+        if (round_key.empty()) round_key = msg.evidence_json;
+
+        if (m_seen_messages.count(msg_hash)) {
+            return PBFTStage::IDLE;
+        }
+        m_seen_messages.insert(msg_hash);
+        if (m_seen_messages.size() > 100000) {
+            auto it = m_seen_messages.begin();
+            m_seen_messages.erase(it, std::next(it, m_seen_messages.size() / 2));
+        }
+
         detect_equivocation(msg, msg_hash);
 
-        auto& stage_voters = m_vote_registry[msg.evidence_json][msg.stage_str];
+        auto& stage_voters = m_vote_registry[round_key][msg.stage_str];
 
         if (stage_voters.find(msg.sender_id) != stage_voters.end()) {
             return PBFTStage::IDLE;
         }
         stage_voters.insert(msg.sender_id);
 
-        ConsensusRound& round = m_rounds[msg.evidence_json];
+        ConsensusRound& round = m_rounds[round_key];
         if (round.state == PBFTStage::IDLE) {
             round.started_at = std::chrono::steady_clock::now();
             round.view = msg.view;
             round.sequence = msg.sequence_number;
             round.pre_prepare_hash = msg_hash;
+            round.evidence_key = round_key;
         }
 
         if (round.view != msg.view) {
@@ -200,7 +215,7 @@ public:
 
         round.last_activity = std::chrono::steady_clock::now();
 
-        int quorum = quorum_size();
+        int quorum = quorum_size_unlocked();
         int current_votes = static_cast<int>(stage_voters.size());
 
         PBFTStage previous_state = round.state;
@@ -209,7 +224,7 @@ public:
             round.state = PBFTStage::PREPARE;
         }
         else if (msg.stage_str == "PREPARE" && current_votes >= quorum && round.state == PBFTStage::PREPARE) {
-            if (!verify_quorum_intersection(msg.evidence_json, msg_hash)) {
+            if (!verify_quorum_intersection(round_key, msg_hash)) {
                 std::cerr << "[PBFT] QUORUM INTERSECTION FAILED - possible partition attack" << std::endl;
                 return PBFTStage::IDLE;
             }
@@ -235,8 +250,9 @@ public:
         return elapsed > VIEW_CHANGE_TIMEOUT_SEC && it->second.state != PBFTStage::EXECUTED;
     }
 
-    int peer_count() const { return m_total_nodes; }
-    int quorum_size() const { return 2 * ((std::max(1, m_total_nodes) - 1) / 3) + 1; }
+    int peer_count() const { std::lock_guard<std::mutex> lock(m_mtx); return m_total_nodes; }
+    int quorum_size() const { std::lock_guard<std::mutex> lock(m_mtx); return (2 * std::max(1, m_total_nodes) + 2) / 3; }
+    int quorum_size_unlocked() const { return (2 * std::max(1, m_total_nodes) + 2) / 3; }
 
     void set_peer_count(int n) {
         std::lock_guard<std::mutex> lock(m_mtx);
@@ -264,6 +280,14 @@ public:
             }
         }
         m_total_nodes = std::max(1, m_total_nodes - 1);
+    }
+
+    bool try_increment_peers(const std::string& node_id) {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        if (m_registered_peers.count(node_id)) return false;
+        m_registered_peers.insert(node_id);
+        ++m_total_nodes;
+        return true;
     }
 
     double get_node_trust(const std::string& node_id) const {
@@ -302,7 +326,7 @@ public:
         return it->second.rbegin()->second;
     }
 
-    int current_view() const { return m_current_view; }
+    int current_view() const { std::lock_guard<std::mutex> lock(m_mtx); return m_current_view; }
 
     void advance_view() {
         std::lock_guard<std::mutex> lock(m_mtx);
@@ -351,11 +375,7 @@ private:
         return true;
     }
 
-    bool verify_quorum_intersection(const std::string& evidence, const std::string& expected_hash) const {
-        if (!expected_hash.empty() && evidence != expected_hash) {
-            return false;
-        }
-
+    bool verify_quorum_intersection(const std::string& evidence, const std::string& /*expected_hash*/) const {
         auto prep_it = m_vote_registry.find(evidence);
         if (prep_it == m_vote_registry.end()) return true;
 
@@ -363,7 +383,7 @@ private:
         if (prep_voters_it == prep_it->second.end()) return true;
 
         const auto& prepare_voters = prep_voters_it->second;
-        if (prepare_voters.size() < static_cast<size_t>(quorum_size())) return true;
+        if (prepare_voters.size() < static_cast<size_t>(quorum_size_unlocked())) return true;
 
         std::set<std::string> prep_set(prepare_voters.begin(), prepare_voters.end());
 
@@ -378,7 +398,7 @@ private:
                              commit_set.begin(), commit_set.end(),
                              std::back_inserter(intersection));
 
-        return static_cast<int>(intersection.size()) >= quorum_size();
+        return static_cast<int>(intersection.size()) >= quorum_size_unlocked();
     }
 
     void detect_equivocation(const P2PMessage& msg, const std::string& msg_hash) {
@@ -488,6 +508,8 @@ private:
     std::unordered_map<std::string, std::map<uint64_t, std::string>> m_message_history;
     std::map<std::string, EquivocationEvidence> m_equivocation_history;
     std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> m_rate_limits;
+    std::unordered_set<std::string> m_seen_messages;
+    std::unordered_set<std::string> m_registered_peers;
 };
 
 } // namespace neuro_mesh

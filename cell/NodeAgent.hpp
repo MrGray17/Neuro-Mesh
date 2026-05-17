@@ -39,8 +39,6 @@ public:
             m_queue.push(std::move(event));
             m_cv.notify_one();
         } else {
-            m_queue.pop();
-            m_queue.push(std::move(event));
             m_drops++;
         }
     }

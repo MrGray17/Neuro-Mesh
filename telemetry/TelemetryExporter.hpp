@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 #include <iostream>
+#include <cerrno>
+#include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -9,10 +11,14 @@ namespace neuro_mesh {
 class TelemetryExporter {
 public:
     static void update_status(const std::string& node_id, const std::string& status, const std::string& target = "NONE") {
-        // Use O_TRUNC to overwrite file on each write — prevents unbounded growth
-        int fd = open("web/mesh_status.json", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        static constexpr const char* kTargetPath = "web/mesh_status.json";
+        static constexpr const char* kTempPath = "web/mesh_status.json.tmp";
+
+        std::string payload = "{\"node\": \"" + node_id + "\", \"event\": \"" + status + "\", \"target\": \"" + target + "\"}\n";
+
+        int fd = open(kTempPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd == -1) {
-            std::cerr << "[WARN] TelemetryExporter: Failed to open telemetry file." << std::endl;
+            std::cerr << "[WARN] TelemetryExporter: Failed to open temp telemetry file." << std::endl;
             return;
         }
 
@@ -28,16 +34,26 @@ public:
             return;
         }
 
-        std::string payload = "{\"node\": \"" + node_id + "\", \"event\": \"" + status + "\", \"target\": \"" + target + "\"}\n";
         ssize_t written = write(fd, payload.c_str(), payload.length());
         if (written < 0) {
             std::cerr << "[WARN] TelemetryExporter: Write failed." << std::endl;
+            fl.l_type = F_UNLCK;
+            fcntl(fd, F_SETLK, &fl);
+            close(fd);
+            return;
+        }
+
+        if (::fsync(fd) != 0) {
+            std::cerr << "[WARN] TelemetryExporter: fsync failed." << std::endl;
         }
 
         fl.l_type = F_UNLCK;
         fcntl(fd, F_SETLK, &fl);
-
         close(fd);
+
+        if (rename(kTempPath, kTargetPath) != 0) {
+            std::cerr << "[WARN] TelemetryExporter: rename failed: " << strerror(errno) << std::endl;
+        }
     }
 };
 

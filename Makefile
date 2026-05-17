@@ -87,6 +87,7 @@ AGENT_SRCS := main.cpp \
               enforcer/MitigationEngine.cpp \
               crypto/CryptoCore.cpp \
               crypto/KeyManager.cpp \
+              crypto/CertificateAuthority.cpp \
               net/TransportLayer.cpp \
               attacks/AttackSimulator.cpp \
               telemetry/AuditLogger.cpp \

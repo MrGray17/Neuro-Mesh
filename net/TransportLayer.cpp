@@ -13,6 +13,7 @@
 #include <sstream>
 #include <iomanip>
 #include <fstream>
+#include <algorithm>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/tls1.h>
@@ -35,7 +36,16 @@ TLSContext::TLSContext(const TLSConfig& config)
     if (!server || !client) {
         if (server) SSL_CTX_free(server);
         if (client) SSL_CTX_free(client);
-        throw std::runtime_error("Failed to create SSL contexts");
+        std::string err_detail;
+        BIO* bio = BIO_new(BIO_s_mem());
+        if (bio) {
+            ERR_print_errors(bio);
+            char* data = nullptr;
+            long len = BIO_get_mem_data(bio, &data);
+            if (len > 0 && data) err_detail.assign(data, len);
+            BIO_free(bio);
+        }
+        throw std::runtime_error("Failed to create SSL contexts: " + err_detail);
     }
 
     m_server_ctx.reset(server);
@@ -51,8 +61,18 @@ TLSContext::TLSContext(const TLSConfig& config)
     SSL_CTX_set_cipher_list(m_server_ctx.get(), m_config.ciphers.c_str());
     SSL_CTX_set_cipher_list(m_client_ctx.get(), m_config.ciphers.c_str());
 
-    SSL_CTX_set_security_level(m_server_ctx.get(), 1);
-    SSL_CTX_set_security_level(m_client_ctx.get(), 1);
+    SSL_CTX_set_security_level(m_server_ctx.get(), 2);
+    SSL_CTX_set_security_level(m_client_ctx.get(), 2);
+
+    // Load cert/key if paths provided — was never called before (silent no-op bug)
+    if (!m_config.cert_path.empty() && !m_config.key_path.empty()) {
+        load_certificate();
+    }
+
+    // Load CA and set up mutual TLS if configured
+    if (!m_config.ca_path.empty()) {
+        load_ca_certificate();
+    }
 }
 
 TLSContext::~TLSContext() = default;
@@ -85,15 +105,24 @@ bool TLSContext::load_ca_certificate() {
         return false;
     }
 
+    // Load CA into both contexts
     if (SSL_CTX_load_verify_locations(m_server_ctx.get(), m_config.ca_path.c_str(), nullptr) != 1) {
         ERR_print_errors_fp(stderr);
         return false;
     }
+    if (SSL_CTX_load_verify_locations(m_client_ctx.get(), m_config.ca_path.c_str(), nullptr) != 1) {
+        ERR_print_errors_fp(stderr);
+        return false;
+    }
 
-    if (m_config.verify_client) {
+    // Enable mutual TLS on both sides
+    if (m_config.verify_client || m_config.enable_mtls) {
         SSL_CTX_set_verify(m_server_ctx.get(), SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
         SSL_CTX_set_client_CA_list(m_server_ctx.get(), SSL_load_client_CA_file(m_config.ca_path.c_str()));
     }
+
+    // Always verify server cert on client side when CA is available
+    SSL_CTX_set_verify(m_client_ctx.get(), SSL_VERIFY_PEER, nullptr);
 
     return true;
 }
@@ -175,11 +204,27 @@ bool TransportLayer::listen(int backlog) {
 int TransportLayer::accept() {
     if (m_server_fd < 0) return -1;
 
+    // Rate limit: max 50 accepts/sec
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_rate_ts).count();
+    if (elapsed >= 1) {
+        m_accept_rate = 0;
+        m_rate_ts = now;
+    }
+    if (m_accept_rate >= 50) return -1;
+
+    // Max active connections cap
+    {
+        std::lock_guard<std::mutex> lock(m_ssl_mtx);
+        if (m_active_ssl.size() >= 256) return -1;
+    }
+
     struct sockaddr_in client_addr {};
     socklen_t client_len = sizeof(client_addr);
 
     int client_fd = accept4(m_server_fd, (struct sockaddr*)&client_addr, &client_len, SOCK_NONBLOCK);
     if (client_fd < 0) return -1;
+    ++m_accept_rate;
 
     SSL* ssl = m_tls_ctx.create_server_ssl();
     if (!ssl) {
@@ -207,8 +252,10 @@ int TransportLayer::accept() {
         int pr = poll(&pfd, 1, 3000);
         if (pr <= 0) {
             if (pr == 0) {
+                char addr_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &client_addr.sin_addr, addr_str, sizeof(addr_str));
                 std::cerr << "[TLS] Handshake timeout from "
-                          << inet_ntoa(client_addr.sin_addr) << std::endl;
+                          << addr_str << std::endl;
             }
             SSL_free(ssl);
             close(client_fd);
@@ -254,21 +301,28 @@ int TransportLayer::connect(const std::string& host, uint16_t port) {
         return -1;
     }
 
+    if (SSL_get_verify_result(ssl) != X509_V_OK) {
+        std::cerr << "[TLS] Server certificate verification failed for " << host << std::endl;
+        SSL_free(ssl);
+        close(fd);
+        return -1;
+    }
+
     std::lock_guard<std::mutex> lock(m_ssl_mtx);
     m_active_ssl[fd] = std::unique_ptr<SSL, SSLDeleter>(ssl, SSLDeleter());
     return fd;
 }
 
 ssize_t TransportLayer::send(int fd, const void* buf, size_t len) {
-    std::unique_ptr<SSL, SSLDeleter> ssl_ref;
+    SSL* ssl_ptr = nullptr;
     {
         std::lock_guard<std::mutex> lock(m_ssl_mtx);
         auto it = m_active_ssl.find(fd);
         if (it != m_active_ssl.end()) {
-            ssl_ref.reset(it->second.release());
+            ssl_ptr = it->second.get();
         }
     }
-    if (!ssl_ref) {
+    if (!ssl_ptr) {
         size_t total = 0;
         while (total < len) {
             ssize_t n = ::send(fd, static_cast<const char*>(buf) + total, len - total, MSG_NOSIGNAL);
@@ -279,31 +333,26 @@ ssize_t TransportLayer::send(int fd, const void* buf, size_t len) {
     }
     size_t total = 0;
     while (total < len) {
-        ssize_t n = SSL_write(ssl_ref.get(), static_cast<const char*>(buf) + total, len - total);
+        ssize_t n = SSL_write(ssl_ptr, static_cast<const char*>(buf) + total, len - total);
         if (n <= 0) return total > 0 ? static_cast<ssize_t>(total) : -1;
         total += n;
     }
-    std::lock_guard<std::mutex> lock(m_ssl_mtx);
-    m_active_ssl[fd] = std::move(ssl_ref);
     return static_cast<ssize_t>(total);
 }
 
 ssize_t TransportLayer::recv(int fd, void* buf, size_t len) {
-    std::unique_ptr<SSL, SSLDeleter> ssl_ref;
+    SSL* ssl_ptr = nullptr;
     {
         std::lock_guard<std::mutex> lock(m_ssl_mtx);
         auto it = m_active_ssl.find(fd);
         if (it != m_active_ssl.end()) {
-            ssl_ref.reset(it->second.release());
+            ssl_ptr = it->second.get();
         }
     }
-    if (!ssl_ref) {
+    if (!ssl_ptr) {
         return ::recv(fd, buf, len, 0);
     }
-    ssize_t n = SSL_read(ssl_ref.get(), buf, len);
-    std::lock_guard<std::mutex> lock(m_ssl_mtx);
-    m_active_ssl[fd] = std::move(ssl_ref);
-    return n;
+    return SSL_read(ssl_ptr, buf, len);
 }
 
 void TransportLayer::close(int fd) {

@@ -2,7 +2,6 @@
 #include <bpf/bpf_helpers.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
-#include <arpa/inet.h>
 
 // WHY: eBPF Hash Map pinned to the kernel. 
 // User-space (SystemJailer) writes the malicious IP here. Kernel reads it.
