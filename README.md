@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/consensus-PBFT-%23934fff?logo=blockchaindotcom" alt="PBFT">
   <img src="https://img.shields.io/badge/crypto-Ed25519-%23000000?logo=letsencrypt" alt="Ed25519">
   <img src="https://img.shields.io/badge/docker-ready-%232496ED?logo=docker" alt="Docker">
-  <img src="https://github.com/MrGray17/Neuro-Mesh/actions/workflows/build.yml/badge.svg" alt="CI">
+  <img src="https://github.com/MrGray17/Neuro-Mesh/actions/workflows/ci.yml/badge.svg" alt="CI">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
@@ -75,10 +75,12 @@ No leader election. No raft. The mesh *is* the authority.
 ### Build
 
 ```bash
-make clean && make
+make clean && make       # build neuro_agent
+make test                # build & run all tests
+make tools               # inject_event + test_crypto
 ```
 
-Three binaries land in `bin/`: `neuro_agent` (the node), `inject_event` (threat injector), `test_crypto` (crypto unit tests).
+Four binaries land in `bin/`: `neuro_agent` (the node), `inject_event` (threat injector), plus 8 test binaries under `bin/test_*`.
 
 ### Run
 
@@ -126,17 +128,24 @@ docker compose down                          # tear down
 
 ### Unit Tests
 
-Five test binaries cover every subsystem:
-
 ```bash
-./bin/test_crypto       # Ed25519 sign/verify
-./bin/test_pbft         # PBFT state machine (10 tests)
-./bin/test_enforcer     # PolicyEnforcer logic (9 tests)
-./bin/test_meshnode     # MeshNode discovery/PEX (9 tests)
-./bin/test_inference    # ONNX entropy scoring (5 tests)
+make test   # Build & run all test binaries (gtest + standalone)
 ```
 
-All 36 tests must pass before any merge.
+Eight test binaries cover every subsystem (70+ tests):
+
+| Binary | What it tests |
+|--------|---------------|
+| `test_common` (gtest) | `UniqueFD`, `Result`, `Base64`, `StateJournal` — 21 tests |
+| `test_mitigation` (gtest) | `MitigationEngine` response orchestration — 9 tests |
+| `test_auditlogger` (gtest) | `AuditLogger` JSON emit, sanitization — 7 tests |
+| `test_pbft` | PBFT state machine — quorum, signature binding, dedup — 10 tests |
+| `test_enforcer` | PolicyEnforcer safe-list, IP validation, cascade — 9 tests |
+| `test_meshnode` | Discovery, PEX handshake, peer management — 9 tests |
+| `test_inference` | ONNX entropy scoring, decay — 5 tests |
+| `test_crypto` | Ed25519 sign/verify — 3 tests |
+
+All tests must pass before any merge.
 
 ### Integration Test
 
