@@ -52,7 +52,7 @@
 1. **eBPF probes** hook `execve`, `sendto`, `connect`, and XDP — capturing kernel-level events in real time
 2. **InferenceEngine** scores event entropy; anomalies trigger a consensus round
 3. **PBFT consensus** runs over UDP broadcast — every node votes, every vote is Ed25519-signed
-4. **PolicyEnforcer** isolates guilty peers via a 3-tier cascade: eBPF map → nftables → iptables
+4. **PolicyEnforcer** isolates guilty peers via a 3-tier cascade: eBPF map → nftables (IP + loopback interface rules) → iptables
 5. **Telemetry gossip** — each node unicasts its state to all peers; any node can serve the full mesh dashboard
 
 No leader election. No raft. The mesh *is* the authority.
@@ -189,7 +189,9 @@ docker exec neuro_charlie /app/inject_event \
   --event entropy_spike --verdict CRITICAL
 ```
 
-The injector sends `CMD:INJECT` over the node's Unix socket. The node kicks off a PBFT round against the target. Watch the dashboard — consensus stages fire, votes flood the mesh, and the target gets isolated (on a real Linux host with CAP_NET_ADMIN).
+The injector sends `CMD:INJECT` over the node's Unix socket. The node kicks off a PBFT round against the target. Evidence is base64-encoded in the VOTE wire format, then decoded on receipt — pipe chars inside JSON evidence cannot break the protocol.
+
+Watch the dashboard — consensus stages fire, votes flood the mesh, and the target gets isolated (on a real Linux host with CAP_NET_ADMIN).
 
 ### Full-mesh chaos — trigger eBPF entropy on every node
 
@@ -214,6 +216,10 @@ Four stages, no leader:
 | `EXECUTED` | MitigationEngine enforces isolation |
 
 Quorum = `(2n + 2) / 3` ≥ `2f + 1` Byzantine fault tolerance. Every message binds `(stage | target | evidence)` under Ed25519 — no cross-stage replay, no spoofed votes. Self-votes go through the same verification path as external votes. Zero trust.
+
+Evidence is base64-encoded in the wire protocol — pipe characters inside JSON payloads can't corrupt message parsing.
+
+Self-vote EXECUTED attacks are blocked: the node refuses to execute isolation on itself when no external peers have voted.
 
 Rounds expire after 120s of inactivity to bound memory.
 
@@ -242,9 +248,13 @@ The TelemetryBridge runs as a sandboxed child process: `fork()` → `prctl(PR_SE
 | Property | How |
 |----------|-----|
 | Shell injection impossible | `fork()` + `execv()` with `argv[]`, never `system()` |
+| FD leak prevention | `close_range()` syscall in all fork children — no racy per-FD loops |
 | Binary-safe crypto | `std::string::data()` / `size()` — no null-byte truncation |
 | Cross-stage replay protection | Signatures bind `(stage + target + evidence)` |
-| Self-isolation prevention | Safe list + loopback guard |
+| Pipe-delimiter injection | Evidence base64-encoded in VOTE messages — pipe chars in JSON don't break protocol |
+| SSRF prevention | Webhook URL DNS-resolved and checked against 10 private IP ranges before curl fork |
+| Self-isolation prevention | Safe list + loopback guard + self-vote EXECUTED quorum check |
+| mTLS | TLS 1.3 with mutual certificate verification (CA path required), cert loaded from keystore |
 | Bounded memory | PBFT rounds evicted at 120s; eBPF ring buffer drained in tight loop |
 | Atomic telemetry | `flock()` on shared JSON sink |
 | RAII resources | `UniqueFD` wraps all socket FDs |
@@ -262,7 +272,7 @@ neuro_mesh/
 ├── crypto/            Ed25519 keygen, sign, verify (OpenSSL EVP) + KeyManager (PKCS#11)
 ├── enforcer/          PolicyEnforcer (3-tier block) + MitigationEngine (process kill)
 ├── telemetry/         AuditLogger (UDP JSON) + TelemetryBridge (sandboxed WS child, seccomp)
-├── net/               TLS transport layer (tofu certificate pinning)
+├── net/               TLS 1.3 transport layer (mTLS, cert loading, rate-limited accept)
 ├── common/            StateJournal, UniqueFD, Result<T,E>, Base64
 ├── attacks/           AttackSimulator (synthetic threat patterns)
 ├── orchestration/     Python tools — ws_proxy, mesh_manager, anomaly_classifier
