@@ -1059,7 +1059,7 @@ function pushFeed(category, message, hash, mitreTags) {
   entry.innerHTML = `
     <span class="ts">${ts}</span>
     <span class="cat">[${category}]</span>
-    <span class="hash">${shortHash}</span>
+    <span class="hash">${escapeHtml(shortHash)}</span>
     <span class="msg">${escapeHtml(message)}${mitreHtml}</span>
   `;
 

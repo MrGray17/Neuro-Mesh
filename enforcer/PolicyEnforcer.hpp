@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <mutex>
 #include <shared_mutex>
 #include <set>
@@ -55,6 +56,7 @@ public:
     static bool is_valid_ipv6(const std::string& ip);
     static bool is_valid_ip(const std::string& ip);
     bool is_safe(const std::string& target_id) const;
+    bool is_ip_safe(const std::string& ip);
 
 private:
     // Returns process-wide available backends (probed once, static — immune to instance corruption)
@@ -82,6 +84,13 @@ private:
     // Fork+exec helpers
     static bool fork_exec_wait(const char* path, const char* const* argv);
     static std::pair<bool, std::string> fork_exec_capture(const char* path, const char* const* argv);
+
+    // nftables handle-based deletion helpers (v1.0.9 requires handles)
+    static std::string list_nftables_rules();
+    static std::vector<int> find_nft_handles(const std::string& list_output,
+                                              const std::string& match_substr);
+    static bool delete_nft_handle(int handle);
+    static bool remove_nftables_rules_matching(const std::string& match_substr);
 
     std::mutex m_mtx;
     std::set<std::string> m_isolated_nodes;

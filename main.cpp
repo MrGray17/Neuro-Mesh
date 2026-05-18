@@ -26,7 +26,7 @@
 
 using namespace neuro_mesh;
 
-std::atomic<bool> global_running{true};
+volatile sig_atomic_t global_running = 1;
 
 // Read container memory from cgroups (v2 or v1), falling back to sysinfo.
 // sysinfo() reports host total RAM inside containers — cgroups give the true footprint.
@@ -114,7 +114,7 @@ static float onnx_to_entropy(float score) {
 void signal_handler(int /*signum*/) {
     const char msg[] = "\n[SYS] Interrupt signal received. Initiating shutdown...\n";
     ::write(STDERR_FILENO, msg, sizeof(msg) - 1);
-    global_running.store(false, std::memory_order_release);
+    global_running = 0;
 }
 
 // =============================================================================
@@ -127,11 +127,11 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
     (void)bridge;
     int seq = 0;
     pid_t my_pid = getpid();  // filter eBPF events from our own traffic
-    while (global_running.load(std::memory_order_acquire)) {
-        for (int i = 0; i < 10 && global_running.load(std::memory_order_acquire); ++i) {
+    while (global_running) {
+        for (int i = 0; i < 10 && global_running; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        if (!global_running.load(std::memory_order_acquire)) break;
+        if (!global_running) break;
 
         // Build peer_list JSON array
         auto peer_ids = mesh.get_active_peer_ids();
@@ -295,7 +295,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
     tv.tv_sec = 1;
     tv.tv_usec = 0;
 
-    while (global_running.load(std::memory_order_acquire)) {
+    while (global_running) {
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(server_fd.get(), &fds);
@@ -303,7 +303,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
         tv.tv_usec = 0;
 
         int ret = select(server_fd.get() + 1, &fds, nullptr, nullptr, &tv);
-        if (ret <= 0 || !global_running.load(std::memory_order_acquire)) continue;
+        if (ret <= 0 || !global_running) continue;
 
         int client_fd = accept(server_fd.get(), nullptr, nullptr);
         if (client_fd < 0) continue;
@@ -330,6 +330,14 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - rl.window.front()).count();
                     if (elapsed >= 1) rl.window.pop_front();
                     else break;
+                }
+                // Evict stale entries to prevent unbounded map growth.
+                // Only scan when the map has grown beyond a reasonable size.
+                if (s_ipc_rate_limits.size() > 256) {
+                    for (auto it = s_ipc_rate_limits.begin(); it != s_ipc_rate_limits.end(); ) {
+                        if (it->second.window.empty()) it = s_ipc_rate_limits.erase(it);
+                        else ++it;
+                    }
                 }
                 if (rl.window.size() >= IPC_RATE_LIMIT_PER_SEC) {
                     std::cerr << "[IPC] REJECTED: rate limit exceeded for uid=" << cred.uid
@@ -374,7 +382,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
             }
         }
 
-        char buf[256];
+        char buf[65536];
         ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
         if (n > 0) {
             buf[n] = '\0';
@@ -451,7 +459,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                 jailer.reset_enforcement();
                 std::cout << "[IPC] Enforcement reset." << std::endl;
             } else if (cmd == "CMD:SHUTDOWN") {
-                global_running = false;
+                global_running = 0;
             }
         }
         close(client_fd);
@@ -541,7 +549,19 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
                 std::string ip = entry.substr(0, colon);
-                int port = std::stoi(entry.substr(colon + 1));
+                int port = 0;
+                try {
+                    port = std::stoi(entry.substr(colon + 1));
+                } catch (...) {
+                    std::cerr << "[BOOT] Invalid port in NEURO_PEERS entry: "
+                              << entry << std::endl;
+                    continue;
+                }
+                if (port <= 0 || port > 65535) {
+                    std::cerr << "[BOOT] Port out of range in NEURO_PEERS entry: "
+                              << entry << std::endl;
+                    continue;
+                }
                 seeds.emplace_back(ip, port);
             }
             if (!seeds.empty()) mesh.set_seed_peers(seeds);
@@ -582,8 +602,11 @@ int main(int argc, char* argv[]) {
                   << " — continuing with /proc/net/dev entropy only." << std::endl;
     }
 
+    // ---- Stage 6: P2P listener ----
+    mesh.start();
+
     // ---- Stage 5: Heartbeat (node vitals broadcast every 2s) ----
-    // Runs even without ONNX — network entropy from /proc/net/dev is always available.
+    // Runs after mesh.start() so listener threads are ready to receive gossip.
     std::thread heartbeat_thread;
     if (bridge.alive()) {
         heartbeat_thread = std::thread(heartbeat_loop, std::ref(bridge), std::ref(mesh),
@@ -592,16 +615,13 @@ int main(int argc, char* argv[]) {
                   << (inference ? "" : " No ONNX — network entropy only.") << std::endl;
     }
 
-    // ---- Stage 6: P2P listener ----
-    mesh.start();
-
     // ---- Stage 7: IPC listener for C2 commands ----
     std::thread ipc_thread(ipc_listener_loop, node_id, std::ref(jailer), std::ref(mesh), std::ref(bridge));
 
     std::cout << "[BOOT] System fully operational. Awaiting P2P telemetry..." << std::endl;
 
     // ---- Main idle loop ----
-    while (global_running.load(std::memory_order_acquire)) {
+    while (global_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
@@ -613,7 +633,7 @@ int main(int argc, char* argv[]) {
     mesh.stop();
 
     if (ipc_thread.joinable()) {
-        global_running = false;  // belt-and-suspenders for IPC select() wake
+        global_running = 0;  // belt-and-suspenders for IPC select() wake
         ipc_thread.join();
     }
 

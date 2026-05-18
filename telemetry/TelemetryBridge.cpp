@@ -55,8 +55,8 @@ Result<void> TelemetryBridge::spawn() {
     }
 
     int pipefd[2];
-    if (pipe2(pipefd, O_CLOEXEC) == -1) {
-        return Result<void>(std::string("pipe2(O_CLOEXEC) failed: ") + strerror(errno));
+    if (pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) == -1) {
+        return Result<void>(std::string("pipe2(O_CLOEXEC | O_NONBLOCK) failed: ") + strerror(errno));
     }
 
     pid_t pid = fork();
@@ -104,14 +104,22 @@ Result<void> TelemetryBridge::push_telemetry(std::string_view json) {
 
     ssize_t written = write(m_write_fd.get(), framed.data(), framed.size());
     if (written < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Pipe buffer full — child not consuming fast enough.
+            // Best-effort: drop the message rather than block the caller.
+            return Result<void>("pipe write: EAGAIN (buffer full, message dropped)");
+        }
         return Result<void>(std::string("pipe write failed: ") + strerror(errno));
     }
     if (static_cast<size_t>(written) < framed.size()) {
         // Partial write — pipe full. The child is not consuming fast enough.
-        // Try to write the remainder (best-effort, non-blocking not required).
+        // Try to write the remainder (best-effort, non-blocking).
         size_t remaining = framed.size() - static_cast<size_t>(written);
         ssize_t w2 = write(m_write_fd.get(), framed.data() + written, remaining);
         if (w2 < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return Result<void>("pipe write (partial): EAGAIN (buffer full, remainder dropped)");
+            }
             return Result<void>(std::string("pipe write (partial) failed: ") + strerror(errno));
         }
     }
@@ -407,11 +415,15 @@ static void pipe_read_callback(struct us_internal_callback_t *cb) {
         if (n == 0) {
             std::cerr << "[TELEMETRY_BRIDGE] Pipe closed (parent shutdown). Exiting."
                       << std::endl;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            _exit(0);
+            return;
+        }
+        if (errno == EINTR) return;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
             std::cerr << "[TELEMETRY_BRIDGE] Pipe read error: "
                       << strerror(errno) << ". Exiting." << std::endl;
+            _exit(0);
         }
-        _exit(0);
         return;
     }
 

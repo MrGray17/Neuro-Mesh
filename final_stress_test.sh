@@ -153,7 +153,7 @@ if iptables -L INPUT -n 2>/dev/null | grep -q "${TARGET_IP}"; then
 fi
 
 # Check eBPF
-if [[ -f /sys/fs/bpf/neuro_mesh/neuro_blocklist ]]; then
+if [[ -f /sys/fs/bpf/neuro_mesh/xdp_blacklist ]]; then
     ENFORCED=true
     BACKEND_USED="${BACKEND_USED}${BACKEND_USED:+/}eBPF"
 fi

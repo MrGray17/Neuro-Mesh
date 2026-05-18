@@ -303,19 +303,32 @@ bool MitigationEngine::execute_response(const std::string& evidence_json,
         (event_type == "lateral_movement" ||
          verdict == "THREAT" ||
          verdict == "CRITICAL")) {
-        log_enforcement("BLOCK",
-                        "ip=" + src_ip + " event=" + event_type,
-                        consensus_hash);
 
-        if (block_ip_address(src_ip)) {
-            any_action = true;
-            log_enforcement("BLOCK_OK",
-                            "ip=" + src_ip + " traffic dropped",
+        // Check safe list BEFORE blocking — if the IP belongs to a
+        // safe-listed node, refuse to block it regardless of what the
+        // evidence says (prevents spoofed src_ip from isolating trusted peers).
+        if (m_enforcer && m_enforcer->is_ip_safe(src_ip)) {
+            std::cerr << "[MITIGATION] REFUSED: " << src_ip
+                      << " belongs to safe-listed node — skipping block."
+                      << std::endl;
+            log_enforcement("BLOCK_SAFELISTED",
+                            "ip=" + src_ip + " belongs to safe-listed node",
                             consensus_hash);
         } else {
-            log_enforcement("BLOCK_FAIL",
-                            "ip=" + src_ip + " enforcement cascade failed",
+            log_enforcement("BLOCK",
+                            "ip=" + src_ip + " event=" + event_type,
                             consensus_hash);
+
+            if (block_ip_address(src_ip)) {
+                any_action = true;
+                log_enforcement("BLOCK_OK",
+                                "ip=" + src_ip + " traffic dropped",
+                                consensus_hash);
+            } else {
+                log_enforcement("BLOCK_FAIL",
+                                "ip=" + src_ip + " enforcement cascade failed",
+                                consensus_hash);
+            }
         }
     }
 

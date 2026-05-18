@@ -35,8 +35,8 @@ public:
         }
 
         ssize_t written = write(fd, payload.c_str(), payload.length());
-        if (written < 0) {
-            std::cerr << "[WARN] TelemetryExporter: Write failed." << std::endl;
+        if (written < 0 || static_cast<size_t>(written) != payload.length()) {
+            std::cerr << "[WARN] TelemetryExporter: Write failed or partial." << std::endl;
             fl.l_type = F_UNLCK;
             fcntl(fd, F_SETLK, &fl);
             close(fd);

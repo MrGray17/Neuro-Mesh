@@ -1,6 +1,8 @@
 #include "cell/NodeAgent.hpp"
 #include "kernel/sensor.skel.h"
 #include <iostream>
+#include <sys/stat.h>
+#include <net/if.h>
 #include <bpf/libbpf.h>
 
 static_assert(sizeof(neuro_mesh::core::KernelEventData) == 280,
@@ -38,10 +40,46 @@ std::string NodeAgent::load_and_attach_ebpf() {
     m_skel = sensor_bpf__open_and_load();
     if (!m_skel) return "Failed to open/load eBPF skeleton";
 
-    if (sensor_bpf__attach(m_skel) != 0) {
-        sensor_bpf__destroy(m_skel);
-        m_skel = nullptr;
-        return "Failed to attach eBPF probes";
+    // Attach kprobes manually (tracepoints don't need an interface).
+    // SEC("kprobe/...") programs attach via bpf_program__attach_kprobe.
+    struct { const char* name; struct bpf_program* prog; struct bpf_link** link; } kprobes[] = {
+        {"trace_execve",     m_skel->progs.trace_execve,     &m_skel->links.trace_execve},
+        {"trace_sendto",     m_skel->progs.trace_sendto,     &m_skel->links.trace_sendto},
+        {"trace_sendmsg",    m_skel->progs.trace_sendmsg,    &m_skel->links.trace_sendmsg},
+        {"trace_connect",    m_skel->progs.trace_connect,    &m_skel->links.trace_connect},
+    };
+    for (auto& kp : kprobes) {
+        *kp.link = bpf_program__attach(kp.prog);
+        if (!*kp.link) {
+            sensor_bpf__destroy(m_skel);
+            m_skel = nullptr;
+            return std::string("Failed to attach ") + kp.name;
+        }
+    }
+
+    // Attach XDP to first available interface (eth0 → enp* → lo).
+    // XDP requires an explicit ifindex — SEC("xdp") alone won't attach.
+    struct { const char* name; int ifindex; } ifaces[] = {
+        { "eth0", 0 }, { "lo", 0 },
+    };
+    for (auto& iface : ifaces) {
+        iface.ifindex = if_nametoindex(iface.name);
+    }
+    for (auto& iface : ifaces) {
+        if (iface.ifindex <= 0) continue;
+        m_skel->links.xdp_neuro_mesh_dropper =
+            bpf_program__attach_xdp(m_skel->progs.xdp_neuro_mesh_dropper, iface.ifindex);
+        if (m_skel->links.xdp_neuro_mesh_dropper) {
+            std::cout << "[EBPF] XDP dropper attached to " << iface.name
+                      << " (ifindex=" << iface.ifindex << ")" << std::endl;
+            break;
+        }
+    }
+    if (!m_skel->links.xdp_neuro_mesh_dropper) {
+        std::cerr << "[EBPF] Warning: could not attach XDP dropper — "
+                  << "no suitable interface found. "
+                  << "iptables/nftables enforcement will be used instead."
+                  << std::endl;
     }
 
     m_ringbuf = ring_buffer__new(
@@ -51,6 +89,12 @@ std::string NodeAgent::load_and_attach_ebpf() {
         sensor_bpf__destroy(m_skel);
         m_skel = nullptr;
         return "Ring buffer creation failed";
+    }
+
+    mkdir("/sys/fs/bpf/neuro_mesh", 0755);
+    if (bpf_map__pin(m_skel->maps.xdp_blacklist, "/sys/fs/bpf/neuro_mesh/xdp_blacklist") != 0) {
+        std::cerr << "[EBPF] Warning: could not pin xdp_blacklist map — eBPF enforcement unavailable."
+                  << std::endl;
     }
 
     return "";

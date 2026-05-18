@@ -15,23 +15,38 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     std::string input(reinterpret_cast<const char*>(data), size);
 
-    // Try to parse as a PBFT message
-    // Format: STAGE|SENDER|TARGET|EVIDENCE|SIGNATURE
-    size_t p1 = input.find('|');
-    if (p1 == std::string::npos) return 0;
-    size_t p2 = input.find('|', p1 + 1);
-    if (p2 == std::string::npos) return 0;
-    size_t p3 = input.find('|', p2 + 1);
-    if (p3 == std::string::npos) return 0;
-    size_t p4 = input.find('|', p3 + 1);
-    if (p4 == std::string::npos) return 0;
+    // Parse as the actual wire format used by MeshNode::broadcast_pbft_stage():
+    // VOTE|stage|sender|seq|view|target|evidence|prev_hash|signature
+    // (9 pipe-delimited fields)
+    size_t p[8];
+    size_t idx = 0;
+    size_t pos = 0;
+    while (idx < 8 && pos < input.size()) {
+        size_t found = input.find('|', pos);
+        if (found == std::string::npos) break;
+        p[idx++] = found;
+        pos = found + 1;
+    }
+    if (idx < 8) return 0;  // Need at least 9 fields
 
     neuro_mesh::P2PMessage msg;
-    msg.stage_str = input.substr(0, p1);
-    msg.sender_id = input.substr(p1 + 1, p2 - p1 - 1);
-    msg.target_id = input.substr(p2 + 1, p3 - p2 - 1);
-    msg.evidence_json = input.substr(p3 + 1, p4 - p3 - 1);
-    msg.signature = input.substr(p4 + 1);
+    msg.stage_str       = input.substr(0, p[0]);
+    msg.sender_id       = input.substr(p[0] + 1, p[1] - p[0] - 1);
+    // tokens[3] = seq, tokens[4] = view — parse as integers
+    std::string seq_str = input.substr(p[2] + 1, p[3] - p[2] - 1);
+    std::string view_str = input.substr(p[3] + 1, p[4] - p[3] - 1);
+    msg.target_id       = input.substr(p[4] + 1, p[5] - p[4] - 1);
+    msg.evidence_json   = input.substr(p[5] + 1, p[6] - p[5] - 1);
+    msg.prev_message_hash = input.substr(p[6] + 1, p[7] - p[6] - 1);
+    msg.signature       = input.substr(p[7] + 1);
+
+    try {
+        msg.sequence_number = std::stoull(seq_str);
+        msg.view            = std::stoi(view_str);
+    } catch (...) {
+        msg.sequence_number = 0;
+        msg.view            = 0;
+    }
 
     // This should never crash
     pbft.verify_message(msg);

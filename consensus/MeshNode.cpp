@@ -178,7 +178,7 @@ void MeshNode::start() {
     m_tcp_thread       = std::thread(&MeshNode::tcp_listener_loop, this);
     m_tls_thread       = std::thread(&MeshNode::tls_acceptor_loop, this);
     m_liveness_thread  = std::thread(&MeshNode::liveness_monitor, this);
-    m_tls_worker_thread = std::jthread(&MeshNode::tls_worker_loop, this);
+    m_tls_worker_thread = std::thread(&MeshNode::tls_worker_loop, this);
 
     if (m_discovery) m_discovery->start();
 
@@ -793,10 +793,10 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     std::string peer_id_copy = peer_id;
     std::string peer_pem_copy = peer_pem;
 
-    bool is_new = !m_peer_manager.has_peer(peer_id);
-    if (is_new) {
-        m_peer_manager.add_peer(peer_id, sender_ip, peer_tcp_port, peer_tls_port, peer_pem);
-    } else {
+    // add_peer() does atomic check+add under one lock — eliminates TOCTOU race
+    // where two concurrent beacons from the same peer both see is_new=true.
+    bool is_new = m_peer_manager.add_peer(peer_id, sender_ip, peer_tcp_port, peer_tls_port, peer_pem);
+    if (!is_new) {
         bool key_rejected = false;
         {
             auto existing = m_peer_manager.get_peer(peer_id);
@@ -818,9 +818,12 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
                   << " (TLS:" << peer_tls_port << ")"
                   << ". Quorum updated to n=" << peer_count() << "." << std::endl;
 
-        // Register key with PBFT and IP with enforcer
-        m_pbft.register_peer_key(peer_id_copy, peer_pem_copy);
-        m_pbft.increment_peers();
+        // Register key with PBFT and IP with enforcer.
+        // has_peer() guard prevents double-increment if ANNOUNCE fired first.
+        if (!m_pbft.has_peer(peer_id_copy)) {
+            m_pbft.register_peer_key(peer_id_copy, peer_pem_copy);
+            m_pbft.increment_peers();
+        }
 
         if (m_enforcer) m_enforcer->register_peer_ip(peer_id_copy, sender_ip_copy);
         if (m_enforcer && peer_tcp_port > 0) m_enforcer->register_peer_port(peer_id_copy, peer_tcp_port);
@@ -852,7 +855,12 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
 void MeshNode::gossip_telemetry(const std::string& telemetry_json) {
     m_peer_manager.set_own_telemetry(telemetry_json);
 
-    std::string msg = "TELEMETRY|" + m_node_id + "|" + telemetry_json;
+    std::string unsigned_msg = "TELEMETRY|" + m_node_id + "|" + telemetry_json;
+    std::string raw_sig = crypto::IdentityCore::sign_payload(m_private_key.get(), unsigned_msg);
+    std::string b64_sig = base64_encode(raw_sig);
+    // Signature BEFORE json — base64 cannot contain '|', so the third delimiter
+    // unambiguously separates sig from json (which may contain '|').
+    std::string msg = "TELEMETRY|" + m_node_id + "|" + b64_sig + "|" + telemetry_json;
 
     // Broadcast on discovery port — all nodes share this port via SO_REUSEADDR.
     // Broadcast delivers to ALL bound sockets; unicast would hit only one.
@@ -867,8 +875,11 @@ void MeshNode::gossip_telemetry(const std::string& telemetry_json) {
 void MeshNode::gossip_event_json(const std::string& json) {
     // Broadcast arbitrary event JSON to all peers via discovery.
     // Unlike gossip_telemetry, this does NOT overwrite m_own_telemetry.
-    // Format: TELEMETRY|<m_node_id>|<json>
-    std::string msg = "TELEMETRY|" + m_node_id + "|" + json;
+    // Format: TELEMETRY|<m_node_id>|<b64_signature>|<json>
+    std::string unsigned_msg = "TELEMETRY|" + m_node_id + "|" + json;
+    std::string raw_sig = crypto::IdentityCore::sign_payload(m_private_key.get(), unsigned_msg);
+    std::string b64_sig = base64_encode(raw_sig);
+    std::string msg = "TELEMETRY|" + m_node_id + "|" + b64_sig + "|" + json;
     send_udp_discovery(msg);
 
     // Also push to local bridge so locally-connected dashboards see it
@@ -878,8 +889,9 @@ void MeshNode::gossip_event_json(const std::string& json) {
 }
 
 void MeshNode::process_telemetry_gossip(const std::string& msg, const std::string& /*sender_ip*/) {
-    // Format: TELEMETRY|<node_id>|<json>
-    // Find delimiters directly in the raw string to handle node_id containing '|'
+    // Format: TELEMETRY|<node_id>|<b64_signature>|<json>
+    // Signature comes BEFORE json — base64 cannot contain '|', so the
+    // third delimiter unambiguously separates sig from json.
     size_t first_delim = msg.find('|');
     if (first_delim == std::string::npos) return;
     size_t second_delim = msg.find('|', first_delim + 1);
@@ -889,7 +901,39 @@ void MeshNode::process_telemetry_gossip(const std::string& msg, const std::strin
     if (peer_id.empty() || peer_id == m_node_id) return;
     if (peer_id.size() > 64) return;
 
-    std::string json = msg.substr(second_delim + 1);
+    // Extract signature and json
+    size_t third_delim = msg.find('|', second_delim + 1);
+    std::string json;
+    std::string b64_sig;
+    if (third_delim == std::string::npos) {
+        // Unsigned (legacy) — accept but do not verify
+        json = msg.substr(second_delim + 1);
+    } else {
+        b64_sig = msg.substr(second_delim + 1, third_delim - second_delim - 1);
+        json = msg.substr(third_delim + 1);
+    }
+
+    // Verify signature if present
+    if (!b64_sig.empty()) {
+        std::string peer_pem = m_peer_manager.get_peer_key(peer_id);
+        if (peer_pem.empty()) {
+            // Signed message from unknown peer — reject to prevent spoofing.
+            // Only unsigned (legacy) telemetry is accepted from unregistered peers.
+            std::cerr << "[TELEMETRY] Signed message from unregistered peer " << peer_id
+                      << " — rejected. Complete peer discovery first." << std::endl;
+            return;
+        }
+        auto pubkey = crypto::IdentityCore::get_pubkey_from_pem(peer_pem);
+        if (pubkey) {
+            std::string unsigned_msg = "TELEMETRY|" + peer_id + "|" + json;
+            std::string raw_sig = base64_decode(b64_sig).value_or("");
+            if (!raw_sig.empty() &&
+                !crypto::IdentityCore::verify_signature(pubkey.get(), unsigned_msg, raw_sig)) {
+                std::cerr << "[TELEMETRY] Signature verification FAILED for " << peer_id << std::endl;
+                return;
+            }
+        }
+    }
 
     m_peer_manager.set_peer_telemetry(peer_id, json);
 
@@ -978,7 +1022,14 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
         if (is_new_peer) {
             std::cout << "[NETWORK] Discovered verified peer: " << peer_id << " at " << sender_ip << std::endl;
         }
-        m_pbft.register_peer_key(peer_id, peer_pem);
+
+        // TOFU: only register the key on first encounter.
+        // Re-announcements with a different key are rejected (prevents
+        // identity takeover via ANNOUNCE spoofing).
+        if (!m_pbft.has_peer(peer_id)) {
+            m_pbft.register_peer_key(peer_id, peer_pem);
+            m_pbft.increment_peers();
+        }
 
         if (m_enforcer) m_enforcer->register_peer_ip(peer_id, sender_ip);
 
@@ -1004,6 +1055,11 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
 
         if (stage_str.empty() || sender_id.empty() || target_id.empty()) return;
         if (sender_id.size() > 64 || target_id.size() > 64) return;
+
+        // Check base64-encoded evidence size before decoding to prevent
+        // unbounded memory allocation from untrusted UDP input.
+        // Base64 expands by ~4/3; allow a small margin for padding.
+        if (tokens[6].size() > m_max_evidence_size * 4 / 3 + 4) return;
 
         std::string evidence_decoded = base64_decode(tokens[6]).value_or("");
         if (evidence_decoded.empty() || evidence_decoded.size() > m_max_evidence_size) return;
@@ -1145,25 +1201,21 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
                           std::to_string(view) + "|" + target_id + "|" + b64_evidence + "|" +
                           prev_hash + "|" + encoded_sig;
 
-    // Prefer TLS to known peers, fall back to UDP broadcast
-    bool tls_sent = false;
+    // Prefer TLS to known peers, always broadcast via UDP as well
+    // (duplicates are deduplicated via m_seen_messages and vote registry).
     {
         auto peer_ids = m_peer_manager.get_all_peer_ids();
         for (const auto& peer_id : peer_ids) {
             int fd = -1;
             if (m_peer_manager.get_peer_tls_fd(peer_id, fd) && m_transport) {
                 ssize_t sent = m_transport->send(fd, payload.data(), payload.size());
-                if (sent == static_cast<ssize_t>(payload.size())) {
-                    tls_sent = true;
-                } else {
+                if (sent != static_cast<ssize_t>(payload.size())) {
                     m_peer_manager.set_peer_tls_fd(peer_id, -1);
                 }
             }
         }
     }
-    if (!tls_sent) {
-        send_udp_broadcast(payload);
-    }
+    send_udp_broadcast(payload);
 
     P2PMessage self_msg{stage_str, m_node_id, target_id, evidence_json, signature, prev_hash, seq, view};
     if (m_pbft.verify_message(self_msg)) {
@@ -1269,33 +1321,8 @@ void MeshNode::tls_acceptor_loop() {
 }
 
 // =============================================================================
-// TLS Transport Helpers
+// TLS Connection Helpers
 // =============================================================================
-
-bool MeshNode::send_tls_to_peer(const std::string& peer_id, const std::string& payload) {
-    if (!m_transport) return false;
-
-    int fd = -1;
-    if (!m_peer_manager.get_peer_tls_fd(peer_id, fd)) return false;
-
-    ssize_t sent = m_transport->send(fd, payload.data(), payload.size());
-    return sent == static_cast<ssize_t>(payload.size());
-}
-
-void MeshNode::send_tls_broadcast(const std::string& payload) {
-    if (!m_transport) return;
-
-    auto peer_ids = m_peer_manager.get_all_peer_ids();
-    for (const auto& peer_id : peer_ids) {
-        int fd = -1;
-        if (!m_peer_manager.get_peer_tls_fd(peer_id, fd)) continue;
-        ssize_t sent = m_transport->send(fd, payload.data(), payload.size());
-        if (sent == -1) {
-            m_transport->close(fd);
-            m_peer_manager.set_peer_tls_fd(peer_id, -1);
-        }
-    }
-}
 
 bool MeshNode::connect_tls_to_peer(const std::string& peer_id, const std::string& ip, int port) {
     if (!m_transport) return false;
@@ -1473,16 +1500,19 @@ void MeshNode::notify_webhook(const std::string& url, const std::string& target_
         return;
     }
 
-    // SSRF guard: reject private/metadata IP ranges
+    // SSRF guard: reject private/metadata IP ranges.
+    // Also capture the first resolved IP to pin curl via --resolve,
+    // preventing DNS rebinding between our check and curl's connection.
+    std::string resolved_ip_for_curl;
+    std::string host;
+    size_t url_host_start = (url.rfind("https://", 0) == 0) ? 8 : 7;
     {
-        std::string host;
-        size_t start = (url.rfind("https://", 0) == 0) ? 8 : 7;
         size_t end = url.size();
-        size_t slash = url.find('/', start);
-        size_t colon = url.find(':', start);
+        size_t slash = url.find('/', url_host_start);
+        size_t colon = url.find(':', url_host_start);
         if (slash != std::string::npos) end = slash;
         if (colon != std::string::npos && colon < end) end = colon;
-        host = url.substr(start, end - start);
+        host = url.substr(url_host_start, end - url_host_start);
 
         struct addrinfo hints{};
         struct addrinfo* res = nullptr;
@@ -1520,6 +1550,25 @@ void MeshNode::notify_webhook(const std::string& url, const std::string& target_
                     }
                 }
             }
+            // Capture first safe IP for --resolve pinning
+            if (!blocked) {
+                for (struct addrinfo* rp = res; rp; rp = rp->ai_next) {
+                    char ipbuf[INET6_ADDRSTRLEN];
+                    if (rp->ai_family == AF_INET) {
+                        if (inet_ntop(AF_INET, &((struct sockaddr_in*)rp->ai_addr)->sin_addr,
+                                      ipbuf, sizeof(ipbuf))) {
+                            resolved_ip_for_curl = ipbuf;
+                            break;
+                        }
+                    } else if (rp->ai_family == AF_INET6) {
+                        if (inet_ntop(AF_INET6, &((struct sockaddr_in6*)rp->ai_addr)->sin6_addr,
+                                      ipbuf, sizeof(ipbuf))) {
+                            resolved_ip_for_curl = "[" + std::string(ipbuf) + "]";
+                            break;
+                        }
+                    }
+                }
+            }
             freeaddrinfo(res);
             if (blocked) {
                 std::cerr << "[ALERT] Webhook URL rejected (private IP): " << url.substr(0, 64) << std::endl;
@@ -1528,22 +1577,40 @@ void MeshNode::notify_webhook(const std::string& url, const std::string& target_
         }
     }
 
-    // fork+exec curl with absolute path to prevent PATH hijacking
+    // fork+exec curl with absolute path to prevent PATH hijacking.
+    // If we resolved a safe IP, pin curl to it via --resolve to prevent
+    // DNS rebinding between our SSRF check and curl's connection.
     std::string payload_str = payload.str();
+    std::vector<const char*> curl_args = {
+        "/usr/bin/curl", "-s", "-X", "POST",
+        "-H", "Content-Type: application/json",
+    };
+
+    if (!resolved_ip_for_curl.empty()) {
+        // Extract port from URL (default 80 for http, 443 for https)
+        int port = (url.rfind("https://", 0) == 0) ? 443 : 80;
+        size_t colon_pos = url.find(':', url_host_start);
+        size_t slash_pos = url.find('/', url_host_start);
+        if (colon_pos != std::string::npos && (slash_pos == std::string::npos || colon_pos < slash_pos)) {
+            try { port = std::stoi(url.substr(colon_pos + 1, slash_pos - colon_pos - 1)); } catch (...) {}
+        }
+        std::string resolve_arg = host + ":" + std::to_string(port) + ":" + resolved_ip_for_curl;
+        curl_args.push_back("--resolve");
+        curl_args.push_back(resolve_arg.c_str());
+    }
+
+    curl_args.push_back("-d");
+    curl_args.push_back(payload_str.c_str());
+    curl_args.push_back(url.c_str());
+    curl_args.push_back(nullptr);
+
     pid_t pid = fork();
     if (pid == 0) {
         // Close all inherited FDs >= 3 to prevent FD leak to child.
         // Use close_range() atomically instead of a racy per-FD loop.
         int max_fd = std::min<int>(sysconf(_SC_OPEN_MAX), 1024 * 1024);
         syscall(SYS_close_range, 3, static_cast<unsigned int>(max_fd), 0U);
-        const char* args[] = {
-            "/usr/bin/curl", "-s", "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-d", payload_str.c_str(),
-            url.c_str(),
-            nullptr
-        };
-        execv(args[0], const_cast<char* const*>(args));
+        execv(curl_args[0], const_cast<char* const*>(curl_args.data()));
         _exit(1);
     } else if (pid > 0) {
         int status;

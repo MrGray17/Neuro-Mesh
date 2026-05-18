@@ -80,7 +80,7 @@ make test                # build & run all tests
 make tools               # inject_event + test_crypto
 ```
 
-Four binaries land in `bin/`: `neuro_agent` (the node), `inject_event` (threat injector), plus 8 test binaries under `bin/test_*`.
+Four binaries land in `bin/`: `neuro_agent` (the node), `inject_event` (threat injector), plus 9 test binaries under `bin/test_*`.
 
 ### Run
 
@@ -132,18 +132,19 @@ docker compose down                          # tear down
 make test   # Build & run all test binaries (gtest + standalone)
 ```
 
-Eight test binaries cover every subsystem (70+ tests):
+Nine test binaries cover every subsystem (79 tests):
 
 | Binary | What it tests |
 |--------|---------------|
 | `test_common` (gtest) | `UniqueFD`, `Result`, `Base64`, `StateJournal` — 21 tests |
 | `test_mitigation` (gtest) | `MitigationEngine` response orchestration — 9 tests |
 | `test_auditlogger` (gtest) | `AuditLogger` JSON emit, sanitization — 7 tests |
-| `test_pbft` | PBFT state machine — quorum, signature binding, dedup — 10 tests |
+| `test_pbft` | PBFT state machine — quorum, signature binding, dedup — 11 tests |
 | `test_enforcer` | PolicyEnforcer safe-list, IP validation, cascade — 9 tests |
 | `test_meshnode` | Discovery, PEX handshake, peer management — 9 tests |
 | `test_inference` | ONNX entropy scoring, decay — 5 tests |
 | `test_crypto` | Ed25519 sign/verify — 3 tests |
+| `test_stress` | Concurrent discovery (20 threads), 100K PBFT ops, adversarial inputs, PeerManager concurrency (8 threads), rate limiting — 5 tests |
 
 All tests must pass before any merge.
 
@@ -215,7 +216,7 @@ Four stages, no leader:
 | `COMMIT` | Quorum reached — prepare to execute |
 | `EXECUTED` | MitigationEngine enforces isolation |
 
-Quorum = `(2n + 2) / 3` ≥ `2f + 1` Byzantine fault tolerance. Every message binds `(stage | target | evidence)` under Ed25519 — no cross-stage replay, no spoofed votes. Self-votes go through the same verification path as external votes. Zero trust.
+Quorum = `2 * ((n - 1) / 3) + 1` ≥ `2f + 1` Byzantine fault tolerance. Every message binds `(stage | target | evidence)` under Ed25519 — no cross-stage replay, no spoofed votes. Self-votes go through the same verification path as external votes. Zero trust.
 
 Evidence is base64-encoded in the wire protocol — pipe characters inside JSON payloads can't corrupt message parsing.
 
@@ -259,6 +260,9 @@ The TelemetryBridge runs as a sandboxed child process: `fork()` → `prctl(PR_SE
 | Atomic telemetry | `flock()` on shared JSON sink |
 | RAII resources | `UniqueFD` wraps all socket FDs |
 | Crash recovery | `StateJournal` replays journal on boot |
+| nftables compatibility | Handle-based rule deletion (`nft --handle list` → parse → `nft delete rule ... handle <N>`) for v1.0.9+ |
+| TOCTOU race prevention | `has_peer()` guard + `try_increment_peers()` atomic check-and-increment for concurrent peer discovery |
+| POSIX signal safety | `global_running` uses `volatile sig_atomic_t` instead of `std::atomic<bool>` |
 
 ---
 

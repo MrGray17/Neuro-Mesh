@@ -220,6 +220,16 @@ $(BIN_DIR)/test_auditlogger: tests/unit/test_auditlogger.cpp $(OBJ_DIR)/telemetr
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/telemetry/AuditLogger.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(GTEST_FLAGS) $(LDFLAGS_OPT)
 
+STRESS_TEST_OBJS := $(OBJ_DIR)/consensus/PeerManager.o \
+                    $(OBJ_DIR)/enforcer/PolicyEnforcer.o \
+                    $(OBJ_DIR)/enforcer/MitigationEngine.o \
+                    $(OBJ_DIR)/crypto/CryptoCore.o \
+                    $(OBJ_DIR)/crypto/KeyManager.o
+
+$(BIN_DIR)/test_stress: tests/stress/test_stress.cpp $(STRESS_TEST_OBJS)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(STRESS_TEST_OBJS) -o $@ $(SSL_LIBS) $(BPF_LIBS) $(LDFLAGS_OPT)
+
 # Fuzz targets (require -fsanitize=fuzzer build)
 FUZZ_FLAGS := -fsanitize=fuzzer -std=c++20 $(INCLUDES)
 
@@ -237,7 +247,8 @@ $(BIN_DIR)/fuzz_pbft_message: tests/fuzz/fuzz_pbft_message.cpp $(OBJ_DIR)/crypto
 
 tools: $(SIM_TARGET) $(CRYPTO_TEST_TARGET) $(PBFT_TEST_TARGET) \
        $(ENFORCER_TEST_TARGET) $(MESHNODE_TEST_TARGET) $(INFERENCE_TEST_TARGET) \
-       $(BIN_DIR)/test_common $(BIN_DIR)/test_mitigation $(BIN_DIR)/test_auditlogger
+       $(BIN_DIR)/test_common $(BIN_DIR)/test_mitigation $(BIN_DIR)/test_auditlogger \
+       $(BIN_DIR)/test_stress
 
 # ============================================================
 # Test runner
@@ -261,6 +272,8 @@ test: tools
 	$(BIN_DIR)/test_mitigation || FAILED=1; \
 	echo "--- test_auditlogger (gtest) ---"; \
 	$(BIN_DIR)/test_auditlogger || FAILED=1; \
+	echo "--- test_stress (concurrent + adversarial) ---"; \
+	$(BIN_DIR)/test_stress || FAILED=1; \
 	echo "=== All Tests Complete ==="; \
 	if [ $$FAILED -ne 0 ]; then echo "FAIL: Some tests failed"; exit 1; fi
 

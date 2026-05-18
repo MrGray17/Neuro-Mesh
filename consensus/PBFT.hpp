@@ -51,7 +51,6 @@ private:
     struct ConsensusRound {
         PBFTStage state = PBFTStage::IDLE;
         int view = 0;
-        uint64_t sequence = 0;
         std::string pre_prepare_hash;
         std::string evidence_key;
         std::chrono::steady_clock::time_point started_at;
@@ -100,6 +99,11 @@ public:
         m_registered_peers.insert(node_id);
     }
 
+    bool has_peer(const std::string& node_id) const {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        return m_registered_peers.count(node_id) > 0;
+    }
+
     void set_my_identity(const std::string& node_id) {
         m_my_node_id = node_id;
     }
@@ -119,7 +123,8 @@ public:
     std::string sign_message(const P2PMessage& msg) const {
         if (!m_private_key) return "";
         std::string blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json + "|"
-                         + std::to_string(msg.sequence_number) + "|" + std::to_string(msg.view);
+                         + std::to_string(msg.sequence_number) + "|" + std::to_string(msg.view)
+                         + "|" + msg.prev_message_hash;
         return crypto::IdentityCore::sign_payload(m_private_key.get(), blob);
     }
 
@@ -130,25 +135,21 @@ public:
         if (it == m_peer_public_keys.end()) return false;
 
         std::string new_blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json + "|"
-                             + std::to_string(msg.sequence_number) + "|" + std::to_string(msg.view);
-        std::string old_blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json;
+                             + std::to_string(msg.sequence_number) + "|" + std::to_string(msg.view)
+                             + "|" + msg.prev_message_hash;
 
-        bool new_format_ok = crypto::IdentityCore::verify_signature(it->second.get(), new_blob, msg.signature);
-        bool old_format_ok = crypto::IdentityCore::verify_signature(it->second.get(), old_blob, msg.signature);
-
-        if (!new_format_ok && !old_format_ok) {
+        if (!crypto::IdentityCore::verify_signature(it->second.get(), new_blob, msg.signature)) {
             std::cerr << "[PBFT] CRITICAL: Cryptographic signature mismatch from: " << msg.sender_id << std::endl;
             record_failure(msg.sender_id);
             return false;
         }
 
-        bool used_new_format = new_format_ok;
-        if (used_new_format && !verify_message_chaining(msg)) {
+        if (!verify_message_chaining(msg)) {
             std::cerr << "[PBFT] CRITICAL: Message chain verification failed from: " << msg.sender_id << std::endl;
             return false;
         }
 
-        if (used_new_format && !verify_sequence_continuity(msg)) {
+        if (!verify_sequence_continuity(msg)) {
             std::cerr << "[PBFT] CRITICAL: Sequence gap detected from: " << msg.sender_id << std::endl;
             return false;
         }
@@ -173,8 +174,9 @@ public:
 
         auto msg_hash = compute_message_hash(msg);
 
-        std::string round_key = crypto::IdentityCore::sha256_hex(msg.evidence_json);
-        if (round_key.empty()) round_key = msg.evidence_json;
+        std::string round_key = crypto::IdentityCore::sha256_hex(
+            msg.evidence_json + "|" + msg.target_id);
+        if (round_key.empty()) round_key = msg.evidence_json + "|" + msg.target_id;
 
         if (m_seen_messages.count(msg_hash)) {
             return PBFTStage::IDLE;
@@ -198,18 +200,12 @@ public:
         if (round.state == PBFTStage::IDLE) {
             round.started_at = std::chrono::steady_clock::now();
             round.view = msg.view;
-            round.sequence = msg.sequence_number;
             round.pre_prepare_hash = msg_hash;
             round.evidence_key = round_key;
         }
 
         if (round.view != msg.view) {
             std::cerr << "[PBFT] View mismatch for " << msg.evidence_json << std::endl;
-            return PBFTStage::IDLE;
-        }
-
-        if (msg.sequence_number < round.sequence) {
-            std::cerr << "[PBFT] Old sequence ignored: " << msg.sequence_number << " < " << round.sequence << std::endl;
             return PBFTStage::IDLE;
         }
 
@@ -240,9 +236,13 @@ public:
         return PBFTStage::IDLE;
     }
 
-    [[nodiscard]] bool needs_view_change(const std::string& evidence_json) const {
+    [[nodiscard]] bool needs_view_change(const std::string& evidence_json,
+                                          const std::string& target_id) const {
         std::lock_guard<std::mutex> lock(m_mtx);
-        auto it = m_rounds.find(evidence_json);
+        std::string round_key = crypto::IdentityCore::sha256_hex(
+            evidence_json + "|" + target_id);
+        if (round_key.empty()) round_key = evidence_json + "|" + target_id;
+        auto it = m_rounds.find(round_key);
         if (it == m_rounds.end()) return false;
 
         auto now = std::chrono::steady_clock::now();
@@ -251,8 +251,8 @@ public:
     }
 
     int peer_count() const { std::lock_guard<std::mutex> lock(m_mtx); return m_total_nodes; }
-    int quorum_size() const { std::lock_guard<std::mutex> lock(m_mtx); return (2 * std::max(1, m_total_nodes) + 2) / 3; }
-    int quorum_size_unlocked() const { return (2 * std::max(1, m_total_nodes) + 2) / 3; }
+    int quorum_size() const { std::lock_guard<std::mutex> lock(m_mtx); return (2 * ((std::max(1, m_total_nodes) - 1) / 3)) + 1; }
+    int quorum_size_unlocked() const { return (2 * ((std::max(1, m_total_nodes) - 1) / 3)) + 1; }
 
     void set_peer_count(int n) {
         std::lock_guard<std::mutex> lock(m_mtx);
@@ -347,8 +347,9 @@ private:
         auto prev_it = history.find(msg.sequence_number - 1);
         if (prev_it == history.end()) {
             // Gap in stored history (e.g. eviction, view change).
-            // Accept if chaining from genesis, otherwise reject.
-            return msg.prev_message_hash == m_genesis_hash;
+            // Accept if chaining from genesis or prev_hash is empty
+            // (both mean "no predecessor in available history").
+            return msg.prev_message_hash.empty() || msg.prev_message_hash == m_genesis_hash;
         }
 
         return prev_it->second == msg.prev_message_hash;

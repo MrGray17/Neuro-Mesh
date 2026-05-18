@@ -78,12 +78,22 @@ bool InferenceEngine::analyze(const std::string& comm, const std::string& payloa
 
     // 3. Run inference
     const char* output_names[] = {m_output_name.c_str()};
-    auto outputs = m_session->Run(
-        Ort::RunOptions{nullptr},
-        input_names, &input_tensor, 1,
-        output_names, 1);
+    std::vector<Ort::Value> outputs;
+    try {
+        outputs = m_session->Run(
+            Ort::RunOptions{nullptr},
+            input_names, &input_tensor, 1,
+            output_names, 1);
+    } catch (const Ort::Exception& e) {
+        std::cerr << "[INFERENCE] ONNX Run failed: " << e.what() << std::endl;
+        return false;
+    }
 
     // 4. Extract anomaly score
+    if (outputs.empty() || !outputs[0].IsTensor()) {
+        std::cerr << "[INFERENCE] ONNX returned invalid output" << std::endl;
+        return false;
+    }
     float* scores = outputs[0].GetTensorMutableData<float>();
     float score = scores[0];
 

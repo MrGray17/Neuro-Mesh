@@ -3,6 +3,8 @@
 #include <iostream>
 #include <chrono>
 #include <cmath>
+#include <cerrno>
+#include <cstring>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -10,11 +12,8 @@
 
 namespace neuro_mesh::telemetry {
 
-static UniqueFD* s_udp_socket_ptr = nullptr;
-
 static UniqueFD& s_udp_socket() {
     static UniqueFD socket;
-    s_udp_socket_ptr = &socket;
     return socket;
 }
 
@@ -42,10 +41,12 @@ static std::string json_escape(const std::string& raw) {
 }
 
 void AuditLogger::initialize() {
-    if (s_udp_socket().valid()) {
-        s_udp_socket() = UniqueFD();
+    UniqueFD new_socket(socket(AF_INET, SOCK_DGRAM, 0));
+    if (!new_socket.valid()) {
+        std::cerr << "[AUDIT] Failed to create UDP socket: " << strerror(errno) << std::endl;
+        return;
     }
-    s_udp_socket() = UniqueFD(socket(AF_INET, SOCK_DGRAM, 0));
+    s_udp_socket() = std::move(new_socket);
 }
 
 void AuditLogger::emit_json(AuditLevel level, const std::string& component,

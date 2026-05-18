@@ -73,8 +73,6 @@ private:
     void send_udp_discovery(const std::string& payload);
     void send_udp_unicast(const std::string& ip, int port, const std::string& payload);
 
-    bool send_tls_to_peer(const std::string& peer_id, const std::string& payload);
-    void send_tls_broadcast(const std::string& payload);
     bool connect_tls_to_peer(const std::string& peer_id, const std::string& ip, int port);
     void disconnect_tls_peer(const std::string& peer_id);
 
@@ -142,7 +140,7 @@ private:
     mutable std::mutex m_tls_queue_mtx;
     std::condition_variable m_tls_queue_cv;
     std::vector<TLSConnectTask> m_tls_connect_queue;
-    std::jthread m_tls_worker_thread;
+    std::thread m_tls_worker_thread;
     void tls_worker_loop();
 };
 
