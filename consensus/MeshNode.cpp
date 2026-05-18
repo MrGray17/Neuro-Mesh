@@ -88,6 +88,27 @@ MeshNode::MeshNode(const std::string& node_id,
     }
     m_pbft.set_private_key(std::move(pbft_key));
 
+    // Load pre-provisioned peer keys from NEURO_PEER_KEYS env var.
+    // Format: "ALPHA:<pem>,BRAVO:<pem>,CHARLIE:<pem>"
+    // Pre-provisioned keys bypass TOFU — the peer's key is verified on arrival.
+    if (const char* env = std::getenv("NEURO_PEER_KEYS")) {
+        std::string env_str(env);
+        std::istringstream iss(env_str);
+        std::string entry;
+        while (std::getline(iss, entry, ',')) {
+            auto colon = entry.find(':');
+            if (colon == std::string::npos) continue;
+            std::string peer_id = entry.substr(0, colon);
+            std::string pem = entry.substr(colon + 1);
+            // Decode if base64-encoded (PEM contains newlines, often base64 in env)
+            if (pem.find("-----BEGIN") == std::string::npos) {
+                pem = base64_decode(pem).value_or(pem);
+            }
+            m_peer_manager.pre_provision_peer_key(peer_id, pem);
+            std::cout << "[INFO] Pre-provisioned peer key for " << peer_id << std::endl;
+        }
+    }
+
     // Initialize TLS infrastructure
     auto tls_key = m_key_manager.generate_key(crypto::KeyType::Ed25519, m_node_id + "_tls");
     if (tls_key) {

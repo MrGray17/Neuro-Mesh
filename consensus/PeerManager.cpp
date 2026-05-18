@@ -156,6 +156,20 @@ void PeerManager::pin_tls_fingerprint(const std::string& peer_id, const std::str
 }
 
 // =============================================================================
+// Pre-provisioned peer keys (optional hardening)
+// =============================================================================
+
+void PeerManager::pre_provision_peer_key(const std::string& peer_id, const std::string& public_key_pem) {
+    std::lock_guard<std::mutex> lock(m_preprov_mtx);
+    m_pre_provisioned_keys[peer_id] = public_key_pem;
+}
+
+bool PeerManager::is_peer_pre_provisioned(const std::string& peer_id) const {
+    std::lock_guard<std::mutex> lock(m_preprov_mtx);
+    return m_pre_provisioned_keys.find(peer_id) != m_pre_provisioned_keys.end();
+}
+
+// =============================================================================
 // Dual-path TOFU confirmation
 // =============================================================================
 
@@ -164,36 +178,53 @@ PeerManager::PathConfirmResult PeerManager::confirm_path(const std::string& peer
     std::unique_lock<std::shared_mutex> lock(m_peers_mtx);
     auto it = m_peers.find(peer_id);
     if (it == m_peers.end()) {
-        // Peer not yet in registry — caller should have called add_peer first.
         return {false, false};
     }
 
     auto& entry = it->second;
 
-    // If this path was already confirmed, check key consistency.
-    if (entry.confirmed_paths & path_flag) {
-        // Already confirmed via this path — key must match.
-        if (!public_key_pem.empty() && entry.public_key_pem != public_key_pem) {
-            return {false, true};  // key mismatch on same path — should not happen
+    // Check pre-provisioned key first — if set, verify and bypass TOFU.
+    {
+        std::lock_guard<std::mutex> prov_lock(m_preprov_mtx);
+        auto prov_it = m_pre_provisioned_keys.find(peer_id);
+        if (prov_it != m_pre_provisioned_keys.end()) {
+            // Peer is pre-provisioned — verify key matches, reject on mismatch.
+            if (!public_key_pem.empty() && prov_it->second != public_key_pem) {
+                std::cerr << "[SECURITY] PRE-PROVISIONED key MISMATCH for " << peer_id
+                          << " — received key does not match expected key. Rejecting peer." << std::endl;
+                return {false, true};
+            }
+            // Key matches pre-provisioned value — mark both paths as confirmed
+            // immediately (no TOFU needed for known peers).
+            entry.confirmed_paths |= path_flag;
+            if (!public_key_pem.empty() && entry.public_key_pem.empty()) {
+                entry.public_key_pem = public_key_pem;
+                entry.verified = true;
+            }
+            bool dual = (entry.confirmed_paths & (PeerEntry::PATH_BEACON | PeerEntry::PATH_ANNOUNCE)) ==
+                        (PeerEntry::PATH_BEACON | PeerEntry::PATH_ANNOUNCE);
+            return {dual, false};
         }
-        // Return current dual-confirmation status.
+    }
+
+    // No pre-provisioned key — fall back to dual-path TOFU.
+    if (entry.confirmed_paths & path_flag) {
+        if (!public_key_pem.empty() && entry.public_key_pem != public_key_pem) {
+            return {false, true};
+        }
         return {(entry.confirmed_paths & (PeerEntry::PATH_BEACON | PeerEntry::PATH_ANNOUNCE)) ==
                     (PeerEntry::PATH_BEACON | PeerEntry::PATH_ANNOUNCE),
                 false};
     }
 
-    // First confirmation via this path.
-    // If the other path already confirmed, verify key matches.
     if (entry.confirmed_paths != 0 && !entry.public_key_pem.empty()) {
         if (!public_key_pem.empty() && entry.public_key_pem != public_key_pem) {
-            // Paths disagree on key — security violation.
             std::cerr << "[SECURITY] TOFU dual-path MISMATCH for " << peer_id
                       << " — beacon and ANNOUNCE keys differ. Rejecting peer." << std::endl;
             return {false, true};
         }
     }
 
-    // Mark this path as confirmed and store the key.
     entry.confirmed_paths |= path_flag;
     if (!public_key_pem.empty() && entry.public_key_pem.empty()) {
         entry.public_key_pem = public_key_pem;

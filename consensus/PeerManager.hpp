@@ -66,6 +66,13 @@ public:
     void unpin_peer_key(const std::string& node_id);
     void pin_tls_fingerprint(const std::string& peer_id, const std::string& fingerprint);
 
+    // === Pre-provisioned peer keys (optional hardening) ===
+    // Register an expected public key for a peer BEFORE discovery.
+    // When the peer arrives, its key is verified against the pre-provisioned one.
+    // Mismatch → reject. No pre-provisioned key → TOFU fallback.
+    void pre_provision_peer_key(const std::string& peer_id, const std::string& public_key_pem);
+    bool is_peer_pre_provisioned(const std::string& peer_id) const;
+
     // === Dual-path TOFU confirmation ===
     // Confirm that a specific discovery path has seen this peer's key.
     // Returns true if BOTH paths now agree (beacon + ANNOUNCE) on the same key.
@@ -110,6 +117,11 @@ private:
     };
     mutable std::mutex m_tofu_mtx;
     std::unordered_map<std::string, TOFUEntry> m_tofu_trust;
+
+    // Pre-provisioned peer keys (loaded at startup from env var or config).
+    // If a peer's key is pre-provisioned, TOFU is bypassed and the key is verified.
+    mutable std::mutex m_preprov_mtx;
+    std::unordered_map<std::string, std::string> m_pre_provisioned_keys;
 
     struct RateLimitState {
         int count = 0;

@@ -15,6 +15,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <openssl/crypto.h>
 #include "enforcer/PolicyEnforcer.hpp"
 #include "enforcer/MitigationEngine.hpp"
 #include "consensus/MeshNode.hpp"
@@ -332,8 +333,8 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                     else break;
                 }
                 // Evict stale entries to prevent unbounded map growth.
-                // Only scan when the map has grown beyond a reasonable size.
-                if (s_ipc_rate_limits.size() > 256) {
+                // Always clean up empty windows (they contribute nothing to rate limiting).
+                if (s_ipc_rate_limits.size() > 256 || rl.window.empty()) {
                     for (auto it = s_ipc_rate_limits.begin(); it != s_ipc_rate_limits.end(); ) {
                         if (it->second.window.empty()) it = s_ipc_rate_limits.erase(it);
                         else ++it;
@@ -373,7 +374,10 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
             while (!received_token.empty() && (received_token.back() == '\n' ||
                    received_token.back() == '\r' || received_token.back() == ' '))
                 received_token.pop_back();
-            if (received_token != ipc_token) {
+            // Constant-time comparison to prevent timing side-channel attacks.
+            // CRYPTO_memcmp returns 0 if equal, non-zero otherwise.
+            if (received_token.size() != ipc_token.size() ||
+                CRYPTO_memcmp(received_token.data(), ipc_token.data(), received_token.size()) != 0) {
                 std::cerr << "[IPC] REJECTED: invalid token from uid=" << cred.uid << std::endl;
                 const char* reject = "REJECT:AUTH_TOKEN\n";
                 write(client_fd, reject, strlen(reject));

@@ -12,6 +12,8 @@
 #include <linux/bpf.h>
 #include <sstream>
 #include <regex>
+#include <algorithm>
+#include <cctype>
 
 namespace neuro_mesh {
 
@@ -226,14 +228,20 @@ bool PolicyEnforcer::ensure_nftables_table() {
 // ---------------------------------------------------------------------------
 
 bool PolicyEnforcer::is_safe(const std::string& target_id) const {
-    return m_safe_list.find(target_id) != m_safe_list.end();
+    std::string normalized = target_id;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return std::toupper(c); });
+    return m_safe_list.find(normalized) != m_safe_list.end();
 }
 
 void PolicyEnforcer::add_safe_node(const std::string& node_id) {
+    std::string normalized = node_id;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return std::toupper(c); });
     std::lock_guard<std::mutex> lock(m_mtx);
-    m_safe_list.insert(node_id);
+    m_safe_list.insert(normalized);
     m_last_enforce_time = {};
-    std::cout << "[ENFORCER] Safe-listed node: " << node_id << std::endl;
+    std::cout << "[ENFORCER] Safe-listed node: " << normalized << std::endl;
 }
 
 bool PolicyEnforcer::is_ip_safe(const std::string& ip) {
