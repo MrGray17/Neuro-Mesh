@@ -3,6 +3,8 @@
 #include <iostream>
 #include <sys/stat.h>
 #include <net/if.h>
+#include <dirent.h>
+#include <unordered_set>
 #include <bpf/libbpf.h>
 
 static_assert(sizeof(neuro_mesh::core::KernelEventData) == 280,
@@ -57,21 +59,47 @@ std::string NodeAgent::load_and_attach_ebpf() {
         }
     }
 
-    // Attach XDP to first available interface (eth0 → enp* → lo).
+    // Attach XDP to first available interface.
+    // Priority: NEURO_XDP_IFACE env var → /sys/class/net/ scan → eth0 → lo.
     // XDP requires an explicit ifindex — SEC("xdp") alone won't attach.
-    struct { const char* name; int ifindex; } ifaces[] = {
-        { "eth0", 0 }, { "lo", 0 },
-    };
-    for (auto& iface : ifaces) {
-        iface.ifindex = if_nametoindex(iface.name);
+    std::vector<const char*> iface_names;
+
+    // Check for explicit interface override
+    if (const char* env = std::getenv("NEURO_XDP_IFACE")) {
+        iface_names.push_back(env);
     }
-    for (auto& iface : ifaces) {
-        if (iface.ifindex <= 0) continue;
+
+    // Scan /sys/class/net/ for all available interfaces
+    if (auto* dir = opendir("/sys/class/net/")) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (entry->d_name[0] == '.') continue;
+            iface_names.push_back(entry->d_name);
+        }
+        closedir(dir);
+    }
+
+    // Fallback to hardcoded defaults
+    iface_names.push_back("eth0");
+    iface_names.push_back("lo");
+
+    // Deduplicate while preserving order
+    std::vector<std::string> unique_ifaces;
+    std::unordered_set<std::string> seen;
+    for (const char* name : iface_names) {
+        if (seen.insert(name).second) {
+            unique_ifaces.push_back(name);
+        }
+    }
+
+    for (const auto& name : unique_ifaces) {
+        int ifindex = if_nametoindex(name.c_str());
+        if (ifindex <= 0) continue;
         m_skel->links.xdp_neuro_mesh_dropper =
-            bpf_program__attach_xdp(m_skel->progs.xdp_neuro_mesh_dropper, iface.ifindex);
+            bpf_program__attach_xdp(m_skel->progs.xdp_neuro_mesh_dropper, ifindex);
         if (m_skel->links.xdp_neuro_mesh_dropper) {
-            std::cout << "[EBPF] XDP dropper attached to " << iface.name
-                      << " (ifindex=" << iface.ifindex << ")" << std::endl;
+            std::cout << "[EBPF] XDP dropper attached to " << name
+                      << " (ifindex=" << ifindex << ")" << std::endl;
             break;
         }
     }
@@ -91,8 +119,10 @@ std::string NodeAgent::load_and_attach_ebpf() {
         return "Ring buffer creation failed";
     }
 
-    mkdir("/sys/fs/bpf/neuro_mesh", 0755);
-    if (bpf_map__pin(m_skel->maps.xdp_blacklist, "/sys/fs/bpf/neuro_mesh/xdp_blacklist") != 0) {
+    std::string map_dir = "/sys/fs/bpf/neuro_mesh_" + m_node_id;
+    mkdir(map_dir.c_str(), 0755);
+    std::string map_path = map_dir + "/xdp_blacklist";
+    if (bpf_map__pin(m_skel->maps.xdp_blacklist, map_path.c_str()) != 0) {
         std::cerr << "[EBPF] Warning: could not pin xdp_blacklist map — eBPF enforcement unavailable."
                   << std::endl;
     }

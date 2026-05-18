@@ -19,6 +19,12 @@ struct PeerEntry {
     std::chrono::steady_clock::time_point last_heartbeat;
     bool verified = false;
     int tls_fd = -1;
+    // Discovery path confirmation bitmask for dual-path TOFU hardening.
+    // Bit 0 (0x01) = beacon path confirmed, Bit 1 (0x02) = ANNOUNCE path confirmed.
+    // PBFT key registration only occurs when both paths agree on the same key.
+    uint8_t confirmed_paths = 0;
+    static constexpr uint8_t PATH_BEACON   = 0x01;
+    static constexpr uint8_t PATH_ANNOUNCE = 0x02;
 };
 
 class PeerManager {
@@ -59,6 +65,18 @@ public:
     bool verify_tls_cert(const std::string& peer_id, const std::string& cert_fingerprint);
     void unpin_peer_key(const std::string& node_id);
     void pin_tls_fingerprint(const std::string& peer_id, const std::string& fingerprint);
+
+    // === Dual-path TOFU confirmation ===
+    // Confirm that a specific discovery path has seen this peer's key.
+    // Returns true if BOTH paths now agree (beacon + ANNOUNCE) on the same key.
+    // Returns false if paths disagree (key mismatch) — peer should be rejected.
+    // Returns "pending" status via the bool: true = dual-path confirmed, false = still waiting.
+    struct PathConfirmResult {
+        bool dual_confirmed;  // both paths agree on same key
+        bool key_mismatch;    // paths disagree — security violation
+    };
+    PathConfirmResult confirm_path(const std::string& peer_id, uint8_t path_flag,
+                                    const std::string& public_key_pem);
 
     // === Rate limiting ===
     bool check_rate_limit(const std::string& ip);

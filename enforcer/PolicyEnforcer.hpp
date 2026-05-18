@@ -29,6 +29,7 @@ public:
     PolicyEnforcer();
     ~PolicyEnforcer();
 
+    void set_node_id(const std::string& node_id);
     void register_peer_ip(const std::string& node_id, const std::string& ip);
     void register_peer_port(const std::string& node_id, uint16_t port);
     std::string resolve_target(const std::string& target) const;
@@ -70,15 +71,19 @@ private:
     static bool ensure_nftables_table();
 
     // Enforcement backends — tried in priority order
-    static bool apply_ebpf_drop(const std::string& ip);
+    bool apply_ebpf_drop(const std::string& ip);
+    bool remove_ebpf_drop(const std::string& ip);
+
+    // nftables backend
     static bool apply_nftables_drop(const std::string& ip);
     static bool apply_nftables_port_drop(const std::string& ip, uint16_t port);
-    static bool apply_iptables_drop(const std::string& ip);
-
-    // Removal backends
-    static bool remove_ebpf_drop(const std::string& ip);
+    static bool apply_nftables_loopback_drop(const std::string& ip);
     static bool remove_nftables_drop(const std::string& ip);
+    static bool remove_nftables_loopback_drop(const std::string& ip);
     static bool remove_nftables_port_drop(const std::string& ip, uint16_t port);
+
+    // iptables backend
+    static bool apply_iptables_drop(const std::string& ip);
     static bool remove_iptables_drop(const std::string& ip);
 
     // Fork+exec helpers
@@ -93,6 +98,7 @@ private:
     static bool remove_nftables_rules_matching(const std::string& match_substr);
 
     std::mutex m_mtx;
+    std::string m_node_id;
     std::set<std::string> m_isolated_nodes;
     std::set<std::string> m_safe_list;
     std::set<uint32_t> m_suspended_pids;

@@ -127,6 +127,33 @@ bool TLSContext::load_ca_certificate() {
     return true;
 }
 
+bool TLSContext::trust_peer_cert(const std::string& pem_cert) {
+    // Load the peer's self-signed cert into the extra cert store of both
+    // server and client contexts. This allows OpenSSL to verify the peer's
+    // cert during mTLS handshakes even when it's self-signed.
+    BIO* bio = BIO_new_mem_buf(pem_cert.data(), static_cast<int>(pem_cert.size()));
+    if (!bio) return false;
+
+    X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    if (!cert) return false;
+
+    // Add to server context's extra cert store (for verifying incoming clients)
+    X509_STORE* server_store = SSL_CTX_get_cert_store(m_server_ctx.get());
+    if (server_store) {
+        X509_STORE_add_cert(server_store, cert);
+    }
+
+    // Add to client context's extra cert store (for verifying remote servers)
+    X509_STORE* client_store = SSL_CTX_get_cert_store(m_client_ctx.get());
+    if (client_store) {
+        X509_STORE_add_cert(client_store, cert);
+    }
+
+    X509_free(cert);
+    return true;
+}
+
 SSL* TLSContext::create_server_ssl() {
     SSL* ssl = SSL_new(m_server_ctx.get());
     return ssl;

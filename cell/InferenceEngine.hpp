@@ -21,17 +21,24 @@ public:
     bool is_operational() const noexcept;
 
     // Last anomaly score from analyze() — thread-safe, read by heartbeat loop
-    float last_score() const noexcept { return m_last_score.load(std::memory_order_relaxed); }
-    const char* last_threat() const noexcept {
+    float last_score() const noexcept {
+        // relaxed: score is monotonic counter, no cross-thread ordering dependency
+        return m_last_score.load(std::memory_order_relaxed);
+    }
+    std::string verdict() const noexcept {
+        // relaxed: only reads the latest stored value, no synchronization needed
         return m_last_score.load(std::memory_order_relaxed) < m_threshold ? "CRITICAL" : "NONE";
     }
 
     // Decay the anomaly score toward 0 (normal) by `factor` each call.
     // Called from heartbeat loop when no eBPF events arrive, preventing
     // sticky CRITICAL state after the anomalous traffic stops.
+    // relaxed: single-writer (decay called from one thread), no read-write ordering needed
     void decay(float factor = 0.5f) noexcept {
         float current = m_last_score.load(std::memory_order_relaxed);
-        if (current < 0.0f) {
+        if (current > 0.0f) {
+            m_last_score.store(current * (1.0f - factor), std::memory_order_relaxed);
+        } else if (current < 0.0f) {
             m_last_score.store(current * (1.0f - factor), std::memory_order_relaxed);
         }
     }

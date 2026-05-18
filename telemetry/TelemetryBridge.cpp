@@ -182,20 +182,32 @@ void TelemetryBridge::child_main(int read_fd, const TelemetryBridgeConfig& cfg) 
     std::cerr << "[TELEMETRY_BRIDGE] Child spawned (pid=" << getpid()
               << "), starting sandbox sequence..." << std::endl;
 
-    // ---- Stage 1: PR_SET_NO_NEW_PRIVS — irreversible ----
-    apply_no_new_privs();
+    // Check if sandbox should be skipped (dev/WSL2 mode).
+    // NEURO_UNSAFE_NO_SANDBOX=1 bypasses all sandbox stages.
+    // In production (env var not set), sandbox failures are fatal.
+    bool unsafe_mode = false;
+    if (const char* env = std::getenv("NEURO_UNSAFE_NO_SANDBOX")) {
+        unsafe_mode = (std::string(env) == "1");
+    }
+    if (unsafe_mode) {
+        std::cerr << "[SANDBOX] UNSAFE MODE — skipping all sandbox stages "
+                  << "(NEURO_UNSAFE_NO_SANDBOX=1). Do NOT use in production." << std::endl;
+    } else {
+        // ---- Stage 1: PR_SET_NO_NEW_PRIVS — irreversible ----
+        apply_no_new_privs();
 
-    // ---- Stage 2: Filesystem isolation (chroot + chdir) ----
-    apply_fs_isolation(cfg);
+        // ---- Stage 2: Filesystem isolation (chroot + chdir) ----
+        apply_fs_isolation(cfg);
 
-    // ---- Stage 3: Drop root privileges to nobody ----
-    apply_uid_drop(cfg);
+        // ---- Stage 3: Drop root privileges to nobody ----
+        apply_uid_drop(cfg);
 
-    // ---- Stage 4: Seccomp-BPF default-kill filter ----
-    apply_seccomp_filter(read_fd);
+        // ---- Stage 4: Seccomp-BPF default-kill filter ----
+        apply_seccomp_filter(read_fd);
 
-    std::cerr << "[TELEMETRY_BRIDGE] Sandbox complete. Starting WebSocket on port "
-              << cfg.websocket_port << "..." << std::endl;
+        std::cerr << "[TELEMETRY_BRIDGE] Sandbox complete. Starting WebSocket on port "
+                  << cfg.websocket_port << "..." << std::endl;
+    }
 
     // ---- Stage 5: Run the WebSocket event loop (never returns) ----
     run_event_loop(read_fd, cfg.websocket_port);
@@ -220,22 +232,20 @@ void TelemetryBridge::apply_fs_isolation(const TelemetryBridgeConfig& cfg) {
     // Verify chroot path exists and is a directory before attempting.
     struct stat st;
     if (stat(cfg.chroot_path.c_str(), &st) == -1) {
-        std::cerr << "[SANDBOX] WARN: chroot path '" << cfg.chroot_path
-                  << "' does not exist: " << strerror(errno) 
-                  << " — continuing WITHOUT sandbox (WebSocket will still work)" << std::endl;
-        return;
+        std::cerr << "[SANDBOX] FATAL: chroot path '" << cfg.chroot_path
+                  << "' does not exist: " << strerror(errno) << std::endl;
+        _exit(1);
     }
     if (!S_ISDIR(st.st_mode)) {
-        std::cerr << "[SANDBOX] WARN: chroot path '" << cfg.chroot_path
-                  << "' is not a directory — continuing WITHOUT sandbox" << std::endl;
-        return;
+        std::cerr << "[SANDBOX] FATAL: chroot path '" << cfg.chroot_path
+                  << "' is not a directory" << std::endl;
+        _exit(1);
     }
 
     if (chroot(cfg.chroot_path.c_str()) == -1) {
-        std::cerr << "[SANDBOX] WARN: chroot('" << cfg.chroot_path
-                  << "') failed: " << strerror(errno) 
-                  << " — continuing WITHOUT sandbox (WebSocket will still work)" << std::endl;
-        return;
+        std::cerr << "[SANDBOX] FATAL: chroot('" << cfg.chroot_path
+                  << "') failed: " << strerror(errno) << std::endl;
+        _exit(1);
     }
 
     if (chdir("/") == -1) {
@@ -249,20 +259,23 @@ void TelemetryBridge::apply_fs_isolation(const TelemetryBridgeConfig& cfg) {
 
 void TelemetryBridge::apply_uid_drop(const TelemetryBridgeConfig& cfg) {
     // Drop supplementary groups first, then gid, then uid.
-    // If this fails, continue without dropping (WebSocket still works)
+    // In production mode, failure is fatal.
     if (setgroups(0, nullptr) == -1) {
-        std::cerr << "[SANDBOX] WARN: setgroups() failed: "
-                  << strerror(errno) << " — continuing without group drop" << std::endl;
+        std::cerr << "[SANDBOX] FATAL: setgroups() failed: "
+                  << strerror(errno) << std::endl;
+        _exit(1);
     }
 
     if (setresgid(cfg.sandbox_gid, cfg.sandbox_gid, cfg.sandbox_gid) == -1) {
-        std::cerr << "[SANDBOX] WARN: setresgid(" << cfg.sandbox_gid
-                  << ") failed: " << strerror(errno) << " — continuing without gid drop" << std::endl;
+        std::cerr << "[SANDBOX] FATAL: setresgid(" << cfg.sandbox_gid
+                  << ") failed: " << strerror(errno) << std::endl;
+        _exit(1);
     }
 
     if (setresuid(cfg.sandbox_uid, cfg.sandbox_uid, cfg.sandbox_uid) == -1) {
-        std::cerr << "[SANDBOX] WARN: setresuid(" << cfg.sandbox_uid
-                  << ") failed: " << strerror(errno) << " — continuing without uid drop" << std::endl;
+        std::cerr << "[SANDBOX] FATAL: setresuid(" << cfg.sandbox_uid
+                  << ") failed: " << strerror(errno) << std::endl;
+        _exit(1);
     }
 
     std::cerr << "[SANDBOX] UID/GID dropped to " << cfg.sandbox_uid
@@ -276,9 +289,8 @@ void TelemetryBridge::apply_uid_drop(const TelemetryBridgeConfig& cfg) {
 void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL_PROCESS);
     if (ctx == nullptr) {
-        std::cerr << "[SECCOMP] WARN: seccomp_init() returned null "
-                  << "— continuing WITHOUT seccomp filter" << std::endl;
-        return;
+        std::cerr << "[SECCOMP] FATAL: seccomp_init() returned null" << std::endl;
+        _exit(1);
     }
 
     // ---- Basic process syscalls ----

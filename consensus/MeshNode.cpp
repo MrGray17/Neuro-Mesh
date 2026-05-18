@@ -54,7 +54,18 @@ MeshNode::MeshNode(const std::string& node_id,
       }())
 {
     if (!m_webhook_url.empty()) {
-        std::cout << "[ALERT] Webhook endpoint: " << m_webhook_url << std::endl;
+        // Redact credentials from URL before logging to prevent
+        // credential leakage in container logs (BUG-10 fix).
+        std::string safe_url = m_webhook_url;
+        auto scheme_end = safe_url.find("://");
+        if (scheme_end != std::string::npos) {
+            auto path_start = safe_url.find('/', scheme_end + 3);
+            auto at_pos = safe_url.find('@');
+            if (at_pos != std::string::npos && (path_start == std::string::npos || at_pos < path_start)) {
+                safe_url.replace(scheme_end + 3, at_pos - scheme_end - 3, "***:***");
+            }
+        }
+        std::cout << "[ALERT] Webhook endpoint: " << safe_url << std::endl;
     }
 
     m_private_key = crypto::IdentityCore::generate_ed25519_key();
@@ -97,6 +108,7 @@ MeshNode::MeshNode(const std::string& node_id,
 
     m_tls_config.cert_path = m_tls_cert_path;
     m_tls_config.key_path = m_tls_key_path;
+    m_tls_config.ca_path = m_tls_cert_path;  // Self-signed cert acts as its own CA
     m_tls_config.verify_client = true;
     m_tls_config.enable_tls13 = true;
     m_tls_config.enable_mtls = true;
@@ -288,10 +300,34 @@ void MeshNode::discovery_beacon_loop() {
 // UDP transport helpers
 // =============================================================================
 
+// Configurable UDP jitter via env vars. Default: 0 (no jitter) for production.
+// Set NEURO_UDP_JITTER_MIN/MAX to enable timing obfuscation.
+static std::pair<int, int> get_udp_jitter(const char* env_min, const char* env_max,
+                                            int default_min, int default_max) {
+    const char* min_env = std::getenv(env_min);
+    const char* max_env = std::getenv(env_max);
+    int min_val = default_min;
+    int max_val = default_max;
+    if (min_env) {
+        char* end = nullptr;
+        long v = std::strtol(min_env, &end, 10);
+        if (*end == '\0' && v >= 0) min_val = static_cast<int>(v);
+    }
+    if (max_env) {
+        char* end = nullptr;
+        long v = std::strtol(max_env, &end, 10);
+        if (*end == '\0' && v >= 0) max_val = static_cast<int>(v);
+    }
+    return {min_val, max_val};
+}
+
 void MeshNode::send_udp_broadcast(const std::string& payload) {
-    static thread_local std::mt19937 gen{std::random_device{}()};
-    std::uniform_int_distribution<> dis(10, 80);
-    std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+    auto [jmin, jmax] = get_udp_jitter("NEURO_UDP_JITTER_MIN", "NEURO_UDP_JITTER_MAX", 0, 0);
+    if (jmax > jmin) {
+        static thread_local std::mt19937 gen{std::random_device{}()};
+        std::uniform_int_distribution<> dis(jmin, jmax);
+        std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+    }
 
     if (m_broadcast_fd < 0) return;
 
@@ -308,9 +344,12 @@ void MeshNode::send_udp_broadcast(const std::string& payload) {
 }
 
 void MeshNode::send_udp_discovery(const std::string& payload) {
-    static thread_local std::mt19937 gen{std::random_device{}()};
-    std::uniform_int_distribution<> dis(5, 50);
-    std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+    auto [jmin, jmax] = get_udp_jitter("NEURO_DISCOVERY_JITTER_MIN", "NEURO_DISCOVERY_JITTER_MAX", 0, 0);
+    if (jmax > jmin) {
+        static thread_local std::mt19937 gen{std::random_device{}()};
+        std::uniform_int_distribution<> dis(jmin, jmax);
+        std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+    }
 
     if (m_discovery_fd >= 0) {
         struct sockaddr_in broadcast_addr{};
@@ -355,9 +394,12 @@ void MeshNode::send_udp_discovery(const std::string& payload) {
 }
 
 void MeshNode::send_udp_unicast(const std::string& ip, int port, const std::string& payload) {
-    static thread_local std::mt19937 gen{std::random_device{}()};
-    std::uniform_int_distribution<> dis(15, 100);
-    std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+    auto [jmin, jmax] = get_udp_jitter("NEURO_UNICAST_JITTER_MIN", "NEURO_UNICAST_JITTER_MAX", 0, 0);
+    if (jmax > jmin) {
+        static thread_local std::mt19937 gen{std::random_device{}()};
+        std::uniform_int_distribution<> dis(jmin, jmax);
+        std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+    }
 
     if (m_broadcast_fd < 0) return;
 
@@ -458,14 +500,18 @@ void MeshNode::p2p_listener_loop() {
                                   MSG_DONTWAIT, (struct sockaddr*)&daddr, &dlen);
                 if (dn <= 0) break;
                 buffer[dn] = '\0';
+
+                char addr_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &daddr.sin_addr, addr_str, sizeof(addr_str));
+
+                // Per-source-IP rate limiting to prevent CPU exhaustion
+                // from forged UDP datagrams (BUG-06 fix).
+                if (!m_peer_manager.check_rate_limit(addr_str)) continue;
+
                 std::string dmsg(buffer);
                 if (dmsg.rfind("TELEMETRY|", 0) == 0) {
-                    char addr_str[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &daddr.sin_addr, addr_str, sizeof(addr_str));
                     process_telemetry_gossip(dmsg, addr_str);
                 } else {
-                    char addr_str[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &daddr.sin_addr, addr_str, sizeof(addr_str));
                     process_discovery_beacon(dmsg, addr_str);
                 }
             }
@@ -796,6 +842,15 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     // add_peer() does atomic check+add under one lock — eliminates TOCTOU race
     // where two concurrent beacons from the same peer both see is_new=true.
     bool is_new = m_peer_manager.add_peer(peer_id, sender_ip, peer_tcp_port, peer_tls_port, peer_pem);
+
+    // Dual-path TOFU: confirm beacon path and check if both paths agree.
+    auto confirm = m_peer_manager.confirm_path(peer_id, PeerEntry::PATH_BEACON, peer_pem);
+    if (confirm.key_mismatch) {
+        std::cerr << "[SECURITY] TOFU dual-path MISMATCH for " << peer_id
+                  << " via beacon — rejecting peer." << std::endl;
+        return;
+    }
+
     if (!is_new) {
         bool key_rejected = false;
         {
@@ -812,17 +867,22 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
         }
     }
 
-    if (is_new) {
-        std::cout << "[NETWORK] Verified peer " << peer_id_copy
-                  << " at " << sender_ip_copy << ":" << peer_tcp_port
-                  << " (TLS:" << peer_tls_port << ")"
-                  << ". Quorum updated to n=" << peer_count() << "." << std::endl;
+    if (is_new || confirm.dual_confirmed) {
+        if (is_new) {
+            std::cout << "[NETWORK] Verified peer " << peer_id_copy
+                      << " at " << sender_ip_copy << ":" << peer_tcp_port
+                      << " (TLS:" << peer_tls_port << ")"
+                      << ". Quorum updated to n=" << peer_count() << "." << std::endl;
+        }
 
-        // Register key with PBFT and IP with enforcer.
-        // has_peer() guard prevents double-increment if ANNOUNCE fired first.
-        if (!m_pbft.has_peer(peer_id_copy)) {
+        // Register key with PBFT only when BOTH discovery paths confirm the same key.
+        // This prevents identity hijack via TOFU race — an attacker must compromise
+        // both UDP beacon AND TCP ANNOUNCE simultaneously.
+        if (confirm.dual_confirmed && !m_pbft.has_peer(peer_id_copy)) {
             m_pbft.register_peer_key(peer_id_copy, peer_pem_copy);
             m_pbft.increment_peers();
+            std::cout << "[TOFU] Dual-path confirmed for " << peer_id_copy
+                      << " — registered with PBFT." << std::endl;
         }
 
         if (m_enforcer) m_enforcer->register_peer_ip(peer_id_copy, sender_ip_copy);
@@ -1019,16 +1079,29 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
 
         bool is_new_peer = !m_peer_manager.is_known_ip(peer_id);
         m_peer_manager.add_known_ip(peer_id);
+
+        // Ensure peer exists in PeerManager registry for dual-path tracking.
+        // add_peer() is a no-op if peer already exists (returns false).
+        m_peer_manager.add_peer(peer_id, sender_ip, 0, 0, peer_pem);
+
         if (is_new_peer) {
             std::cout << "[NETWORK] Discovered verified peer: " << peer_id << " at " << sender_ip << std::endl;
         }
 
-        // TOFU: only register the key on first encounter.
-        // Re-announcements with a different key are rejected (prevents
-        // identity takeover via ANNOUNCE spoofing).
-        if (!m_pbft.has_peer(peer_id)) {
+        // Dual-path TOFU: confirm ANNOUNCE path and check if both paths agree.
+        auto confirm = m_peer_manager.confirm_path(peer_id, PeerEntry::PATH_ANNOUNCE, peer_pem);
+        if (confirm.key_mismatch) {
+            std::cerr << "[SECURITY] TOFU dual-path MISMATCH for " << peer_id
+                      << " via ANNOUNCE — rejecting peer." << std::endl;
+            return;
+        }
+
+        // Register key with PBFT only when BOTH discovery paths confirm the same key.
+        if (confirm.dual_confirmed && !m_pbft.has_peer(peer_id)) {
             m_pbft.register_peer_key(peer_id, peer_pem);
             m_pbft.increment_peers();
+            std::cout << "[TOFU] Dual-path confirmed for " << peer_id
+                      << " — registered with PBFT." << std::endl;
         }
 
         if (m_enforcer) m_enforcer->register_peer_ip(peer_id, sender_ip);
@@ -1179,6 +1252,7 @@ void MeshNode::initiate_consensus(const std::string& target_id, const std::strin
 }
 
 void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::string& target_id, const std::string& evidence_json) {
+    // relaxed: sequence counter is monotonic, no cross-thread ordering dependency
     uint64_t seq = m_sequence_number.fetch_add(1, std::memory_order_relaxed) + 1;
     int view = m_pbft.current_view();
 
@@ -1379,6 +1453,19 @@ void MeshNode::liveness_monitor() {
         if (!m_running) break;
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_prune).count() >= HEARTBEAT_SEC) {
             prune_stale_peers();
+
+            // Check for stalled consensus rounds and trigger view change
+            // if needed (BUG-11 fix: needs_view_change was defined but never called).
+            auto peer_ids = m_peer_manager.get_all_peer_ids();
+            for (const auto& peer_id : peer_ids) {
+                std::string evidence = "{\"liveness\":\"check\"}";
+                if (m_pbft.needs_view_change(evidence, peer_id)) {
+                    std::cout << "[PBFT] View change triggered for stalled round with "
+                              << peer_id << std::endl;
+                    m_pbft.advance_view();
+                }
+            }
+
             last_prune = now;
         }
     }

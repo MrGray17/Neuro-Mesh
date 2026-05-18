@@ -1,233 +1,280 @@
-# NEURO-MESH: VERIFIED BUGS TO-DO
-# Generated from independent audits. Every item traced to actual code.
-# Items marked NOT BUG were investigated and found to be false positives.
+# NEURO-MESH: AUDIT FINDINGS
+# Generated from independent code audit. Every item traced to actual code.
+# Priority: P0 (fix first) → P1 → P2 (convenience)
 
 # =============================================================================
 # P0 — CRITICAL / HIGH (Fix before anything else)
 # =============================================================================
 
-## BUG-01: PBFT needs_view_change() always returns false — consensus deadlock
-# Severity: CRITICAL
-# Files: consensus/PBFT.hpp:177-178, consensus/PBFT.hpp:239-247
-#
-# Rounds are keyed by sha256(evidence_json + "|" + target_id) at line 177-178,
-# but needs_view_change() looks up by raw evidence_json at line 241.
-# The lookup never finds a match, so it always returns false.
-# Stalled consensus rounds never trigger view-change. System deadlocks for up to 120s.
-#
-# Fix: Change needs_view_change() to accept target_id and use the same key:
-#   auto round_key = sha256_hex(evidence_json + "|" + target_id);
-#   auto it = m_rounds.find(round_key);
-# Or iterate all rounds and check timestamps (O(n) but correct).
-
-## BUG-02: is_ip_safe() reads m_safe_list without holding m_mtx — data race / UB
+## BUG-01: Identity hijack via TOFU race during initial discovery
 # Severity: HIGH
-# Files: enforcer/PolicyEnforcer.hpp:87-89, enforcer/PolicyEnforcer.cpp:221-238
+# Files: consensus/MeshNode.cpp:803-807, consensus/MeshNode.cpp:1029-1032
 #
-# m_safe_list is guarded by m_mtx (used in add_safe_node at line 222).
-# is_ip_safe() at line 228 locks m_ip_map_mtx but iterates m_safe_list.
-# Concurrent add_safe_node() + is_ip_safe() = undefined behavior on std::set.
-# Can crash or return incorrect results (safe node not recognized).
+# TOFU accepts the first public key for a given peer_id. An attacker on-LAN
+# who broadcasts a DISCOVERY or ANNOUNCE signed with their own key under a
+# victim's node_id before the legitimate node's beacon arrives permanently
+# pins the attacker's key. Subsequent legitimate beacons are rejected:
 #
-# Fix: Acquire m_mtx before iterating m_safe_list:
-#   std::lock_guard<std::mutex> safe_lock(m_mtx);
-#   std::shared_lock<std::shared_mutex> ip_lock(m_ip_map_mtx);
+#   if (!peer_pem.empty() && !existing.public_key_pem.empty()
+#       && existing.public_key_pem != peer_pem) {
+#       std::cerr << "[SECURITY] TOFU key change REJECTED for " << peer_id;
+#
+# Attacker can then cast PBFT votes as the victim, trigger false isolation.
+#
+# Fix: Bind identity to boot proof (TPM), require OOB key distribution, or
+# add witness threshold where N existing peers vouch for a new key.
 
-## BUG-03: reset_enforcement() sends SIGTERM to recycled PIDs — arbitrary process kill
+## BUG-02: m_message_history grows unbounded — eventual OOM
 # Severity: HIGH
-# Files: enforcer/PolicyEnforcer.cpp:644-652
+# Files: consensus/PBFT.hpp:509, consensus/PBFT.hpp:405-425
 #
-# PIDs in m_suspended_pids may have been recycled by the kernel after the
-# original process exited. reset_enforcement() sends SIGTERM without any
-# validation. Kills innocent processes.
+# detect_equivocation() appends to m_message_history at line 425:
+#   history[msg.sequence_number] = msg_hash;
+# There is NO eviction, pruning, or size limit. cleanup_stale_rounds()
+# cleans m_rounds and m_vote_registry but NOT m_message_history.
+# No TTL-based or cap-based eviction anywhere.
 #
-# Fix: Verify PID still exists before signaling:
-#   if (kill(static_cast<pid_t>(pid), 0) == 0) {
-#       kill(static_cast<pid_t>(pid), SIGCONT);
-#       kill(static_cast<pid_t>(pid), SIGTERM);
-#   }
+# At 1,000 msgs/sec × 5 peers × ~100 bytes = ~500KB/sec = 1.8GB/hour.
+# Also affects m_rate_limits (line 511) which also has no periodic cleanup.
+#
+# Fix: Add age-based or cap-based eviction (keep last N sequences per sender;
+# or add timestamp and evict entries older than ROUND_TTL_SEC).
 
-## BUG-04: Quorum formula (2N+2)/3 is wrong — system tolerates 0 byzantine nodes
-# Severity: CRITICAL
-# Files: consensus/PBFT.hpp:250-251
-#
-# Standard PBFT: quorum = 2f+1 where n = 3f+1.
-# For n=5: PBFT needs 3 (f=1). Formula gives (2*5+2)/3 = 4.
-# For n=4: PBFT needs 3 (f=1). Formula gives (2*4+2)/3 = 3. Correct.
-# The formula is too conservative — for n=5, it requires 4/5 instead of 3/5,
-# meaning the system cannot tolerate even 1 faulty node when it should.
-#
-# Fix: int quorum = (2 * (m_total_nodes - 1)) / 3 + 1;
-# Or: int f = (m_total_nodes - 1) / 3; return 2 * f + 1;
-
-## BUG-05: Telemetry gossip is unauthenticated — fake telemetry injection
+## BUG-03: TelemetryBridge sandbox degrades silently to unsafe state
 # Severity: HIGH
-# Files: consensus/MeshNode.cpp:880-900
+# Files: telemetry/TelemetryBridge.cpp:219-270
 #
-# process_telemetry_gossip() accepts TELEMETRY|node_id|json from any UDP sender.
-# No signature verification, no TOFU check, no timestamp validation.
-# An attacker on the LAN can inject fake telemetry for any node, causing
-# the dashboard to display false status and potentially triggering false alerts.
+# All sandbox functions use "warn on failure, continue without" pattern.
+# apply_fs_isolation() at line 223:
+#   " — continuing WITHOUT sandbox (WebSocket will still work)"
+# Same in apply_uid_drop (line 254), apply_seccomp_filter (line 279).
+# If /var/empty doesn't exist (common in minimal containers), chroot fails
+# silently. Child runs with uid+gid unchanged + no seccomp.
 #
-# Fix: Sign telemetry messages with the sender's Ed25519 key.
-# Verify signature + timestamp in process_telemetry_gossip().
+# The child accepts WebSocket connections from the network. A uWS
+# vulnerability gives attacker root-level code execution.
+#
+# Fix: Make sandbox failures fatal (_exit(1)). Add --unsafe flag for dev.
+# Ensure Dockerfile stage 2 creates /var/empty (currently line 57 does).
 
-## BUG-06: nftables loopback + port rules leak — never cleaned up
-# Severity: MEDIUM
-# Files: enforcer/PolicyEnforcer.cpp:310-334 (apply), enforcer/PolicyEnforcer.cpp:370-380 (remove)
+## BUG-04: mTLS with no CA loaded — TLS connections are NOT verified
+# Severity: HIGH
+# Files: net/TransportLayer.cpp:68-76, consensus/MeshNode.cpp:98-102
 #
-# apply_nftables_drop() creates 3 rules: IP drop, loopback drop, port drop.
-# remove_nftables_drop() only removes the IP rule.
-# Loopback and port rules accumulate forever. After many isolate/release cycles,
-# the nftables ruleset grows unbounded, degrading packet processing performance.
+# m_tls_config.verify_client = true and enable_mtls = true are set, but
+# m_tls_config.ca_path is never assigned (defaults to "").
+# TLSContext::TLSContext at line 73 only loads CA if ca_path is non-empty:
+#   if (!m_config.ca_path.empty()) { load_ca_certificate(); }
+# Without load_ca_certificate, SSL_CTX_set_verify is never called.
+# SSL_get_verify_result() in get_connection_info() returns X509_V_OK
+# for ANY certificate — including self-signed, expired, or attacker certs.
 #
-# Fix: Use nftables named sets instead of individual rules.
-# Add/remove IPs from a set (atomic, no rule accumulation).
-# Or: track all rule handles and delete them in release_target().
-
-## BUG-07: fork_exec_wait() child inherits all FDs ≥ 3 — FD leak to child process
-# Severity: MEDIUM
-# Files: enforcer/PolicyEnforcer.cpp:110-124
+# MeshNode connects TLS to peers (line 843-847) and accepts TLS connections
+# (tls_acceptor_loop). Peer TLS fingerprints are tracked via TOFU but the
+# TLS socket itself never validates remote certificates.
 #
-# fork_exec_wait() forks and execs iptables/nftables without closing inherited FDs.
-# The child inherits sockets, pipes, and other FDs from the parent.
-# Compare fork_exec_capture() at line 143 which correctly uses close_range().
-# If the child process is long-running or crashes, it holds references to parent FDs,
-# preventing proper cleanup.
-#
-# Fix: Add close_range() to fork_exec_wait() child path:
-#   syscall(SYS_close_range, 3, static_cast<unsigned int>(max_fd), 0U);
-
-## BUG-08: Bridge pipe missing O_NONBLOCK — blocking write stalls heartbeat
-# Severity: MEDIUM
-# Files: telemetry/TelemetryBridge.cpp:58
-#
-# pipe2(pipefd, O_CLOEXEC) does not set O_NONBLOCK.
-# If the child's uWebSockets event loop is slow or the pipe buffer fills (64KB),
-# write() in push_telemetry() blocks. This stalls the heartbeat thread,
-# which blocks the entire main loop (eBPF drain, inference, PBFT).
-#
-# Fix: pipe2(pipefd, O_CLOEXEC | O_NONBLOCK)
-# Handle EAGAIN in push_telemetry() by dropping the message (best-effort telemetry).
-
-## BUG-09: Fuzz target uses stale 5-field message format — tests nothing real
-# Severity: MEDIUM
-# Files: tests/fuzz/fuzz_pbft_message.cpp:19-34
-#
-# Fuzzer parses: STAGE|SENDER|TARGET|EVIDENCE|SIGNATURE (5 fields)
-# Actual wire format: VOTE|stage|sender|seq|view|target|evidence|prev_hash|signature (9 fields)
-# The fuzzer constructs P2PMessage objects that never match what MeshNode produces.
-# verify_message() and advance_state() are tested with malformed data that
-# doesn't represent real attack surfaces.
-#
-# Fix: Update fuzzer to parse the 9-field format and construct P2PMessage
-# with all fields (seq, view, prev_message_hash).
+# Fix: Set m_tls_config.ca_path in MeshNode constructor, or PIN peer certs
+# and use SSL_CTX_set_cert_verify_callback for custom verification.
 
 # =============================================================================
 # P1 — MEDIUM (Fix after P0)
 # =============================================================================
 
-## BUG-10: TelemetryExporter doesn't detect partial writes — promotes incomplete JSON
+## BUG-05: PBFT protocol does not enforce primary — premature advancement
 # Severity: MEDIUM
-# Files: telemetry/TelemetryExporter.hpp:37-44
+# Files: consensus/PBFT.hpp:219-221
 #
-# write() can return fewer bytes than requested (disk full, signal).
-# Code only checks written < 0 (error), not written < payload.length() (partial).
-# Proceeds to fsync() and rename(), atomically promoting incomplete JSON.
-# Dashboard reads malformed JSON and fails to render.
+# Classic PBFT requires primary (view % N) to send PRE_PREPARE. This impl
+# allows ANY node to send PRE_PREPARE. Receiving any single PRE_PREPARE
+# advances state IDLE→PREPARE immediately (line 219-221):
+#   if (msg.stage_str == "PRE_PREPARE" && round.state == PBFTStage::IDLE)
+#       round.state = PBFTStage::PREPARE;
+# The node then broadcasts its own PREPARE (line 1100). With quorum=3 (n=5),
+# attacker casting one vote needs only 2 honest relays to reach COMMIT.
 #
-# Fix: if (written != static_cast<ssize_t>(payload.length())) { /* error */ return; }
+# Additionally, initiate_consensus() at line 1170 accepts any target + any
+# evidence from any source — no validation that evidence corresponds to a
+# real anomaly. The only guard is 30s cooldown (rate, not authenticity).
+#
+# Fix: Rename protocol to "Byzantine Voting" or implement proper primary
+# selection where only the expected primary's PRE_PREPARE is accepted.
 
-## BUG-11: std::atomic::store() in signal handler — not async-signal-safe
+## BUG-06: Missing per-source rate limiting on discovery/telemetry socket
 # Severity: MEDIUM
-# Files: main.cpp:114-118
+# Files: consensus/MeshNode.cpp:452-472
 #
-# POSIX only allows async-signal-safe functions in signal handlers.
-# std::atomic::store() is not on the list. On glibc/x86_64 it uses lock-free
-# instructions and works in practice, but on other platforms it may use a mutex
-# internally, causing deadlock if the signal interrupts a thread holding that mutex.
+# The discovery socket drain loop processes ALL pending messages in a tight
+# loop without per-source-IP rate limiting. Each message triggers string
+# splitting, base64 decode, and Ed25519 signature verification. An attacker
+# on LAN can saturate CPU with forged UDP datagrams (~20K forged pkts/sec
+# at ~50μs/verify = 100% CPU).
 #
-# Fix: Use volatile sig_atomic_t:
-#   static volatile sig_atomic_t global_running = 1;
-#   void signal_handler(int) { global_running = 0; }
+# By contrast, the consensus socket goes through PeerManager::check_rate_limit
+# at line 977. Discovery/telemetry bypass this entirely.
+#
+# Fix: Add per-source-IP rate limiting to the drain loop, or use recvfrom +
+# per-IP credit system.
 
-## BUG-12: std::jthread stop token not connected to m_running — potential deadlock
+## BUG-07: StateJournal log rotation has TOCTOU race — silent data loss
 # Severity: MEDIUM
-# Files: consensus/MeshNode.cpp:181, consensus/MeshNode.cpp:1328-1343
+# Files: common/StateJournal.hpp:106-119
 #
-# tls_worker_loop() checks m_running, not the jthread stop token.
-# If MeshNode is destroyed without stop() (e.g., exception during init),
-# jthread destructor requests stop but the worker is blocked in cv.wait().
-# The destructor deadlocks waiting for the thread to join.
+# During log rotation (>10MB), StateJournal:
+# 1. ::lseek(m_fd, 0, SEEK_SET) — dead code, misleading
+# 2. ::rename(m_path, backup) — closes fd, releases POSIX lock
+# 3. ::close(m_fd) + ::open(...) — window where another writer can interleave
 #
-# Fix: Use std::thread instead of std::jthread (consistent with other threads),
-# or pass stop_token to the loop and check it in the cv wait predicate.
+# During the rename→close→open window, the POSIX advisory lock is released
+# (closed fd releases all locks). A concurrent thread or process can write
+# to the path during this window, losing entries.
+#
+# Fix: Remove dead lseek(). Hold write lock during rename using a separate
+# fd, or use copy-truncate (preserves lock, non-atomic but safe).
 
-## BUG-13: AuditLogger::initialize() closes old socket before creating replacement
+## BUG-08: XDP interface detection assumes eth0/lo — silent fallback
 # Severity: MEDIUM
-# Files: telemetry/AuditLogger.cpp:44-49
+# Files: cell/NodeAgent.cpp:62-77
 #
-# If socket() fails (EMFILE), the old socket is already closed and the new
-# one is invalid (-1). All subsequent emit_json() calls silently do nothing.
-# Audit events are lost with no indication.
+# XDP attachment tries only two hardcoded interfaces: eth0 and lo.
+# Cloud/K8s deployments use ens5, enp0s1, bond0, etc. If neither exists,
+# XDP enforcement silently falls back to nftables/iptables with only a
+# log warning.
 #
-# Fix: Create new socket first, then atomically replace:
-#   UniqueFD new_socket(socket(...));
-#   if (!new_socket.valid()) return;
-#   s_udp_socket() = std::move(new_socket);
+# Fix: Iterate /sys/class/net/* to find ALL interfaces, or accept
+# NEURO_XDP_IFACE env var for explicit configuration.
 
-## BUG-14: Base64 decode before size check on untrusted UDP input — memory pressure
+## BUG-09: UDP broadcast timing jitter (10-80ms) adds latency to consensus
 # Severity: MEDIUM
-# Files: consensus/MeshNode.cpp:1014-1015
+# Files: consensus/MeshNode.cpp:291-294
 #
-# tokens[6] comes from untrusted UDP. A 10MB base64 string is decoded
-# (~7.5MB allocation) before the size check rejects it.
-# Under flood attack: repeated large alloc/dealloc, memory pressure spike.
+# send_udp_broadcast() adds random sleep 10-80ms before every send:
+#   static thread_local std::mt19937 gen{std::random_device{}()};
+#   std::uniform_int_distribution<> dis(10, 80);
+#   std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
 #
-# Fix: Check base64 string length before decoding:
-#   if (tokens[6].size() > m_max_evidence_size * 4 / 3 + 4) return;
+# Same for send_udp_discovery (5-50ms) and send_udp_unicast (15-100ms).
+# In a 5-node PBFT round, each message incurs this delay before broadcast.
+# A full PRE_PREPARE→PREPARE→COMMIT→EXECUTED cycle adds 30-240ms of
+# artificial latency per node. Intent is "timing obfuscation" but the
+# cost to consensus convergence time is significant.
+#
+# Fix: Make jitter configurable (env var) or document that this intentionally
+# slows consensus to prevent timing side-channel attacks. Default to 0.
 
-## BUG-15: IPC rate limit map grows unbounded — memory leak
+## BUG-10: notify_webhook URL logged at startup — potential credential leak
 # Severity: LOW
-# Files: main.cpp:252
+# Files: consensus/MeshNode.cpp:57
 #
-# s_ipc_rate_limits is a static unordered_map<uid_t, IPRateLimit>.
-# Per-UID entries are never evicted. Each unique UID creates a permanent entry.
+# NEURO_WEBHOOK_URL is logged to stdout at startup:
+#   std::cout << "[ALERT] Webhook endpoint: " << m_webhook_url << std::endl;
+# If URL contains embedded credentials (https://user:pass@host/path), they
+# are visible in container logs, kubectl logs, etc.
 #
-# Fix: Add max size limit or TTL-based eviction in the rate limit cleanup code.
+# Fix: Redact credentials or log only the hostname portion.
 
-# =============================================================================
-# P2 — LOW / CLEANUP (Fix when convenient)
-# =============================================================================
-
-## BUG-16: Dead code — send_tls_to_peer() and send_tls_broadcast() never called
+## BUG-11: needs_view_change() defined but never called
 # Severity: LOW
-# Files: consensus/MeshNode.cpp:1277-1300, consensus/MeshNode.hpp:76-77
+# Files: consensus/PBFT.hpp:239-251
 #
-# broadcast_pbft_stage() at line 1156-1167 implements TLS sending inline.
-# These helper functions are defined but never invoked.
+# PBFTConsensus defines needs_view_change() and advance_view() but neither
+# is called anywhere in MeshNode.cpp. The only timeout mechanism is the 120s
+# ROUND_TTL in cleanup_stale_rounds(). A stalled consensus round hangs for
+# 120s before cleanup — no view-change protocol to accelerate recovery.
 #
-# Fix: Remove the functions and their declarations.
+# Fix: Wire needs_view_change() into the heartbeat or consensus listener loop.
 
-## BUG-17: Dead code — s_udp_socket_ptr assigned but never read
+# =============================================================================
+# P2 — LOW / CLEANUP
+# =============================================================================
+
+## BUG-12: CertificateAuthority compiled but never used
 # Severity: LOW
-# Files: telemetry/AuditLogger.cpp:13,17
+# Files: crypto/CertificateAuthority.cpp, crypto/CertificateAuthority.hpp
 #
-# Static pointer is assigned every call to s_udp_socket() but never dereferenced.
+# Both files exist in the codebase and are compiled in AGENT_SRCS (Makefile).
+# No function from CertificateAuthority is called anywhere. KeyManager is
+# used directly for self-signed cert generation.
 #
-# Fix: Remove s_udp_socket_ptr variable and the assignment.
+# Fix: Remove from build or add integration path with a TODO comment.
+
+## BUG-13: ObservabilityStack is 313 lines of dead code
+# Severity: LOW
+# Files: telemetry/Observability.hpp, telemetry/Observability.cpp
+#
+# MetricsCollector, PrometheusExporter, DistributedTracer, DetailedAuditLogger,
+# AlertManager, SLI_SLOTracker, ObservabilityStack — all defined, none
+# instantiated anywhere. The actual observability path uses AuditLogger and
+# TelemetryBridge.
+#
+# Fix: Remove from build or complete the integration (connect heartbeat to
+# MetricsCollector).
+
+## BUG-14: Atomic relaxed ordering without documented correctness model
+# Severity: LOW
+# Files: cell/InferenceEngine.hpp:24, common/StateJournal.hpp:151,
+#        consensus/MeshNode.hpp:99
+#
+# All atomic operations use std::memory_order_relaxed:
+# - m_last_score.load/store (InferenceEngine)
+# - m_seq.fetch_add (StateJournal)
+# - m_sequence_number.fetch_add (MeshNode)
+#
+# These are correct for monotonic counters with no ordering dependencies,
+# but no code comments explain WHY relaxed is safe. Future refactoring
+# that introduces a dependency (e.g., reading sequence before init is done)
+# would silently break on ARM/POWER.
+#
+# Fix: Add /* memory_order_relaxed */ comments explaining safety rationale.
+
+## BUG-15: eBPF blacklist map path hardcoded — shared between instances
+# Severity: LOW
+# Files: enforcer/PolicyEnforcer.cpp:178, cell/NodeAgent.cpp:95
+#
+# /sys/fs/bpf/neuro_mesh/xdp_blacklist is hardcoded. Two agent instances
+# on the same host (Docker host-network mode) share the same map. Blocking
+# an IP in one instance also blocks it in the other.
+#
+# Fix: Include node_id in the pin path, or add a note that host-network
+# mode requires coordination.
 
 # =============================================================================
-# NOT BUGS — Investigated and found to be false positives
+# POTENTIAL RISKS — Needs runtime testing or more context
 # =============================================================================
 
-# NOT BUG: Entropy baseline spurious first spike (main.cpp:93)
-#   Line 93: if (dt < 0.5f) { s_prev_bytes = total; return 0.0f; }
-#   Correctly skips the first call. No spike occurs.
+## RISK-01: No evidence validation in consensus initiation
+# Files: consensus/MeshNode.cpp:1170-1178
+#
+# initiate_consensus() accepts any target_id + evidence_json from ANY
+# caller (heartbeat, IPC, or network). The evidence is not validated
+# against actual anomaly detection before broadcast. If the heartbeat
+# loop's entropy threshold is met, it fabricates evidence:
+#   "{\"entropy\":" + std::to_string(entropy) + "..."
+# But there's no proof that entropy corresponds to a real event for the
+# claimed target.
+#
+# Impact: A node with elevated false-positive rate can initiate consensus
+# against legitimate peers. Mitigated by 30s cooldown per target.
 
-# NOT BUG: IPC path null-termination risk (main.cpp:269)
-#   strncpy(..., sizeof(addr.sun_path) - 1) + explicit null terminator.
-#   Correct handling.
+## RISK-02: fork+exec per enforcement action at high throughput
+# Files: enforcer/PolicyEnforcer.cpp
+#
+# Each isolate_target() call does fork() + waitpid() for every enforcement
+# backend. At >20 isolate/sec, fork overhead becomes significant. In a
+# large mesh with frequent consensus rounds, this could impact latency.
 
-# NOT BUG: network_entropy_score() baseline seed (main.cpp:64-102)
-#   Same as first item. Not a bug.
+## RISK-03: No integration tests for consensus state machine
+# Files: tests/
+#
+# Unit tests exist for PBFT (fuzz, stress) and PeerManager (stress), but
+# there are zero integration tests that exercise the full
+# MeshNode→PBFTConsensus→PolicyEnforcer pipeline. The interaction between
+# broadcast_pbft_stage self-voting, advance_state, and is_on_cooldown
+# can only be verified by running the full agent.
+
+## RISK-04: DNSSEC not enforced for webhook SSRF protection
+# Files: consensus/MeshNode.cpp:1460-1578
+#
+# notify_webhook() resolves hostname without DNSSEC. An attacker with
+# MITM on DNS can redirect webhook POST to an attacker-controlled server.
+# --resolve pinning prevents DNS rebinding after resolution, but the
+# resolution itself is not authenticated.

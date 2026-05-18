@@ -46,6 +46,7 @@ public:
     static constexpr int MAX_SEQUENCE_GAP = 100;
     static constexpr int DEFAULT_RATE_WINDOW_SEC = 10;
     static constexpr int DEFAULT_RATE_MAX = 5;
+    static constexpr size_t MAX_MSG_HISTORY_PER_SENDER = 10000;
 
 private:
     struct ConsensusRound {
@@ -423,6 +424,15 @@ private:
         }
 
         history[msg.sequence_number] = msg_hash;
+
+        // Cap-based eviction: keep only the most recent N entries per sender
+        // to prevent unbounded memory growth (BUG-02 fix).
+        if (history.size() > MAX_MSG_HISTORY_PER_SENDER) {
+            auto erase_count = history.size() - MAX_MSG_HISTORY_PER_SENDER;
+            auto erase_it = history.begin();
+            std::advance(erase_it, static_cast<long>(erase_count));
+            history.erase(history.begin(), erase_it);
+        }
     }
 
     void record_equivocation(const std::string& node_id) {

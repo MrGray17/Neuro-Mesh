@@ -489,6 +489,7 @@ int main(int argc, char* argv[]) {
 
     // ---- Stage 1: Defense mechanisms ----
     PolicyEnforcer jailer;
+    jailer.set_node_id(node_id);
     jailer.add_safe_node(node_id);
 
     MitigationEngine mitigation(&jailer);

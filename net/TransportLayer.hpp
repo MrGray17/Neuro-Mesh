@@ -91,6 +91,11 @@ public:
     bool load_certificate();
     bool load_ca_certificate();
 
+    // Dynamically trust a peer's self-signed certificate.
+    // Loads the PEM-encoded cert into the SSL_CTX extra cert store
+    // so OpenSSL can verify it during mTLS handshakes.
+    bool trust_peer_cert(const std::string& pem_cert);
+
     SSL_CTX* server_context() const { return m_server_ctx.get(); }
     SSL_CTX* client_context() const { return m_client_ctx.get(); }
 

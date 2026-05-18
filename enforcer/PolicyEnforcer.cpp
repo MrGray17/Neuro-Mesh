@@ -46,6 +46,10 @@ PolicyEnforcer::PolicyEnforcer() {
 
 PolicyEnforcer::~PolicyEnforcer() = default;
 
+void PolicyEnforcer::set_node_id(const std::string& node_id) {
+    m_node_id = node_id;
+}
+
 void PolicyEnforcer::probe_backends() {
     EnforcementBackend backends = available_backends();
 
@@ -174,6 +178,7 @@ std::pair<bool, std::string> PolicyEnforcer::fork_exec_capture(const char* path,
 bool PolicyEnforcer::ensure_ebpf_map() {
     // The xdp_blacklist map is created and pinned by NodeAgent when it loads
     // the eBPF skeleton.  If we can open it, the backend is operational.
+    // During probe, use default path (node_id not yet set).
     const char* map_path = "/sys/fs/bpf/neuro_mesh/xdp_blacklist";
 
     int fd = bpf_obj_get(map_path);
@@ -285,8 +290,9 @@ bool PolicyEnforcer::apply_ebpf_drop(const std::string& ip) {
     // Map is created and pinned by NodeAgent::load_and_attach_ebpf().
     // May not exist yet at probe time — that's fine, enforcement will
     // fall through to nftables/iptables until the skeleton is loaded.
-    const char* map_path = "/sys/fs/bpf/neuro_mesh/xdp_blacklist";
-    int map_fd = bpf_obj_get(map_path);
+    // Path includes node_id to prevent cross-instance conflicts (BUG-15 fix).
+    std::string map_path_str = "/sys/fs/bpf/neuro_mesh" + (m_node_id.empty() ? "" : "_" + m_node_id) + "/xdp_blacklist";
+    int map_fd = bpf_obj_get(map_path_str.c_str());
     if (map_fd < 0) return false;
 
     struct in_addr addr;
@@ -300,8 +306,8 @@ bool PolicyEnforcer::apply_ebpf_drop(const std::string& ip) {
 
 bool PolicyEnforcer::remove_ebpf_drop(const std::string& ip) {
     if (!is_valid_ipv4(ip)) return false;
-    const char* map_path = "/sys/fs/bpf/neuro_mesh/xdp_blacklist";
-    int map_fd = bpf_obj_get(map_path);
+    std::string map_path_str = "/sys/fs/bpf/neuro_mesh" + (m_node_id.empty() ? "" : "_" + m_node_id) + "/xdp_blacklist";
+    int map_fd = bpf_obj_get(map_path_str.c_str());
     if (map_fd < 0) return false;
     struct in_addr addr;
     if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) { close(map_fd); return false; }

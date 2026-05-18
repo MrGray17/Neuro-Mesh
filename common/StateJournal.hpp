@@ -54,6 +54,7 @@ public:
                     const std::string& target_id,
                     const std::string& evidence_json)
     {
+        // relaxed: sequence counter is monotonic, no cross-thread ordering dependency
         uint64_t seq = m_seq.fetch_add(1, std::memory_order_relaxed) + 1;
 
         std::string hash = crypto::IdentityCore::sha256_hex(evidence_json);
@@ -106,13 +107,23 @@ public:
         if (fcntl(m_fd, F_SETLK, &fl) == 0) {
             struct stat st;
             if (fstat(m_fd, &st) == 0 && st.st_size > 10 * 1024 * 1024) {
-                ::lseek(m_fd, 0, SEEK_SET);
+                // Copy-truncate rotation: preserves fd and POSIX lock
+                // throughout, eliminating the TOCTOU race window where
+                // rename() releases the lock (BUG-07 fix).
                 std::string backup = m_path + ".1";
-                ::rename(m_path.c_str(), backup.c_str());
-                ::close(m_fd);
-                m_fd = ::open(m_path.c_str(), O_RDWR | O_CREAT | O_APPEND, 0644);
-                if (m_fd < 0) return seq;
-                fcntl(m_fd, F_SETLK, &fl);
+                int backup_fd = ::open(backup.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (backup_fd >= 0) {
+                    // Rewind to beginning of current file
+                    ::lseek(m_fd, 0, SEEK_SET);
+                    char buf[65536];
+                    ssize_t n;
+                    while ((n = ::read(m_fd, buf, sizeof(buf))) > 0) {
+                        ::write(backup_fd, buf, static_cast<size_t>(n));
+                    }
+                    ::close(backup_fd);
+                    // Truncate current file in place (preserves fd + lock)
+                    ::ftruncate(m_fd, 0);
+                }
             }
             fl.l_type = F_UNLCK;
             fcntl(m_fd, F_SETLK, &fl);

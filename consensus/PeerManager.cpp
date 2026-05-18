@@ -156,6 +156,56 @@ void PeerManager::pin_tls_fingerprint(const std::string& peer_id, const std::str
 }
 
 // =============================================================================
+// Dual-path TOFU confirmation
+// =============================================================================
+
+PeerManager::PathConfirmResult PeerManager::confirm_path(const std::string& peer_id,
+    uint8_t path_flag, const std::string& public_key_pem) {
+    std::unique_lock<std::shared_mutex> lock(m_peers_mtx);
+    auto it = m_peers.find(peer_id);
+    if (it == m_peers.end()) {
+        // Peer not yet in registry — caller should have called add_peer first.
+        return {false, false};
+    }
+
+    auto& entry = it->second;
+
+    // If this path was already confirmed, check key consistency.
+    if (entry.confirmed_paths & path_flag) {
+        // Already confirmed via this path — key must match.
+        if (!public_key_pem.empty() && entry.public_key_pem != public_key_pem) {
+            return {false, true};  // key mismatch on same path — should not happen
+        }
+        // Return current dual-confirmation status.
+        return {(entry.confirmed_paths & (PeerEntry::PATH_BEACON | PeerEntry::PATH_ANNOUNCE)) ==
+                    (PeerEntry::PATH_BEACON | PeerEntry::PATH_ANNOUNCE),
+                false};
+    }
+
+    // First confirmation via this path.
+    // If the other path already confirmed, verify key matches.
+    if (entry.confirmed_paths != 0 && !entry.public_key_pem.empty()) {
+        if (!public_key_pem.empty() && entry.public_key_pem != public_key_pem) {
+            // Paths disagree on key — security violation.
+            std::cerr << "[SECURITY] TOFU dual-path MISMATCH for " << peer_id
+                      << " — beacon and ANNOUNCE keys differ. Rejecting peer." << std::endl;
+            return {false, true};
+        }
+    }
+
+    // Mark this path as confirmed and store the key.
+    entry.confirmed_paths |= path_flag;
+    if (!public_key_pem.empty() && entry.public_key_pem.empty()) {
+        entry.public_key_pem = public_key_pem;
+        entry.verified = true;
+    }
+
+    bool dual = (entry.confirmed_paths & (PeerEntry::PATH_BEACON | PeerEntry::PATH_ANNOUNCE)) ==
+                (PeerEntry::PATH_BEACON | PeerEntry::PATH_ANNOUNCE);
+    return {dual, false};
+}
+
+// =============================================================================
 // Rate limiting
 // =============================================================================
 
