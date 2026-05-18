@@ -1,0 +1,233 @@
+# NEURO-MESH: VERIFIED BUGS TO-DO
+# Generated from independent audits. Every item traced to actual code.
+# Items marked NOT BUG were investigated and found to be false positives.
+
+# =============================================================================
+# P0 — CRITICAL / HIGH (Fix before anything else)
+# =============================================================================
+
+## BUG-01: PBFT needs_view_change() always returns false — consensus deadlock
+# Severity: CRITICAL
+# Files: consensus/PBFT.hpp:177-178, consensus/PBFT.hpp:239-247
+#
+# Rounds are keyed by sha256(evidence_json + "|" + target_id) at line 177-178,
+# but needs_view_change() looks up by raw evidence_json at line 241.
+# The lookup never finds a match, so it always returns false.
+# Stalled consensus rounds never trigger view-change. System deadlocks for up to 120s.
+#
+# Fix: Change needs_view_change() to accept target_id and use the same key:
+#   auto round_key = sha256_hex(evidence_json + "|" + target_id);
+#   auto it = m_rounds.find(round_key);
+# Or iterate all rounds and check timestamps (O(n) but correct).
+
+## BUG-02: is_ip_safe() reads m_safe_list without holding m_mtx — data race / UB
+# Severity: HIGH
+# Files: enforcer/PolicyEnforcer.hpp:87-89, enforcer/PolicyEnforcer.cpp:221-238
+#
+# m_safe_list is guarded by m_mtx (used in add_safe_node at line 222).
+# is_ip_safe() at line 228 locks m_ip_map_mtx but iterates m_safe_list.
+# Concurrent add_safe_node() + is_ip_safe() = undefined behavior on std::set.
+# Can crash or return incorrect results (safe node not recognized).
+#
+# Fix: Acquire m_mtx before iterating m_safe_list:
+#   std::lock_guard<std::mutex> safe_lock(m_mtx);
+#   std::shared_lock<std::shared_mutex> ip_lock(m_ip_map_mtx);
+
+## BUG-03: reset_enforcement() sends SIGTERM to recycled PIDs — arbitrary process kill
+# Severity: HIGH
+# Files: enforcer/PolicyEnforcer.cpp:644-652
+#
+# PIDs in m_suspended_pids may have been recycled by the kernel after the
+# original process exited. reset_enforcement() sends SIGTERM without any
+# validation. Kills innocent processes.
+#
+# Fix: Verify PID still exists before signaling:
+#   if (kill(static_cast<pid_t>(pid), 0) == 0) {
+#       kill(static_cast<pid_t>(pid), SIGCONT);
+#       kill(static_cast<pid_t>(pid), SIGTERM);
+#   }
+
+## BUG-04: Quorum formula (2N+2)/3 is wrong — system tolerates 0 byzantine nodes
+# Severity: CRITICAL
+# Files: consensus/PBFT.hpp:250-251
+#
+# Standard PBFT: quorum = 2f+1 where n = 3f+1.
+# For n=5: PBFT needs 3 (f=1). Formula gives (2*5+2)/3 = 4.
+# For n=4: PBFT needs 3 (f=1). Formula gives (2*4+2)/3 = 3. Correct.
+# The formula is too conservative — for n=5, it requires 4/5 instead of 3/5,
+# meaning the system cannot tolerate even 1 faulty node when it should.
+#
+# Fix: int quorum = (2 * (m_total_nodes - 1)) / 3 + 1;
+# Or: int f = (m_total_nodes - 1) / 3; return 2 * f + 1;
+
+## BUG-05: Telemetry gossip is unauthenticated — fake telemetry injection
+# Severity: HIGH
+# Files: consensus/MeshNode.cpp:880-900
+#
+# process_telemetry_gossip() accepts TELEMETRY|node_id|json from any UDP sender.
+# No signature verification, no TOFU check, no timestamp validation.
+# An attacker on the LAN can inject fake telemetry for any node, causing
+# the dashboard to display false status and potentially triggering false alerts.
+#
+# Fix: Sign telemetry messages with the sender's Ed25519 key.
+# Verify signature + timestamp in process_telemetry_gossip().
+
+## BUG-06: nftables loopback + port rules leak — never cleaned up
+# Severity: MEDIUM
+# Files: enforcer/PolicyEnforcer.cpp:310-334 (apply), enforcer/PolicyEnforcer.cpp:370-380 (remove)
+#
+# apply_nftables_drop() creates 3 rules: IP drop, loopback drop, port drop.
+# remove_nftables_drop() only removes the IP rule.
+# Loopback and port rules accumulate forever. After many isolate/release cycles,
+# the nftables ruleset grows unbounded, degrading packet processing performance.
+#
+# Fix: Use nftables named sets instead of individual rules.
+# Add/remove IPs from a set (atomic, no rule accumulation).
+# Or: track all rule handles and delete them in release_target().
+
+## BUG-07: fork_exec_wait() child inherits all FDs ≥ 3 — FD leak to child process
+# Severity: MEDIUM
+# Files: enforcer/PolicyEnforcer.cpp:110-124
+#
+# fork_exec_wait() forks and execs iptables/nftables without closing inherited FDs.
+# The child inherits sockets, pipes, and other FDs from the parent.
+# Compare fork_exec_capture() at line 143 which correctly uses close_range().
+# If the child process is long-running or crashes, it holds references to parent FDs,
+# preventing proper cleanup.
+#
+# Fix: Add close_range() to fork_exec_wait() child path:
+#   syscall(SYS_close_range, 3, static_cast<unsigned int>(max_fd), 0U);
+
+## BUG-08: Bridge pipe missing O_NONBLOCK — blocking write stalls heartbeat
+# Severity: MEDIUM
+# Files: telemetry/TelemetryBridge.cpp:58
+#
+# pipe2(pipefd, O_CLOEXEC) does not set O_NONBLOCK.
+# If the child's uWebSockets event loop is slow or the pipe buffer fills (64KB),
+# write() in push_telemetry() blocks. This stalls the heartbeat thread,
+# which blocks the entire main loop (eBPF drain, inference, PBFT).
+#
+# Fix: pipe2(pipefd, O_CLOEXEC | O_NONBLOCK)
+# Handle EAGAIN in push_telemetry() by dropping the message (best-effort telemetry).
+
+## BUG-09: Fuzz target uses stale 5-field message format — tests nothing real
+# Severity: MEDIUM
+# Files: tests/fuzz/fuzz_pbft_message.cpp:19-34
+#
+# Fuzzer parses: STAGE|SENDER|TARGET|EVIDENCE|SIGNATURE (5 fields)
+# Actual wire format: VOTE|stage|sender|seq|view|target|evidence|prev_hash|signature (9 fields)
+# The fuzzer constructs P2PMessage objects that never match what MeshNode produces.
+# verify_message() and advance_state() are tested with malformed data that
+# doesn't represent real attack surfaces.
+#
+# Fix: Update fuzzer to parse the 9-field format and construct P2PMessage
+# with all fields (seq, view, prev_message_hash).
+
+# =============================================================================
+# P1 — MEDIUM (Fix after P0)
+# =============================================================================
+
+## BUG-10: TelemetryExporter doesn't detect partial writes — promotes incomplete JSON
+# Severity: MEDIUM
+# Files: telemetry/TelemetryExporter.hpp:37-44
+#
+# write() can return fewer bytes than requested (disk full, signal).
+# Code only checks written < 0 (error), not written < payload.length() (partial).
+# Proceeds to fsync() and rename(), atomically promoting incomplete JSON.
+# Dashboard reads malformed JSON and fails to render.
+#
+# Fix: if (written != static_cast<ssize_t>(payload.length())) { /* error */ return; }
+
+## BUG-11: std::atomic::store() in signal handler — not async-signal-safe
+# Severity: MEDIUM
+# Files: main.cpp:114-118
+#
+# POSIX only allows async-signal-safe functions in signal handlers.
+# std::atomic::store() is not on the list. On glibc/x86_64 it uses lock-free
+# instructions and works in practice, but on other platforms it may use a mutex
+# internally, causing deadlock if the signal interrupts a thread holding that mutex.
+#
+# Fix: Use volatile sig_atomic_t:
+#   static volatile sig_atomic_t global_running = 1;
+#   void signal_handler(int) { global_running = 0; }
+
+## BUG-12: std::jthread stop token not connected to m_running — potential deadlock
+# Severity: MEDIUM
+# Files: consensus/MeshNode.cpp:181, consensus/MeshNode.cpp:1328-1343
+#
+# tls_worker_loop() checks m_running, not the jthread stop token.
+# If MeshNode is destroyed without stop() (e.g., exception during init),
+# jthread destructor requests stop but the worker is blocked in cv.wait().
+# The destructor deadlocks waiting for the thread to join.
+#
+# Fix: Use std::thread instead of std::jthread (consistent with other threads),
+# or pass stop_token to the loop and check it in the cv wait predicate.
+
+## BUG-13: AuditLogger::initialize() closes old socket before creating replacement
+# Severity: MEDIUM
+# Files: telemetry/AuditLogger.cpp:44-49
+#
+# If socket() fails (EMFILE), the old socket is already closed and the new
+# one is invalid (-1). All subsequent emit_json() calls silently do nothing.
+# Audit events are lost with no indication.
+#
+# Fix: Create new socket first, then atomically replace:
+#   UniqueFD new_socket(socket(...));
+#   if (!new_socket.valid()) return;
+#   s_udp_socket() = std::move(new_socket);
+
+## BUG-14: Base64 decode before size check on untrusted UDP input — memory pressure
+# Severity: MEDIUM
+# Files: consensus/MeshNode.cpp:1014-1015
+#
+# tokens[6] comes from untrusted UDP. A 10MB base64 string is decoded
+# (~7.5MB allocation) before the size check rejects it.
+# Under flood attack: repeated large alloc/dealloc, memory pressure spike.
+#
+# Fix: Check base64 string length before decoding:
+#   if (tokens[6].size() > m_max_evidence_size * 4 / 3 + 4) return;
+
+## BUG-15: IPC rate limit map grows unbounded — memory leak
+# Severity: LOW
+# Files: main.cpp:252
+#
+# s_ipc_rate_limits is a static unordered_map<uid_t, IPRateLimit>.
+# Per-UID entries are never evicted. Each unique UID creates a permanent entry.
+#
+# Fix: Add max size limit or TTL-based eviction in the rate limit cleanup code.
+
+# =============================================================================
+# P2 — LOW / CLEANUP (Fix when convenient)
+# =============================================================================
+
+## BUG-16: Dead code — send_tls_to_peer() and send_tls_broadcast() never called
+# Severity: LOW
+# Files: consensus/MeshNode.cpp:1277-1300, consensus/MeshNode.hpp:76-77
+#
+# broadcast_pbft_stage() at line 1156-1167 implements TLS sending inline.
+# These helper functions are defined but never invoked.
+#
+# Fix: Remove the functions and their declarations.
+
+## BUG-17: Dead code — s_udp_socket_ptr assigned but never read
+# Severity: LOW
+# Files: telemetry/AuditLogger.cpp:13,17
+#
+# Static pointer is assigned every call to s_udp_socket() but never dereferenced.
+#
+# Fix: Remove s_udp_socket_ptr variable and the assignment.
+
+# =============================================================================
+# NOT BUGS — Investigated and found to be false positives
+# =============================================================================
+
+# NOT BUG: Entropy baseline spurious first spike (main.cpp:93)
+#   Line 93: if (dt < 0.5f) { s_prev_bytes = total; return 0.0f; }
+#   Correctly skips the first call. No spike occurs.
+
+# NOT BUG: IPC path null-termination risk (main.cpp:269)
+#   strncpy(..., sizeof(addr.sun_path) - 1) + explicit null terminator.
+#   Correct handling.
+
+# NOT BUG: network_entropy_score() baseline seed (main.cpp:64-102)
+#   Same as first item. Not a bug.
