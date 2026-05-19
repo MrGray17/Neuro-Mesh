@@ -627,6 +627,13 @@ void MeshNode::tcp_listener_loop() {
         ++accept_count;
         ++active_connections;
 
+        // Set timeouts on accepted socket to prevent slow-peer DoS.
+        struct timeval client_tv;
+        client_tv.tv_sec = 5;
+        client_tv.tv_usec = 0;
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &client_tv, sizeof(client_tv));
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &client_tv, sizeof(client_tv));
+
         // Read PEX message
         char buf[8192];
         ssize_t nr = read(client, buf, sizeof(buf) - 1);
@@ -1206,8 +1213,12 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                 broadcast_pbft_stage("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
             }
             else if (next_stage == PBFTStage::EXECUTED) {
-                if (incoming_msg.target_id == m_node_id && m_peer_manager.peer_count() < 1) {
-                    std::cerr << "[DEFENSE] Self-vote EXECUTED blocked — cannot isolate self without external peers" << std::endl;
+                // Require at least one external peer for consensus.
+                // With n=1 (self only), quorum=1 and a single node could
+                // unilaterally isolate any target — bypassing BFT entirely.
+                if (m_peer_manager.peer_count() < 1) {
+                    std::cerr << "[DEFENSE] EXECUTED blocked — no external peers for consensus (n="
+                              << m_pbft.peer_count() << ", quorum=" << m_pbft.quorum_size() << ")" << std::endl;
                     return;
                 }
                 auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1331,8 +1342,12 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
             }
             broadcast_pbft_stage("COMMIT", target_id, evidence_json);
         } else if (next_stage == PBFTStage::EXECUTED) {
-            if (target_id == m_node_id && m_peer_manager.peer_count() < 1) {
-                std::cerr << "[DEFENSE] Self-vote EXECUTED blocked — cannot isolate self without external peers" << std::endl;
+            // Require at least one external peer for consensus.
+            // With n=1 (self only), quorum=1 and a single node could
+            // unilaterally isolate any target — bypassing BFT entirely.
+            if (m_peer_manager.peer_count() < 1) {
+                std::cerr << "[DEFENSE] Self-vote EXECUTED blocked — no external peers for consensus (n="
+                          << m_pbft.peer_count() << ", quorum=" << m_pbft.quorum_size() << ")" << std::endl;
                 return;
             }
             std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << target_id
@@ -1562,6 +1577,55 @@ void MeshNode::unpin_peer_key(const std::string& node_id) {
 }
 
 // =============================================================================
+// Background child reaper — replaces detached threads to prevent thread leak.
+// A single static thread collects PIDs from a queue and calls waitpid() on each.
+// =============================================================================
+
+namespace {
+    static std::mutex s_reaper_mtx;
+    static std::condition_variable s_reaper_cv;
+    static std::vector<pid_t> s_reaper_queue;
+    static std::thread s_reaper_thread;
+    static std::atomic<bool> s_reaper_running{false};
+
+    static void reaper_loop() {
+        while (s_reaper_running.load(std::memory_order_acquire)) {
+            pid_t pid;
+            {
+                std::unique_lock<std::mutex> lock(s_reaper_mtx);
+                s_reaper_cv.wait(lock, [] {
+                    return !s_reaper_queue.empty() || !s_reaper_running.load(std::memory_order_relaxed);
+                });
+                if (!s_reaper_running.load(std::memory_order_relaxed) && s_reaper_queue.empty()) return;
+                pid = s_reaper_queue.back();
+                s_reaper_queue.pop_back();
+            }
+            int status;
+            if (waitpid(pid, &status, 0) == pid) {
+                if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                    std::cerr << "[ALERT] Webhook POST failed (exit="
+                              << WEXITSTATUS(status) << ")" << std::endl;
+                }
+            }
+        }
+    }
+
+    static void start_reaper() {
+        if (!s_reaper_running.load(std::memory_order_acquire)) {
+            s_reaper_running.store(true, std::memory_order_release);
+            s_reaper_thread = std::thread(reaper_loop);
+        }
+    }
+
+    static void enqueue_reap(pid_t pid) {
+        start_reaper();
+        std::lock_guard<std::mutex> lock(s_reaper_mtx);
+        s_reaper_queue.push_back(pid);
+        s_reaper_cv.notify_one();
+    }
+} // namespace
+
+// =============================================================================
 // Utility
 // =============================================================================
 
@@ -1721,23 +1785,10 @@ void MeshNode::notify_webhook(const std::string& url, const std::string& target_
         execv(curl_args[0], const_cast<char* const*>(curl_args.data()));
         _exit(1);
     } else if (pid > 0) {
-        int status;
-        for (;;) {
-            int ret = waitpid(pid, &status, WNOHANG);
-            if (ret == pid) {
-                if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-                    std::cerr << "[ALERT] Webhook POST failed (exit=" << WEXITSTATUS(status) << ")" << std::endl;
-                }
-                break;
-            }
-            if (ret == 0) {
-                std::cout << "[ALERT] Webhook POST initiated asynchronously (pid=" << pid << ")" << std::endl;
-                break;
-            }
-            if (ret < 0 && errno == ECHILD) break;
-            if (ret < 0 && errno == EINTR) continue;
-            break;
-        }
+        // Enqueue PID for the background reaper thread — replaces detached
+        // threads to prevent thread accumulation under sustained webhook firing.
+        enqueue_reap(pid);
+        std::cout << "[ALERT] Webhook POST initiated asynchronously (pid=" << pid << ")" << std::endl;
     }
 }
 

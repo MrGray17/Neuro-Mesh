@@ -102,6 +102,7 @@ private:
     std::set<std::string> m_isolated_nodes;
     std::set<std::string> m_safe_list;
     std::set<uint32_t> m_suspended_pids;
+    std::unordered_map<uint32_t, int> m_suspended_pidfds; // pidfd for PID-reuse-safe signaling
 
     mutable std::shared_mutex m_ip_map_mtx;
     std::unordered_map<std::string, std::string> m_peer_ip_map;

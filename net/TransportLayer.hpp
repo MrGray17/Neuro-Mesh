@@ -2,7 +2,6 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include <optional>
 #include <chrono>
@@ -43,15 +42,6 @@ struct TLSConfig {
     std::string ciphers = "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS";
     bool enable_tls13 = true;
     bool enable_mtls = false;
-};
-
-struct MTLSConfig {
-    bool require_client_cert = true;
-    std::unordered_set<std::string> allowed_client_cns;
-    std::string crl_path;
-    bool check_cert_validity = true;
-    uint32_t max_cert_age_days = 365;
-    bool verify_hostname = true;
 };
 
 struct PeerInfo {
@@ -103,28 +93,6 @@ private:
     TLSConfig m_config;
     std::unique_ptr<SSL_CTX, SSLCTXDeleter> m_server_ctx;
     std::unique_ptr<SSL_CTX, SSLCTXDeleter> m_client_ctx;
-};
-
-class MTLSAuth {
-public:
-    explicit MTLSAuth(const MTLSConfig& config);
-    ~MTLSAuth();
-
-    bool initialize_server_context(SSL_CTX* ctx);
-    bool initialize_client_context(SSL_CTX* ctx);
-    bool verify_client_certificate(SSL* ssl);
-    bool load_crl(const std::string& crl_path);
-
-    bool is_cert_revoked(const std::string& serial) const;
-    bool is_client_allowed(const std::string& cn) const;
-
-    std::string get_client_cert_cn(SSL* ssl) const;
-    std::string get_peer_cert_fingerprint(SSL* ssl) const;
-
-private:
-    MTLSConfig m_config;
-    std::unordered_set<std::string> m_revoked_serials;
-    mutable std::mutex m_mutex;
 };
 
 class PeerDiscovery {

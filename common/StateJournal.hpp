@@ -114,15 +114,23 @@ public:
                 int backup_fd = ::open(backup.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 if (backup_fd >= 0) {
                     // Rewind to beginning of current file
-                    ::lseek(m_fd, 0, SEEK_SET);
-                    char buf[65536];
-                    ssize_t n;
-                    while ((n = ::read(m_fd, buf, sizeof(buf))) > 0) {
-                        ::write(backup_fd, buf, static_cast<size_t>(n));
+                    if (::lseek(m_fd, 0, SEEK_SET) < 0) {
+                        ::close(backup_fd);
+                    } else {
+                        char buf[65536];
+                        ssize_t n;
+                        bool copy_ok = true;
+                        while ((n = ::read(m_fd, buf, sizeof(buf))) > 0) {
+                            ssize_t w = ::write(backup_fd, buf, static_cast<size_t>(n));
+                            if (w != n) { copy_ok = false; break; }
+                        }
+                        ::close(backup_fd);
+                        // Only truncate if the full copy succeeded.
+                        // Prevents journal data loss when backup write fails.
+                        if (copy_ok) {
+                            ::ftruncate(m_fd, 0);
+                        }
                     }
-                    ::close(backup_fd);
-                    // Truncate current file in place (preserves fd + lock)
-                    ::ftruncate(m_fd, 0);
                 }
             }
             fl.l_type = F_UNLCK;

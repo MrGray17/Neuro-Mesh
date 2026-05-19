@@ -27,7 +27,7 @@
 
 using namespace neuro_mesh;
 
-volatile sig_atomic_t global_running = 1;
+std::atomic<bool> global_running{true};
 
 // Read container memory from cgroups (v2 or v1), falling back to sysinfo.
 // sysinfo() reports host total RAM inside containers — cgroups give the true footprint.
@@ -115,7 +115,7 @@ static float onnx_to_entropy(float score) {
 void signal_handler(int /*signum*/) {
     const char msg[] = "\n[SYS] Interrupt signal received. Initiating shutdown...\n";
     ::write(STDERR_FILENO, msg, sizeof(msg) - 1);
-    global_running = 0;
+    global_running.store(false, std::memory_order_seq_cst);
 }
 
 // =============================================================================
@@ -128,11 +128,11 @@ void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
     (void)bridge;
     int seq = 0;
     pid_t my_pid = getpid();  // filter eBPF events from our own traffic
-    while (global_running) {
-        for (int i = 0; i < 10 && global_running; ++i) {
+    while (global_running.load(std::memory_order_relaxed)) {
+        for (int i = 0; i < 10 && global_running.load(std::memory_order_relaxed); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        if (!global_running) break;
+        if (!global_running.load(std::memory_order_relaxed)) break;
 
         // Build peer_list JSON array
         auto peer_ids = mesh.get_active_peer_ids();
@@ -296,7 +296,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
     tv.tv_sec = 1;
     tv.tv_usec = 0;
 
-    while (global_running) {
+    while (global_running.load(std::memory_order_relaxed)) {
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(server_fd.get(), &fds);
@@ -304,7 +304,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
         tv.tv_usec = 0;
 
         int ret = select(server_fd.get() + 1, &fds, nullptr, nullptr, &tv);
-        if (ret <= 0 || !global_running) continue;
+        if (ret <= 0 || !global_running.load(std::memory_order_relaxed)) continue;
 
         int client_fd = accept(server_fd.get(), nullptr, nullptr);
         if (client_fd < 0) continue;
@@ -326,19 +326,40 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
             {
                 std::lock_guard<std::mutex> lock(s_ipc_rate_mtx);
                 auto now = std::chrono::steady_clock::now();
+
+                // Evict stale entries BEFORE accessing the current UID's entry.
+                // This prevents iterator/reference invalidation when the current
+                // UID's newly-created entry has an empty window and gets erased.
+                if (s_ipc_rate_limits.size() > 256) {
+                    for (auto it = s_ipc_rate_limits.begin(); it != s_ipc_rate_limits.end(); ) {
+                        if (it->second.window.empty()) it = s_ipc_rate_limits.erase(it);
+                        else ++it;
+                    }
+                }
+                // Hard cap: if still over 256 after empty-window cleanup, evict the
+                // oldest entry by timestamp.  Prevents memory exhaustion when many
+                // UIDs each have active (non-empty) windows simultaneously.
+                if (s_ipc_rate_limits.size() > 256) {
+                    auto oldest = s_ipc_rate_limits.end();
+                    auto oldest_time = std::chrono::steady_clock::now();
+                    for (auto it = s_ipc_rate_limits.begin(); it != s_ipc_rate_limits.end(); ++it) {
+                        if (!it->second.window.empty() && it->second.window.front() < oldest_time) {
+                            oldest_time = it->second.window.front();
+                            oldest = it;
+                        }
+                    }
+                    if (oldest != s_ipc_rate_limits.end()) {
+                        s_ipc_rate_limits.erase(oldest);
+                    }
+                }
+
+                // Now safe to create/access the current UID's entry — no more
+                // erasures will happen in this critical section.
                 auto& rl = s_ipc_rate_limits[cred.uid];
                 while (!rl.window.empty()) {
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - rl.window.front()).count();
                     if (elapsed >= 1) rl.window.pop_front();
                     else break;
-                }
-                // Evict stale entries to prevent unbounded map growth.
-                // Always clean up empty windows (they contribute nothing to rate limiting).
-                if (s_ipc_rate_limits.size() > 256 || rl.window.empty()) {
-                    for (auto it = s_ipc_rate_limits.begin(); it != s_ipc_rate_limits.end(); ) {
-                        if (it->second.window.empty()) it = s_ipc_rate_limits.erase(it);
-                        else ++it;
-                    }
                 }
                 if (rl.window.size() >= IPC_RATE_LIMIT_PER_SEC) {
                     std::cerr << "[IPC] REJECTED: rate limit exceeded for uid=" << cred.uid
@@ -463,7 +484,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                 jailer.reset_enforcement();
                 std::cout << "[IPC] Enforcement reset." << std::endl;
             } else if (cmd == "CMD:SHUTDOWN") {
-                global_running = 0;
+    global_running.store(false, std::memory_order_seq_cst);
             }
         }
         close(client_fd);
@@ -626,7 +647,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[BOOT] System fully operational. Awaiting P2P telemetry..." << std::endl;
 
     // ---- Main idle loop ----
-    while (global_running) {
+    while (global_running.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
@@ -638,7 +659,7 @@ int main(int argc, char* argv[]) {
     mesh.stop();
 
     if (ipc_thread.joinable()) {
-        global_running = 0;  // belt-and-suspenders for IPC select() wake
+        global_running.store(false, std::memory_order_seq_cst);  // belt-and-suspenders for IPC select() wake
         ipc_thread.join();
     }
 

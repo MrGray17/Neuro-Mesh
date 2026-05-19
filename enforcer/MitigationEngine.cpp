@@ -129,8 +129,15 @@ bool MitigationEngine::validate_evidence_schema(std::string_view json) {
     bool in_string = false;
     for (size_t i = start; i < json.size(); ++i) {
         char c = json[i];
-        if (c == '"' && (i == 0 || json[i-1] != '\\')) {
-            in_string = !in_string;
+        if (c == '"') {
+            // Count consecutive backslashes before the quote.
+            // Odd count → quote is escaped; even count → quote is real.
+            size_t backslash_count = 0;
+            size_t j = i;
+            while (j > start && json[j - 1] == '\\') { --j; ++backslash_count; }
+            if (backslash_count % 2 == 0) {
+                in_string = !in_string;
+            }
         } else if (!in_string) {
             if (c == '{') ++brace_depth;
             else if (c == '}') --brace_depth;

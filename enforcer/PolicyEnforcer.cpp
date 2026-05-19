@@ -453,9 +453,9 @@ bool PolicyEnforcer::apply_nftables_port_drop(const std::string& ip, uint16_t po
         "counter", "drop",
         nullptr
     };
-    fork_exec_wait("/usr/sbin/nft", udp_args);
+    bool udp_rule = fork_exec_wait("/usr/sbin/nft", udp_args);
 
-    return tcp_rule;
+    return tcp_rule || udp_rule;
 }
 
 bool PolicyEnforcer::remove_nftables_drop(const std::string& ip) {
@@ -714,19 +714,43 @@ void PolicyEnforcer::suspend_process(uint32_t pid) {
     } else {
         std::cerr << "[ENFORCER] Failed to deliver SIGSTOP to PID " << pid << std::endl;
     }
+
+    // Open a pidfd for this PID to prevent PID-reuse attacks during reset.
+    // pidfd_open() returns a file descriptor that references the specific
+    // task_struct, not the numeric PID — immune to kernel PID recycling.
+    // Falls back gracefully on kernels < 5.1 where pidfd_open is unavailable.
+    int pidfd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+    if (pidfd >= 0) {
+        m_suspended_pidfds[pid] = pidfd;
+    }
 }
 
 void PolicyEnforcer::reset_enforcement() {
     std::lock_guard<std::mutex> lock(m_mtx);
     std::cout << "[ENFORCER] Eradicating " << m_suspended_pids.size() << " jailed processes." << std::endl;
     for (auto pid : m_suspended_pids) {
-        // Verify PID still exists before signaling — kernel may have recycled it.
-        if (kill(static_cast<pid_t>(pid), 0) == 0) {
-            kill(static_cast<pid_t>(pid), SIGCONT);
-            kill(static_cast<pid_t>(pid), SIGTERM);
+        // Use pidfd if available — immune to PID reuse race condition.
+        auto fd_it = m_suspended_pidfds.find(pid);
+        if (fd_it != m_suspended_pidfds.end()) {
+            int pidfd = fd_it->second;
+            // pidfd_send_signal targets the exact task_struct opened at suspend time.
+            // If the original process has exited, the pidfd becomes invalid and the
+            // syscall fails — no risk of signaling a recycled PID.
+            if (syscall(SYS_pidfd_send_signal, pidfd, SIGCONT, nullptr, 0) == 0) {
+                syscall(SYS_pidfd_send_signal, pidfd, SIGTERM, nullptr, 0);
+            }
+            ::close(pidfd);
+        } else {
+            // Fallback for kernels < 5.1 without pidfd support.
+            // Vulnerable to PID reuse — verify existence before signaling.
+            if (kill(static_cast<pid_t>(pid), 0) == 0) {
+                kill(static_cast<pid_t>(pid), SIGCONT);
+                kill(static_cast<pid_t>(pid), SIGTERM);
+            }
         }
     }
     m_suspended_pids.clear();
+    m_suspended_pidfds.clear();
 }
 
 } // namespace neuro_mesh

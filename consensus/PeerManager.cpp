@@ -246,7 +246,7 @@ bool PeerManager::check_rate_limit(const std::string& ip) {
     auto& rl = m_rate_limits[ip];
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                       now - rl.window_start).count();
-    if (elapsed > 1000) {
+    if (elapsed >= 1000) {
         rl.window_start = now;
         rl.count = 0;
     }
@@ -257,6 +257,27 @@ bool PeerManager::check_rate_limit(const std::string& ip) {
         }
         return false;
     }
+
+    // Evict stale entries to prevent unbounded map growth from unique source IPs.
+    // Periodically sweep when the map exceeds the cap — remove entries whose
+    // window_start is older than RATE_LIMIT_EVICT_SEC seconds.
+    if (m_rate_limits.size() > static_cast<size_t>(RATE_LIMIT_MAP_CAP)) {
+        for (auto it = m_rate_limits.begin(); it != m_rate_limits.end(); ) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                           now - it->second.window_start).count();
+            if (age > RATE_LIMIT_EVICT_SEC) it = m_rate_limits.erase(it);
+            else ++it;
+        }
+        // If still over cap after stale eviction, evict the single oldest entry.
+        if (m_rate_limits.size() > static_cast<size_t>(RATE_LIMIT_MAP_CAP)) {
+            auto oldest = m_rate_limits.begin();
+            for (auto it = std::next(m_rate_limits.begin()); it != m_rate_limits.end(); ++it) {
+                if (it->second.window_start < oldest->second.window_start) oldest = it;
+            }
+            m_rate_limits.erase(oldest);
+        }
+    }
+
     return true;
 }
 

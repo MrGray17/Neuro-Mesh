@@ -32,6 +32,8 @@ public:
     static constexpr int RATE_LIMIT_PER_SEC = 100;
     static constexpr int CONSENSUS_COOLDOWN_SEC = 30;
     static constexpr int LIVENESS_SEC = 30;
+    static constexpr int RATE_LIMIT_MAP_CAP = 4096;
+    static constexpr int RATE_LIMIT_EVICT_SEC = 30;
 
     PeerManager() = default;
     ~PeerManager() = default;
