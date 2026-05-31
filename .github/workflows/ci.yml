@@ -30,8 +30,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             clang llvm libbpf-dev libelf-dev zlib1g-dev \
-            libssl-dev libseccomp-dev \
-            linux-tools-common \
+            libssl-dev libseccomp-dev nlohmann-json3-dev \
+            bpftool linux-tools-common \
             python3 python3-pip 2>&1 | tail -20
 
       - name: Install GCC (if needed)
@@ -135,8 +135,8 @@ jobs:
           sudo apt-get install -y -qq \
             clang-tidy cppcheck \
             libbpf-dev libelf-dev zlib1g-dev \
-            libssl-dev libseccomp-dev \
-            linux-tools-common \
+            libssl-dev libseccomp-dev nlohmann-json3-dev \
+            bpftool linux-tools-common \
             python3 python3-pip 2>&1 | tail -20
 
       - name: Install ONNX Runtime
@@ -250,8 +250,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             clang llvm libbpf-dev libelf-dev zlib1g-dev \
-            libssl-dev libseccomp-dev \
-            linux-tools-common 2>&1 | tail -20
+            libssl-dev libseccomp-dev nlohmann-json3-dev \
+            bpftool linux-tools-common 2>&1 | tail -20
 
       - name: Install ONNX Runtime
         run: |

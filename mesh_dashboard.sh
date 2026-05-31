@@ -28,7 +28,7 @@ tmux split-window -h       # pane 0 | pane 3 | pane 4
                            # pane 1 | pane 2
 
 # Launch nodes (5 panes: 0-4)
-for i in "${!NODES[@]}"; do
+for i in 0 1 2 3 4; do
     tmux send-keys -t "$SESSION:0.$i" "./bin/neuro_agent ${NODES[$i]}" C-m
 done
 

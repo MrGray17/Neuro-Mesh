@@ -11,7 +11,10 @@ Usage:
   python3 tools/llm_analyst.py watch
 """
 
-import argparse, json, os, time, sys
+import argparse
+import json
+import os
+import time
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "..", "web")
 STATUS_FILE = os.path.join(WEB_DIR, "mesh_status.json")
@@ -33,9 +36,11 @@ def build_mesh_prompt(data):
     prompt += "P2P security mesh running PBFT consensus over Ed25519-signed "
     prompt += "UDP messages. Analyze the current state.\n\n"
     prompt += "*Mesh Topology*: {} nodes ({})\n".format(
-        len(nodes), ", ".join(nodes.keys()))
+        len(nodes), ", ".join(nodes.keys())
+    )
     prompt += "*Isolated Nodes*: {}\n".format(
-        ", ".join(isolated) if isolated else "none")
+        ", ".join(isolated) if isolated else "none"
+    )
     prompt += "*Active Alerts*: {}\n".format(len(alerts))
     prompt += "Provide a concise threat assessment with MITRE ATT&CK mappings."
     return prompt
@@ -43,13 +48,15 @@ def build_mesh_prompt(data):
 
 def build_proof_prompt(data):
     links = data.get("links", [])
-    prompt = "Explain this Neuro-Mesh proof chain ({:d} links):\n".format(
-        len(links))
-    for l in links[-15:]:
-        prompt += "  #{:d} event={:d} node={} target={} "
-        prompt += "hash={}...\n".format(
-            l["seq"], l["event"], l["node"],
-            l["target"], l["link_hash"][:16])
+    prompt = "Explain this Neuro-Mesh proof chain ({:d} links):\n".format(len(links))
+    for link in links[-15:]:
+        prompt += "  #{:d} event={:d} node={} target={} hash={}...\n".format(
+            link["seq"],
+            link["event"],
+            link["node"],
+            link["target"],
+            link["link_hash"][:16],
+        )
     prompt += "What happened? Was isolation justified?"
     return prompt
 
@@ -63,19 +70,24 @@ def query_llm(prompt):
         print("=" * 69)
         return
     try:
-        import urllib.request, ssl
-        payload = json.dumps({
-            "model": "gpt-4",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 500,
-        }).encode()
+        import ssl
+        import urllib.request
+
+        payload = json.dumps(
+            {
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 500,
+            }
+        ).encode()
         req = urllib.request.Request(
             "https://api.openai.com/v1/chat/completions",
             data=payload,
             headers={
                 "Authorization": "Bearer " + api_key,
                 "Content-Type": "application/json",
-            })
+            },
+        )
         ctx = ssl.create_default_context()
         resp = json.loads(urllib.request.urlopen(req, context=ctx).read())
         print(resp["choices"][0]["message"]["content"])
@@ -109,8 +121,8 @@ def cmd_ask(question):
     prompt += "{:d} alerts.\nQuestion: {}\n"
     prompt += "Answer with MITRE ATT&CK references."
     prompt = prompt.format(
-        len(nodes), ", ".join(isolated) if isolated else "none",
-        len(alerts), question)
+        len(nodes), ", ".join(isolated) if isolated else "none", len(alerts), question
+    )
     query_llm(prompt)
 
 
@@ -119,8 +131,9 @@ def cmd_watch():
     try:
         while True:
             data = load_mesh_status()
-            isolated = [n for n, v in data.get("nodes", {}).items()
-                        if v.get("isolated")]
+            isolated = [
+                n for n, v in data.get("nodes", {}).items() if v.get("isolated")
+            ]
             if isolated:
                 query_llm(build_mesh_prompt(data))
             time.sleep(30)

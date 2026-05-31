@@ -7,7 +7,9 @@ Usage:
   python3 tools/test_proof.py /tmp/neuro_proof_ALPHA.proof
 """
 
-import json, hashlib, sys
+import hashlib
+import json
+import sys
 
 
 def sha256_hex(data):
@@ -27,24 +29,27 @@ def verify_proof_file(path):
     errors = []
     for i, link in enumerate(links):
         seq = link["seq"]
-        canonical = "|".join([
-            str(link["seq"]),
-            str(link["event"]),
-            link["node"],
-            link["target"],
-            link["data_hash"],
-            link["parent_hash"],
-        ])
+        canonical = "|".join(
+            [
+                str(link["seq"]),
+                str(link["event"]),
+                link["node"],
+                link["target"],
+                link["data_hash"],
+                link["parent_hash"],
+            ]
+        )
         expected = sha256_hex(canonical)
         if expected != link["link_hash"]:
             errors.append(
                 "  LINK {:d}: hash mismatch (expected {} != {})".format(
-                    seq, expected[:16], link["link_hash"][:16]))
+                    seq, expected[:16], link["link_hash"][:16]
+                )
+            )
         if i > 0:
             prev = links[i - 1]["link_hash"]
             if link["parent_hash"] != prev:
-                errors.append(
-                    "  LINK {:d}: parent mismatch".format(seq))
+                errors.append("  LINK {:d}: parent mismatch".format(seq))
     if errors:
         print("FAILED:")
         for e in errors:

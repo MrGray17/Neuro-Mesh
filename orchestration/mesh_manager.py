@@ -43,11 +43,15 @@ def restart_node(index: int, node_id: str) -> None:
     """Restart a crashed node with exponential backoff."""
     count = restart_counts.get(node_id, 0)
     if count >= MAX_RESTARTS:
-        print(f"[SYSTEM] Node {node_id} exceeded max restarts ({MAX_RESTARTS}). Giving up.")
+        print(
+            f"[SYSTEM] Node {node_id} exceeded max restarts ({MAX_RESTARTS}). Giving up."
+        )
         return
 
-    backoff = min(RESTART_BACKOFF_BASE ** count, 30)
-    print(f"[SYSTEM] Node {node_id} exited, restarting in {backoff}s (attempt {count + 1}/{MAX_RESTARTS})...")
+    backoff = min(RESTART_BACKOFF_BASE**count, 30)
+    print(
+        f"[SYSTEM] Node {node_id} exited, restarting in {backoff}s (attempt {count + 1}/{MAX_RESTARTS})..."
+    )
     time.sleep(backoff)
 
     if not running:
