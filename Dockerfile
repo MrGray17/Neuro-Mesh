@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     libseccomp-dev \
     nlohmann-json3-dev \
-    bpftool \
     linux-tools-common \
     git \
     zlib1g-dev \
