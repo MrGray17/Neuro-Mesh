@@ -4,7 +4,6 @@ client
 listener
 obj/
 *.o
-*.skel.h
 neuro_agent
 inject_event
 
