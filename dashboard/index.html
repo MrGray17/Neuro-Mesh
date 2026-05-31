@@ -4,462 +4,180 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ws: wss:;">
-<title>Neuro-Mesh Monitor</title>
+<title>neuro-mesh</title>
 <style>
-/* ==========================================================================
-   Neuro-Mesh Console
-   ========================================================================== */
+/* NEURO-MESH — operator dashboard */
 :root {
-  --bg:        #000000;
-  --panel:     #0a0a0a;
-  --border:    #1a1a1a;
-  --cyan:      #00ffff;
-  --cyan-dim:  #004444;
-  --amber:     #ffb000;
-  --amber-dim: #442800;
-  --red:       #ff0040;
-  --red-dim:   #440010;
-  --green:     #00ff41;
-  --white:     #c0c0c0;
-  --dim:       #505050;
-  --font:      'Courier New', Courier, monospace;
-  --scanline-opacity: 0.03;
+  --bg:     #0d1117;
+  --bg-alt: #161b22;
+  --bg-card: #1c2128;
+  --border: #30363d;
+  --border-hover: #484f58;
+  --t1:     #e6edf3;
+  --t2:     #8b949e;
+  --t3:     #6e7681;
+  --accent: #58a6ff;
+  --green:  #3fb950;
+  --amber:  #d29922;
+  --red:    #f85149;
+  --radius: 6px;
+  --mono:   'SF Mono','Cascadia Code','Consolas',monospace;
 }
-
-* { margin: 0; padding: 0; box-sizing: border-box; }
-
-body {
-  background: var(--bg);
-  color: var(--white);
-  font-family: var(--font);
-  font-size: 15px;
-  overflow: hidden;
-  height: 100vh;
-  user-select: none;
-  -webkit-user-select: none;
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:var(--bg);color:var(--t2);
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif;
+  font-size:13px;line-height:1.5;
+  height:100vh;display:flex;flex-direction:column;
+  overflow:hidden;
+  -webkit-font-smoothing:antialiased;
 }
-
-/* ---- Hex-grid background ---- */
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image:
-    url("data:image/svg+xml,%3Csvg width='60' height='52' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M30 0L60 15v22L30 52 0 37V15z' fill='none' stroke='%23111111' stroke-width='1'/%3E%3C/svg%3E");
-  background-size: 60px 52px;
-  pointer-events: none;
-  z-index: 0;
+#header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 16px;height:44px;min-height:44px;
+  background:var(--bg-alt);border-bottom:1px solid var(--border);
+  gap:12px;
 }
-
-/* ---- Scanline overlay ---- */
-body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 2px,
-    rgba(0,0,0,0.08) 2px,
-    rgba(0,0,0,0.08) 4px
-  );
-  pointer-events: none;
-  z-index: 9999;
-}
-
-/* ---- Alert overlay (hidden by default) ---- */
-#alert-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9998;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.05s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-}
-
-#alert-overlay.active {
-  opacity: 1;
-  animation: alert-flash 0.5s ease-out;
-}
-
-#alert-overlay .alert-text {
-  font-family: var(--font);
-  font-size: 42px;
-  font-weight: bold;
-  color: var(--red);
-  text-shadow:
-    3px 0 #00ffff,
-    -3px 0 #ff0040;
-  letter-spacing: 8px;
-  animation: alert-rgb 0.15s infinite;
-}
-
-#alert-overlay .alert-sub {
-  font-family: var(--font);
-  font-size: 14px;
-  color: var(--amber);
-  margin-top: 8px;
-  letter-spacing: 4px;
-}
-
-@keyframes alert-flash {
-  0%   { background: rgba(255,0,64,0.3); }
-  100% { background: transparent; }
-}
-
-@keyframes alert-rgb {
-  0%   { transform: translate(2px, 0); }
-  25%  { transform: translate(-3px, 1px); }
-  50%  { transform: translate(1px, -1px); }
-  75%  { transform: translate(-2px, 0); }
-  100% { transform: translate(0, 0); }
-}
-
-/* ==========================================================================
-   LAYOUT
-   ========================================================================== */
-#app {
-  position: relative;
-  z-index: 1;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  padding: 6px;
-  gap: 6px;
-}
-
-/* ---- Header ---- */
-#header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  padding: 12px 20px;
-  min-height: 80px;
-  clip-path: polygon(0 0, 100% 0, calc(100% - 16px) 100%, 0 100%);
-}
-
-#header .identity { display: flex; align-items: center; gap: 14px; }
-#header .id-label   { color: var(--cyan); font-size: 24px; font-weight: bold; letter-spacing: 4px; }
-#header .id-value   { color: var(--white); font-size: 18px; font-weight: bold; }
-
-#header .status-row { display: flex; align-items: center; gap: 28px; }
-
-.status-badge {
-  display: flex; align-items: center; gap: 7px;
-  font-size: 13px; text-transform: uppercase; letter-spacing: 2px;
-}
-.status-dot {
-  width: 10px; height: 10px;
-  background: var(--green);
-  box-shadow: 0 0 6px var(--green);
-  animation: pulse-dot 2s infinite;
-}
-.status-dot.danger { background: var(--red); box-shadow: 0 0 6px var(--red); }
-.status-dot.warn   { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
-
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.3; }
-}
-
-.stat-chip {
-  display: flex; gap: 7px;
-  font-size: 13px; letter-spacing: 1px;
-}
-.stat-chip .label { color: var(--dim); text-transform: uppercase; }
-.stat-chip .value { color: var(--cyan); font-weight: bold; }
-
-/* ---- Main grid ---- */
-#main-grid {
-  display: grid;
-  grid-template-columns: 1.4fr 1fr 0.8fr;
-  grid-template-rows: 1fr;
-  gap: 6px;
-  flex: 1;
-  min-height: 0;
-}
-
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(0,255,255,0.02);
-  font-size: 12px;
-  font-weight: bold;
-  text-transform: uppercase;
-  letter-spacing: 2px;
-  color: var(--cyan);
-}
-
-.panel-header .pill {
-  font-size: 10px;
-  padding: 3px 10px;
-  background: rgba(0,255,255,0.08);
-  border: 1px solid var(--cyan-dim);
-  letter-spacing: 1px;
-}
-
-.panel-body {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-}
-
-.panel-body canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-#mesh-canvas { cursor: pointer; }
-
-#mesh-canvas.clickable { cursor: pointer; }
-
-/* ---- Kill Feed ---- */
-#event-feed-section {
-  height: 170px;
-  min-height: 170px;
-}
-
-#event-feed {
-  height: 100%;
-  overflow-y: auto;
-  padding: 6px 10px;
-  font-size: 13px;
-  line-height: 1.8;
-}
-
-#event-feed::-webkit-scrollbar { width: 4px; }
-#event-feed::-webkit-scrollbar-track { background: var(--bg); }
-#event-feed::-webkit-scrollbar-thumb { background: var(--border); }
-
-.kill-entry {
-  display: flex;
-  gap: 10px;
-  padding: 3px 6px;
-  border-left: 3px solid transparent;
-  animation: feed-in 0.3s ease-out;
-}
-
-.kill-entry.ENFORCEMENT { border-left-color: var(--red); }
-.kill-entry.ENTROPY     { border-left-color: var(--amber); }
-.kill-entry.PBFT        { border-left-color: var(--cyan); }
-.kill-entry.HEARTBEAT   { border-left-color: var(--dim); }
-
-.kill-entry .ts    { color: var(--dim); white-space: nowrap; min-width: 165px; }
-.kill-entry .cat   { color: var(--cyan); min-width: 110px; text-transform: uppercase; font-weight: bold; }
-.kill-entry .hash  { color: var(--dim); min-width: 100px; }
-.kill-entry .msg   { color: var(--white); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.mitre-tag {
-  display: inline-block;
-  font-size: 10px;
-  padding: 1px 6px;
-  margin-left: 6px;
-  background: rgba(255,176,0,0.12);
-  border: 1px solid var(--amber-dim);
-  color: var(--amber);
-  letter-spacing: 1px;
-  white-space: nowrap;
-  vertical-align: middle;
-}
-
-@keyframes feed-in {
-  from { opacity: 0; transform: translateX(-8px); }
-  to   { opacity: 1; transform: translateX(0); }
-}
-
-/* ---- Vitals panel ---- */
-#vitals-panel .panel-body {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 12px;
-}
-
-.gauge-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.gauge-container .gauge-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 2px;
-  color: var(--dim);
-}
-
-.gauge-container .gauge-value {
-  font-size: 24px;
-  font-weight: bold;
-  color: var(--cyan);
-  margin-top: -8px;
-}
-
-.gauge-container svg {
-  width: 100px;
-  height: 56px;
-}
-
-#vitals-extra {
-  width: 100%;
-  margin-top: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.vital-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  padding: 3px 6px;
-  border-bottom: 1px solid rgba(255,255,255,0.03);
-}
-
-.vital-row .vkey   { color: var(--dim); text-transform: uppercase; }
-.vital-row .vval   { color: var(--white); }
-
-/* ---- Tick bar ---- */
-#tick-bar {
-  position: absolute;
-  bottom: 0; left: 0; right: 0;
-  height: 30px;
-  background: rgba(0,0,0,0.6);
-  border-top: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 14px;
-  font-size: 11px;
-  color: var(--dim);
-  z-index: 2;
-}
-
-#tick-clock { font-size: 14px; color: var(--text); font-weight: 600; font-family: 'SF Mono', 'Fira Code', monospace; letter-spacing: 0.5px; }
-#conn-indicator { display: flex; align-items: center; gap: 5px; }
-#conn-dot {
-  width: 8px; height: 8px;
-  background: var(--red);
-  box-shadow: 0 0 4px var(--red);
-}
-#conn-dot.live { background: var(--green); box-shadow: 0 0 4px var(--green); }
+#header .identity{display:flex;align-items:center;gap:12px}
+#node-id-display{font-weight:600;font-size:14px;color:var(--t1);letter-spacing:-0.01em}
+#context-label{font-size:11px;color:var(--t3);font-weight:500;text-transform:uppercase;letter-spacing:0.05em}
+#viewing-indicator{font-size:11px;color:var(--amber)!important;margin-left:4px!important;letter-spacing:0!important}
+#header .status-row{display:flex;align-items:center;gap:16px}
+.status-badge,#mesh-status-label{display:none}
+.stat-chip{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--t2);padding:3px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px}
+.stat-chip .label{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:0.04em}
+.stat-chip .value{color:var(--t1);font-weight:600;font-family:var(--mono);font-size:12px}
+#mesh-dot{width:8px;height:8px;border-radius:50%;background:var(--border)}
+#mesh-dot.danger{background:var(--red)}
+#conn-dot{width:8px;height:8px;border-radius:50%;background:var(--border);margin-left:4px}
+#conn-dot.live{background:var(--green)}
+#conn-label{font-size:11px;color:var(--t3)}
+#main-grid{flex:1;display:grid;grid-template-columns:1fr 340px;grid-template-rows:1fr;gap:0;overflow:hidden;min-height:0}
+#center-panel{grid-column:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+#right-panel{grid-column:2;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);border-left:1px solid var(--border)}
+#left-panel{display:none}
+#canvas-panel{height:180px;min-height:180px;background:var(--bg-alt);border-bottom:1px solid var(--border);position:relative;overflow:hidden}
+#mesh-canvas,#spectro-canvas{position:absolute;inset:0;width:100%;height:100%}
+.event-feed-container{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.panel-header{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;height:36px;min-height:36px;background:var(--bg-alt);border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--t2);text-transform:uppercase;letter-spacing:0.04em}
+#feed-count{font-family:var(--mono);font-size:11px;color:var(--t3);font-weight:400}
+#event-feed{flex:1;overflow-y:auto;padding:4px 0}
+#event-feed::-webkit-scrollbar{width:6px}
+#event-feed::-webkit-scrollbar-track{background:var(--bg)}
+#event-feed::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+/* feed entries — must use kill-entry (JS creates this className) */
+.kill-entry{font-size:12px;padding:3px 16px;color:var(--t2);border-left:2px solid transparent;display:flex;gap:8px;align-items:baseline;transition:background 100ms}
+.kill-entry:hover{background:var(--bg-alt)}
+.kill-entry:nth-child(even){background:rgba(22,27,34,0.5)}
+.kill-entry:nth-child(even):hover{background:var(--bg-alt)}
+.kill-entry .ts{font-family:var(--mono);font-size:10px;color:var(--t3);flex-shrink:0;width:145px}
+.kill-entry .cat{font-family:var(--mono);font-size:10px;font-weight:600;flex-shrink:0;min-width:70px}
+.kill-entry .hash{font-family:var(--mono);font-size:10px;color:var(--t3);flex-shrink:0}
+.kill-entry .msg{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* severity by category */
+.kill-entry.HEARTBEAT{border-left-color:var(--green)}
+.kill-entry.HEARTBEAT .cat{color:var(--green)}
+.kill-entry.ENTROPY{border-left-color:var(--accent)}
+.kill-entry.ENTROPY .cat{color:var(--accent)}
+.kill-entry.PBFT{border-left-color:var(--amber)}
+.kill-entry.PBFT .cat{color:var(--amber)}
+.kill-entry.ENFORCEMENT{border-left-color:var(--red);background:rgba(248,81,73,0.06)}
+.kill-entry.ENFORCEMENT .cat{color:var(--red)}
+/* mitre tags */
+.mitre-tag{display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;color:var(--accent);background:rgba(88,166,255,0.1);border:1px solid rgba(88,166,255,0.2);border-radius:3px;padding:0 4px;margin-left:6px;line-height:1.6}
+/* vitals section */
+.vitals-section{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#vit-header{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;height:36px;min-height:36px;background:var(--bg-alt);border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--t2);text-transform:uppercase;letter-spacing:0.04em}
+#vitals-body{flex:1;overflow-y:auto;padding:8px}
+#vitals-body::-webkit-scrollbar{width:6px}
+#vitals-body::-webkit-scrollbar-track{background:var(--bg)}
+#vitals-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+#mesh-pill,#vitals-pill{font-size:10px;padding:1px 6px;border-radius:3px;border:1px solid;font-weight:500}
+/* node cards (JS builds these in vitals-body) */
+.node-card{padding:8px 10px;margin-bottom:4px;background:var(--bg-alt);border:1px solid var(--border);border-radius:4px}
+.node-card:hover{border-color:var(--border-hover)}
+.node-card.warn{border-color:var(--amber)}
+.node-card.crit{border-color:var(--red)}
+.node-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.node-name{font-weight:600;font-size:12px;color:var(--t1)}
+.node-name.self{color:var(--accent)}
+.node-threat{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em}
+.node-threat.ok{color:var(--t3)}
+.node-threat.warn{color:var(--amber)}
+.node-threat.crit{color:var(--red)}
+.node-vals{display:flex;gap:14px;font-size:11px;color:var(--t3);margin-bottom:6px}
+.node-vals b{color:var(--t2);font-weight:500;font-family:var(--mono);font-size:11px}
+.node-bars{display:flex;flex-direction:column;gap:2px}
+.node-bar{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+.node-bar-fill{height:100%;border-radius:2px;transition:width 300ms ease}
+.bar-cpu{background:var(--accent)}
+.bar-mem{background:var(--amber)}
+/* legacy gauge styles (JS may reference) */
+.gauge-container{display:flex;align-items:center;gap:6px}
+.gauge-label{font-size:10px;color:var(--t3);text-transform:uppercase}
+.gauge-value{font-family:var(--mono);font-size:11px;color:var(--t2)}
+.vital-row{display:flex;justify-content:space-between;padding:2px 0;font-size:11px}
+.vkey{color:var(--t3);text-transform:uppercase;font-size:10px}
+.vval{font-family:var(--mono);color:var(--t2);font-size:11px}
+/* footer */
+#footer{display:flex;align-items:center;justify-content:space-between;padding:0 16px;height:30px;min-height:30px;background:var(--bg-alt);border-top:1px solid var(--border);font-size:11px;color:var(--t3);gap:12px}
+#footer .right{display:flex;align-items:center;gap:10px}
+#tick-clock,#tick-frame{font-family:var(--mono);font-size:11px;white-space:nowrap}
+/* alert overlay */
+#alert-overlay{display:none;position:fixed;inset:0;z-index:200;pointer-events:none}
+#alert-overlay.active{display:flex;align-items:center;justify-content:center;flex-direction:column;background:rgba(248,81,73,0.08)}
+.alert-text{font-size:28px;font-weight:700;color:var(--red)}
+.alert-sub{font-size:13px;color:var(--t2);margin-top:4px}
+.header-quorum{font-size:11px;color:var(--t2);padding:3px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px}
 </style>
+
 </head>
 <body>
 
-<!-- Alert Overlay -->
 <div id="alert-overlay">
-  <div class="alert-text">[ ENFORCEMENT EXECUTED ]</div>
+  <div class="alert-text">THREAT DETECTED</div>
   <div class="alert-sub" id="alert-detail"></div>
 </div>
 
-<!-- App Shell -->
 <div id="app">
-
-  <!-- HEADER -->
   <div id="header">
     <div class="identity">
-      <span class="id-label" id="context-label">Node</span>
-      <span class="id-value" id="node-id-display">NODE_1</span>
-      <span class="id-label" id="viewing-indicator" style="display:none;color:var(--amber);font-size:11px;margin-left:12px;letter-spacing:2px;"></span>
+      <span class="id-label" id="context-label">NODE</span>
+      <span id="node-id-display">--</span>
+      <span id="viewing-indicator" style="display:none"></span>
     </div>
     <div class="status-row">
-      <div class="status-badge">
-        <span class="status-dot" id="mesh-dot"></span>
-        <span id="mesh-status-label">MESH: --</span>
-      </div>
-      <div class="stat-chip">
-        <span class="label">PEERS:</span>
-        <span class="value" id="peer-count">0</span>
-      </div>
-      <div class="stat-chip">
-        <span class="label">PBFT ROUNDS:</span>
-        <span class="value" id="pbft-rounds">0</span>
-      </div>
-      <div class="stat-chip">
-        <span class="label">QUORUM:</span>
-        <span class="value" id="quorum-display">--</span>
-      </div>
+      <div class="stat-chip"><span class="label">PEERS</span><span class="value" id="peer-count">0</span></div>
+      <div class="stat-chip"><span class="label">QUORUM</span><span class="value" id="quorum-display">--</span></div>
+      <div class="stat-chip"><span class="label">PBFT</span><span class="value" id="pbft-rounds">0</span></div>
+      <div id="mesh-dot"></div>
+      <span id="mesh-status-label" style="display:none"></span>
+      <span id="conn-label">--</span>
+      <div id="conn-dot"></div>
     </div>
   </div>
-
-  <!-- MAIN GRID -->
   <div id="main-grid">
-
-    <!-- Mesh Overlay -->
-    <div class="panel" id="mesh-panel">
-      <div class="panel-header">
-        <span>Network Topology</span>
-        <span class="pill" id="mesh-pill">TOPO: 1 NODES</span>
-      </div>
-      <div class="panel-body">
-        <canvas id="mesh-canvas"></canvas>
+    <div id="center-panel">
+      <div id="canvas-panel"><canvas id="mesh-canvas"></canvas><canvas id="spectro-canvas"></canvas></div>
+      <div class="event-feed-container">
+        <div class="panel-header"><span>EVENT LOG</span><span id="feed-count">0</span></div>
+        <div id="event-feed"></div>
       </div>
     </div>
-
-    <!-- Spectrogram -->
-    <div class="panel" id="spectro-panel">
-      <div class="panel-header">
-        <span>ENTROPY SPECTROGRAM</span>
-        <span class="pill">eBPF SENSOR</span>
-      </div>
-      <div class="panel-body">
-        <canvas id="spectro-canvas"></canvas>
+    <div id="right-panel">
+      <div class="vitals-section">
+        <div id="vit-header"><span>NODES</span><div style="display:flex;gap:6px"><span id="mesh-pill"></span><span id="vitals-pill"></span></div></div>
+        <div id="vitals-body"></div>
       </div>
     </div>
-
-    <!-- Vitals -->
-    <div class="panel" id="vitals-panel">
-      <div class="panel-header">
-        <span>NODE VITALS</span>
-        <span class="pill" id="vitals-pill">STABLE</span>
-      </div>
-      <div class="panel-body" id="vitals-body"></div>
-    </div>
-
   </div>
-
-  <!-- Kill Feed -->
-  <div class="panel" id="event-feed-section">
-    <div class="panel-header">
-      <span>Event Log</span>
-      <span class="pill" id="feed-count">0 EVENTS</span>
+  <div id="footer">
+    <div class="right">
+      <span>CLOCK <span id="tick-clock">--:--:--</span></span>
+      <span>FRAME <span id="tick-frame">--</span></span>
+      <span style="color:var(--t3);margin-left:4px">v9.0</span>
     </div>
-    <div id="event-feed"></div>
   </div>
-
-  <!-- Tick Bar -->
-  <div id="tick-bar">
-    <span id="tick-clock">--</span>
-    <div id="conn-indicator">
-      <span id="conn-dot"></span>
-      <span id="conn-label">WS: DISCONNECTED</span>
-    </div>
-    <span id="tick-frame">FRAME: --</span>
-  </div>
-
 </div>
 
 <script>
@@ -470,13 +188,14 @@ body::after {
 // ---- Constants ----
 // Each node runs its own TelemetryBridge on a unique port.
 // The dashboard connects to ANY node — if one goes down, it fails over to the next.
+const WS_HOST = window.location.hostname;
 const WS_URLS = [
-  'ws://localhost:9000',  // ALPHA
-  'ws://localhost:9001',  // wsbridge (Docker) / BRAVO (native)
-  'ws://localhost:9010',  // BRAVO (Docker)
-  'ws://localhost:9020',  // CHARLIE
-  'ws://localhost:9030',  // DELTA
-  'ws://localhost:9040',  // ECHO
+  `ws://${WS_HOST}:9000`,  // ALPHA
+  `ws://${WS_HOST}:9001`,  // wsbridge (Docker) / BRAVO (native)
+  `ws://${WS_HOST}:9010`,  // BRAVO (Docker)
+  `ws://${WS_HOST}:9020`,  // CHARLIE
+  `ws://${WS_HOST}:9030`,  // DELTA
+  `ws://${WS_HOST}:9040`,  // ECHO
 ];
 let wsUrlIndex = 0;
 const MAX_FEED    = 200;
@@ -1112,7 +831,7 @@ function wsConnect() {
     state.wsLive = true;
     wsReconnectMs = 1000;
     dom.connDot.classList.add('live');
-    dom.connLabel.textContent = 'WS: LIVE (' + url.replace('ws://localhost:', 'N') + ')';
+    dom.connLabel.textContent = 'WS: LIVE (' + url.split(':').pop() + ')';
     // Subscribe to telemetry topic
     try { ws.send(JSON.stringify({ action: 'subscribe', topic: 'telemetry' })); } catch(e) {}
     pushFeed('HEARTBEAT', 'WebSocket connected — telemetry stream active', '');
@@ -1563,24 +1282,5 @@ function init() {
 
 document.addEventListener('DOMContentLoaded', init);
 </script>
-
-<!-- SVG glow filter (injected for gauge arcs) -->
-<svg width="0" height="0" style="position:absolute">
-  <defs>
-    <filter id="glow-cyan">
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <filter id="glow-amber">
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <filter id="glow-red">
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-  </defs>
-</svg>
-
 </body>
 </html>

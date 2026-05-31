@@ -126,7 +126,9 @@ public:
         std::string blob = msg.stage_str + "|" + msg.target_id + "|" + msg.evidence_json + "|"
                          + std::to_string(msg.sequence_number) + "|" + std::to_string(msg.view)
                          + "|" + msg.prev_message_hash;
-        return crypto::IdentityCore::sign_payload(m_private_key.get(), blob);
+        std::string sig = crypto::IdentityCore::sign_payload(m_private_key.get(), blob);
+
+        return sig;
     }
 
     [[nodiscard]] bool verify_message(const P2PMessage& msg) {
@@ -518,6 +520,7 @@ private:
     std::unordered_map<std::string, NodeTrustScore> m_node_trust;
     std::unordered_map<std::string, std::map<uint64_t, std::string>> m_message_history;
     std::map<std::string, EquivocationEvidence> m_equivocation_history;
+
     std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> m_rate_limits;
     std::unordered_set<std::string> m_seen_messages;
     std::unordered_set<std::string> m_registered_peers;

@@ -1,5 +1,6 @@
 #include "enforcer/PolicyEnforcer.hpp"
 #include <iostream>
+#include <cerrno>
 #include <cstring>
 #include <csignal>
 #include <sys/wait.h>
@@ -131,7 +132,7 @@ bool PolicyEnforcer::fork_exec_wait(const char* path, const char* const* argv) {
     }
 
     int status;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
@@ -169,7 +170,7 @@ std::pair<bool, std::string> PolicyEnforcer::fork_exec_capture(const char* path,
     close(pipefd[0]);
 
     int status;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
     return {WIFEXITED(status) && WEXITSTATUS(status) == 0, stdout_output};
 }
 
@@ -569,9 +570,8 @@ bool PolicyEnforcer::isolate_target(const std::string& target) {
                       << ENFORCE_COOLDOWN_SEC << "s window). Skipping " << target << "." << std::endl;
             return false;
         }
-        m_last_enforce_time = now;
-
         if (m_isolated_nodes.find(target) != m_isolated_nodes.end()) {
+            m_last_enforce_time = now;
             return true;
         }
 
@@ -616,6 +616,7 @@ bool PolicyEnforcer::isolate_target(const std::string& target) {
             std::lock_guard<std::mutex> lock(m_mtx);
             if (port_success) {
                 m_isolated_nodes.insert(target);
+                m_last_enforce_time = std::chrono::steady_clock::now();
             }
         }
         return port_success;
@@ -653,6 +654,7 @@ bool PolicyEnforcer::isolate_target(const std::string& target) {
         std::lock_guard<std::mutex> lock(m_mtx);
         if (any_success) {
             m_isolated_nodes.insert(target);
+            m_last_enforce_time = std::chrono::steady_clock::now();
         }
     }
 

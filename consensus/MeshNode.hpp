@@ -9,6 +9,7 @@
 #include "consensus/PeerManager.hpp"
 #include "crypto/CryptoCore.hpp"
 #include "crypto/KeyManager.hpp"
+#include "crypto/ProofChain.hpp"
 #include "net/TransportLayer.hpp"
 #include "common/StateJournal.hpp"
 #include "enforcer/PolicyEnforcer.hpp"
@@ -57,6 +58,8 @@ public:
     static void notify_webhook(const std::string& url, const std::string& target_id,
                                 const std::string& evidence_json, int quorum, int64_t timestamp_us);
 
+    std::shared_ptr<crypto::ProofChain> proof_chain() const { return m_proof_chain; }
+
 private:
     void p2p_listener_loop();
     void discovery_beacon_loop();
@@ -96,6 +99,7 @@ private:
     std::string m_public_key_pem;
     std::string m_public_key_b64;
     PBFTConsensus m_pbft;
+    std::string m_last_proof_sig;
     std::atomic<uint64_t> m_sequence_number{0};
 
     // === TLS infrastructure ===
@@ -121,6 +125,7 @@ private:
     PolicyEnforcer* m_enforcer;
     MitigationEngine* m_mitigation;
     TelemetryBridge* m_bridge;
+    std::shared_ptr<crypto::ProofChain> m_proof_chain;
     StateJournal m_journal;
     std::string m_webhook_url;
     size_t m_max_evidence_size;

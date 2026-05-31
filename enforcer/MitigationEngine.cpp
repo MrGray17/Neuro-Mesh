@@ -12,6 +12,8 @@
 #include <cstring>
 #include <unistd.h>
 
+#include <nlohmann/json.hpp>
+
 namespace neuro_mesh {
 
 // =============================================================================
@@ -23,70 +25,31 @@ MitigationEngine::MitigationEngine(PolicyEnforcer* enforcer)
 {}
 
 // =============================================================================
-// JSON field extraction — simple scan, no library dependency
+// JSON field extraction — via nlohmann/json (robust, RFC 8259 compliant)
 // =============================================================================
 
 std::string MitigationEngine::extract_str(std::string_view json, std::string_view key) {
-    // Search for "key":" — the quoted key followed by colon+quote
-    std::string needle;
-    needle.reserve(key.size() + 4);
-    needle.push_back('"');
-    needle.append(key);
-    needle.append("\":");
-
-    size_t pos = json.find(needle);
-    if (pos == std::string_view::npos) return {};
-
-    // Skip past the needle and the opening quote of the value
-    size_t val_start = pos + needle.size();
-    if (val_start >= json.size() || json[val_start] != '"') return {};
-    ++val_start; // skip opening quote
-
-    // Find closing quote, skipping over escaped quotes (\")
-    size_t val_end = val_start;
-    while (val_end < json.size()) {
-        if (json[val_end] == '"') break;
-        if (json[val_end] == '\\' && val_end + 1 < json.size()) {
-            val_end += 2;  // skip the escaped character
-        } else {
-            ++val_end;
-        }
+    try {
+        auto j = nlohmann::json::parse(json, nullptr, false);
+        if (!j.is_object()) return {};
+        auto it = j.find(key);
+        if (it == j.end() || !it->is_string()) return {};
+        return it->get<std::string>();
+    } catch (...) {
+        return {};
     }
-    if (val_end >= json.size()) return {};
-
-    return std::string(json.substr(val_start, val_end - val_start));
 }
 
 int64_t MitigationEngine::extract_int(std::string_view json, std::string_view key) {
-    std::string needle;
-    needle.reserve(key.size() + 3);
-    needle.push_back('"');
-    needle.append(key);
-    needle.append("\":");
-
-    size_t pos = json.find(needle);
-    if (pos == std::string_view::npos) return -1;
-
-    size_t val_start = pos + needle.size();
-    if (val_start >= json.size()) return -1;
-
-    // Skip optional whitespace
-    while (val_start < json.size() && json[val_start] == ' ') ++val_start;
-    if (val_start >= json.size()) return -1;
-
-    // Parse number
-    int64_t val = 0;
-    bool negative = false;
-    if (json[val_start] == '-') { negative = true; ++val_start; }
-
-    while (val_start < json.size() && json[val_start] >= '0' && json[val_start] <= '9') {
-        int64_t digit = json[val_start] - '0';
-        if (val > (INT64_MAX - digit) / 10) return negative ? INT64_MIN : INT64_MAX;
-        val = val * 10 + digit;
-        ++val_start;
+    try {
+        auto j = nlohmann::json::parse(json, nullptr, false);
+        if (!j.is_object()) return -1;
+        auto it = j.find(key);
+        if (it == j.end() || !it->is_number_integer()) return -1;
+        return it->get<int64_t>();
+    } catch (...) {
+        return -1;
     }
-
-    return negative ? -val : val;
 }
 
 // =============================================================================
@@ -100,20 +63,26 @@ bool MitigationEngine::validate_evidence_schema(std::string_view json) {
         return false;
     }
 
-    // Must start with { for valid JSON object
-    size_t start = 0;
-    while (start < json.size() && (json[start] == ' ' || json[start] == '\t' || json[start] == '\n')) ++start;
-    if (start >= json.size() || json[start] != '{') {
+    // Parse with nlohmann/json — robust against escaped quotes, whitespace,
+    // unicode escapes, and nested structures.
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(json, nullptr, /* allow_exceptions = */ true);
+    } catch (const nlohmann::json::parse_error &e) {
+        std::cerr << "[VALIDATION] Evidence rejected: JSON parse error — " << e.what() << std::endl;
+        return false;
+    }
+
+    if (!j.is_object()) {
         std::cerr << "[VALIDATION] Evidence rejected: not a JSON object" << std::endl;
         return false;
     }
 
-    // Check for at least one known field: event, verdict, src_ip, pid, node, entropy
+    // Check for at least one known field
     static const char* valid_fields[] = {"event", "verdict", "src_ip", "pid", "node", "entropy", "source"};
     bool has_valid_field = false;
     for (const char* field : valid_fields) {
-        std::string needle = std::string("\"") + field + "\":";
-        if (json.find(needle) != std::string_view::npos) {
+        if (j.contains(field)) {
             has_valid_field = true;
             break;
         }
@@ -121,35 +90,6 @@ bool MitigationEngine::validate_evidence_schema(std::string_view json) {
 
     if (!has_valid_field) {
         std::cerr << "[VALIDATION] Evidence rejected: no recognized fields" << std::endl;
-        return false;
-    }
-
-    // Check for basic structure balance (matching braces)
-    int brace_depth = 0;
-    bool in_string = false;
-    for (size_t i = start; i < json.size(); ++i) {
-        char c = json[i];
-        if (c == '"') {
-            // Count consecutive backslashes before the quote.
-            // Odd count → quote is escaped; even count → quote is real.
-            size_t backslash_count = 0;
-            size_t j = i;
-            while (j > start && json[j - 1] == '\\') { --j; ++backslash_count; }
-            if (backslash_count % 2 == 0) {
-                in_string = !in_string;
-            }
-        } else if (!in_string) {
-            if (c == '{') ++brace_depth;
-            else if (c == '}') --brace_depth;
-            if (brace_depth < 0) {
-                std::cerr << "[VALIDATION] Evidence rejected: unbalanced braces" << std::endl;
-                return false;
-            }
-        }
-    }
-
-    if (brace_depth != 0) {
-        std::cerr << "[VALIDATION] Evidence rejected: unclosed braces" << std::endl;
         return false;
     }
 

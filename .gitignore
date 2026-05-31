@@ -66,3 +66,16 @@ coverage/
 # Temporary files
 *.tmp
 *.bak
+.tmp*
+.tmp_*/*
+.tmp_*
+chunk_*
+raw_part_*
+*_dump_*
+*_dump.*
+.TEMP_*
+_concat.*
+_encoded_*
+*_full_dump/
+*_full.*
+_all_files_*

@@ -29,7 +29,7 @@ tmux split-window -h       # pane 0 | pane 3 | pane 4
 
 # Launch nodes (5 panes: 0-4)
 for i in "${!NODES[@]}"; do
-    tmux send-keys -t "$SESSION:$i" "./bin/neuro_agent ${NODES[$i]}" C-m
+    tmux send-keys -t "$SESSION:0.$i" "./bin/neuro_agent ${NODES[$i]}" C-m
 done
 
 echo "[INFO] Neuro-Mesh launched in tmux session '$SESSION'"

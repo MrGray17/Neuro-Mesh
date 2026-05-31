@@ -69,6 +69,9 @@ No leader election. No raft. The mesh *is* the authority.
 | libbpf, libelf, zlib | eBPF loader |
 | OpenSSL 3.x | Ed25519 signatures |
 | bpftool | eBPF skeleton generation |
+| nlohmann-json3-dev | JSON parsing (MitigationEngine) |
+| libseccomp-dev | Process sandboxing (seccomp BPF) |
+| libonnxruntime-dev | Anomaly detection (ONNX inference) |
 | nftables / iptables | Network isolation |
 | Docker (optional) | Containerized mesh |
 
@@ -280,7 +283,8 @@ neuro_mesh/
 ├── common/            StateJournal, UniqueFD, Result<T,E>, Base64
 ├── attacks/           AttackSimulator (synthetic threat patterns)
 ├── orchestration/     Python tools — ws_proxy, mesh_manager, anomaly_classifier
-├── tools/             inject_event, test_crypto, traffic_generator, benchmark_mesh
+├── tools/             inject_event, test_crypto, traffic_generator, benchmark_mesh,
+│                      attack_runner.py, llm_analyst.py, test_proof.py
 ├── dashboard/         Vanilla JS dashboard (Canvas + WebSocket, zero dependencies)
 ├── main.cpp           Entry point — wires all subsystems
 └── docker-compose.yml 5-node decentralized mesh

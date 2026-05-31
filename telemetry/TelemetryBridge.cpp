@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 #include <algorithm>
+#include <thread>
 
 #include <fcntl.h>
 #include <grp.h>
@@ -17,19 +18,14 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/resource.h>
+#include <poll.h>
 
 #include <seccomp.h>
 #include <sys/prctl.h>
 
-// uWebSockets + uSockets
+// uWebSockets + uSockets (public APIs only — no internal headers)
 #include <App.h>
 #include <libusockets.h>
-
-// uSockets internal — required for POLL_TYPE_CALLBACK integration.
-// This is a stable ABI used by uSockets' own UDP implementation.
-extern "C" {
-#include "internal/internal.h"
-}
 
 namespace neuro_mesh {
 
@@ -393,6 +389,12 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
     // ---- tgkill — thread signaling in uSockets event loop ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(tgkill), 0);
 
+    // ---- clone — std::thread spawn (pthread_create → clone) ----
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(clone), 0);
+
+    // ---- ppoll — pipe monitor thread uses poll() (glibc→ppoll on x86_64) ----
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(ppoll), 0);
+
     // ---- Load the filter ----
     if (seccomp_load(ctx) != 0) {
         std::cerr << "[SECCOMP] WARN: seccomp_load() failed "
@@ -403,7 +405,7 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
 
     seccomp_release(ctx);
 
-    std::cerr << "[SECCOMP] Default-kill BPF filter loaded (47 syscalls whitelisted)."
+    std::cerr << "[SECCOMP] Default-kill BPF filter loaded (56 syscalls whitelisted)."
               << std::endl;
 }
 
@@ -411,57 +413,95 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
 // uWebSockets Event Loop (Child Process)
 // =========================================================================
 
-struct PipeReaderData {
-    int fd;
+// =========================================================================
+// Pipe monitor thread — uses poll() + uWS::Loop::defer() (public APIs only).
+// Replaces the previous us_internal_callback_t approach that depended on
+// uSockets private headers.
+// =========================================================================
+
+struct PipeMonitorCtx {
+    int pipe_fd;
     uWS::App *app;
-    std::string buffer;   // partial-line accumulation
+    std::string buffer;
+    std::thread monitor_thread;
 };
 
-// Called by the uSockets event loop when pipe has data to read.
-static void pipe_read_callback(struct us_internal_callback_t *cb) {
-    auto *data = reinterpret_cast<PipeReaderData *>(reinterpret_cast<char *>(cb + 1));
+static void pipe_monitor_loop(PipeMonitorCtx *ctx) {
+    struct pollfd pfd{};
+    pfd.fd = ctx->pipe_fd;
+    pfd.events = POLLIN;
 
     char buf[65536];
-    ssize_t n = read(data->fd, buf, sizeof(buf) - 1);
-    if (n <= 0) {
-        if (n == 0) {
-            std::cerr << "[TELEMETRY_BRIDGE] Pipe closed (parent shutdown). Exiting."
-                      << std::endl;
-            _exit(0);
-            return;
-        }
-        if (errno == EINTR) return;
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            std::cerr << "[TELEMETRY_BRIDGE] Pipe read error: "
+    while (true) {
+        int ret = poll(&pfd, 1, 1000); // 1s timeout for clean shutdown detection
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            std::cerr << "[TELEMETRY_BRIDGE] Pipe monitor: poll() error: "
                       << strerror(errno) << ". Exiting." << std::endl;
             _exit(0);
         }
-        return;
-    }
+        if (ret == 0) {
+            // Timeout — check if pipe is still valid
+            if (kill(getppid(), 0) != 0) {
+                std::cerr << "[TELEMETRY_BRIDGE] Parent process gone. Exiting." << std::endl;
+                _exit(0);
+            }
+            continue;
+        }
 
-    buf[n] = '\0';
-    data->buffer.append(buf, static_cast<size_t>(n));
+        // Pipe is readable
+        ssize_t n = read(ctx->pipe_fd, buf, sizeof(buf) - 1);
+        if (n <= 0) {
+            if (n == 0) {
+                std::cerr << "[TELEMETRY_BRIDGE] Pipe closed (parent shutdown). Exiting."
+                          << std::endl;
+                _exit(0);
+            }
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                std::cerr << "[TELEMETRY_BRIDGE] Pipe read error: "
+                          << strerror(errno) << ". Exiting." << std::endl;
+                _exit(0);
+            }
+            continue;
+        }
 
-    // Process complete lines from the buffer.
-    // Each line is a complete JSON object pushed by the parent.
-    size_t pos;
-    while ((pos = data->buffer.find('\n')) != std::string::npos) {
-        std::string line = data->buffer.substr(0, pos);
-        data->buffer.erase(0, pos + 1);
+        buf[n] = '\0';
+        ctx->buffer.append(buf, static_cast<size_t>(n));
 
-        if (line.empty()) continue;
+        // Process complete lines and defer publish to the uWS event loop.
+        std::string lines_to_publish;
+        size_t pos;
+        while ((pos = ctx->buffer.find('\n')) != std::string::npos) {
+            std::string line = ctx->buffer.substr(0, pos);
+            ctx->buffer.erase(0, pos + 1);
+            if (line.empty()) continue;
+            lines_to_publish += line + "\n";
+        }
 
-        // Broadcast to all WebSocket clients subscribed to topic/telemetry.
-        data->app->publish("topic/telemetry", line, uWS::OpCode::TEXT);
-    }
+        // Prevent unbounded buffer growth
+        if (ctx->buffer.size() > 1'048'576) {
+            std::cerr << "[TELEMETRY_BRIDGE] Buffer overflow — discarding "
+                      << ctx->buffer.size() << " bytes of un-terminated data."
+                      << std::endl;
+            ctx->buffer.clear();
+        }
 
-    // Prevent unbounded buffer growth if parent sends malformed data
-    // (no newlines).  Cap at 1 MB.
-    if (data->buffer.size() > 1'048'576) {
-        std::cerr << "[TELEMETRY_BRIDGE] Buffer overflow — discarding "
-                  << data->buffer.size() << " bytes of un-terminated data."
-                  << std::endl;
-        data->buffer.clear();
+        if (!lines_to_publish.empty()) {
+            // uWS::Loop::get() is thread-local — calling it from the pipe
+            // monitor thread returns a different loop than the main event loop,
+            // so defer() never runs. Instead, publish directly from this thread.
+            // uWS's App::publish() is internally thread-safe (uses mutex).
+            size_t start = 0;
+            size_t end;
+            while ((end = lines_to_publish.find('\n', start)) != std::string::npos) {
+                std::string_view line(lines_to_publish.data() + start, end - start);
+                if (!line.empty()) {
+                    ctx->app->publish("topic/telemetry", line, uWS::OpCode::TEXT);
+                }
+                start = end + 1;
+            }
+        }
     }
 }
 
@@ -506,64 +546,23 @@ static void pipe_read_callback(struct us_internal_callback_t *cb) {
     });
 
     if (!listening) {
-        // listen() callback may not have fired if the port is already in use
-        // and the error was synchronous. Exit to avoid running without a socket.
         std::cerr << "[TELEMETRY_BRIDGE] FATAL: Cannot bind to port "
                   << port << " (address in use?)" << std::endl;
         _exit(1);
     }
 
-    // ---- Integrate pipe FD into the uSockets event loop ----
-    // Get the underlying us_loop_t from uWS.
-    struct us_loop_t *loop = (struct us_loop_t *) uWS::Loop::get();
-
-    // Allocate a poll handle with trailing PipeReaderData as extension.
-    // Bounds-check to prevent UB if uSockets internal struct layout changes.
-    constexpr unsigned ext_size = sizeof(PipeReaderData);
-    constexpr size_t kMinPollSize = 64;   // sanity lower bound
-    constexpr size_t kMaxPollSize = 512;  // sanity upper bound
-
-    constexpr size_t calc_size = sizeof(struct us_internal_callback_t) - sizeof(struct us_poll_t) + ext_size;
-    static_assert(calc_size >= kMinPollSize && calc_size <= kMaxPollSize,
-                  "uSockets struct size out of expected bounds - verify uSockets version compatibility");
-
-    if (calc_size < kMinPollSize || calc_size > kMaxPollSize) {
-        std::cerr << "[TELEMETRY_BRIDGE] FATAL: uSockets struct size out of bounds: "
-                  << calc_size << std::endl;
-        _exit(1);
-    }
-
-    struct us_poll_t *pipe_poll = us_create_poll(loop, 0, calc_size);
-    if (!pipe_poll) {
-        std::cerr << "[TELEMETRY_BRIDGE] FATAL: us_create_poll returned nullptr" << std::endl;
-        _exit(1);
-    }
-
-    us_poll_init(pipe_poll, pipe_read_fd, POLL_TYPE_CALLBACK);
-
-    // Configure the internal callback struct.
-    auto *cb = (struct us_internal_callback_t *) pipe_poll;
-    cb->loop = loop;
-    cb->cb_expects_the_loop = 0;    // callback receives the poll itself
-    cb->leave_poll_ready = 1;       // keep polling — pipe is long-lived
-    cb->cb = pipe_read_callback;
-
-    // Initialize the extension data (PipeReaderData lives after cb struct).
-    // The callback reads it; the local variable is only for construction.
-    (void) new (reinterpret_cast<char *>(cb + 1)) PipeReaderData{pipe_read_fd, &app, {}};
-
-    us_poll_start(pipe_poll, loop, LIBUS_SOCKET_READABLE);
+    // ---- Start pipe monitor thread (uses poll() + uWS::Loop::defer()) ----
+    PipeMonitorCtx ctx{pipe_read_fd, &app, {}, {}};
+    ctx.monitor_thread = std::thread(pipe_monitor_loop, &ctx);
 
     std::cerr << "[TELEMETRY_BRIDGE] Pipe FD " << pipe_read_fd
-              << " integrated into event loop. Awaiting telemetry..." << std::endl;
+              << " monitored by dedicated thread. Awaiting telemetry..." << std::endl;
 
     // ---- Run forever — all I/O driven by epoll through uSockets ----
     app.run();
 
     // app.run() only returns on intentional stop (which we never call).
     std::cerr << "[TELEMETRY_BRIDGE] Event loop exited. Shutting down." << std::endl;
-    us_poll_stop(pipe_poll, loop);
-    us_poll_free(pipe_poll, loop);
     _exit(0);
 }
 

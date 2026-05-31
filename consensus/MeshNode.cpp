@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 #include <random>
 #include <thread>
+#include <mutex>
 #include <fstream>
 #include <netdb.h>
 #include <sys/syscall.h>
@@ -39,6 +40,7 @@ MeshNode::MeshNode(const std::string& node_id,
       m_enforcer(enforcer),
       m_mitigation(mitigation),
       m_bridge(bridge),
+      m_proof_chain(std::make_shared<crypto::ProofChain>(node_id)),
       m_journal("./journal_" + node_id + ".log"),
       m_webhook_url([]() {
           const char* env = std::getenv("NEURO_WEBHOOK_URL");
@@ -1228,6 +1230,19 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                           << " — executing MitigationEngine response." << std::endl;
                 m_journal.append("EXECUTED", incoming_msg.target_id, incoming_msg.evidence_json);
 
+                // Append to proof chain for verifiable audit trail
+                if (m_proof_chain) {
+                    m_proof_chain->append(crypto::ProofEventType::CONSENSUS_REACHED,
+                        incoming_msg.target_id, incoming_msg.evidence_json,
+                        m_last_proof_sig);
+                    m_proof_chain->export_file();
+                    // Push proof data to dashboard via telemetry bridge
+                    if (m_bridge) {
+                        std::string proof_json = "{\"proof_chain\":" + m_proof_chain->get_latest_json() + "}";
+                        std::ignore = m_bridge->push_telemetry(proof_json);
+                    }
+                }
+
                 // Fire alert webhook (fork+exec curl — non-blocking at OS level)
                 if (!m_webhook_url.empty()) {
                     notify_webhook(m_webhook_url, incoming_msg.target_id,
@@ -1300,6 +1315,7 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
     msg.prev_message_hash = prev_hash;
 
     std::string signature = m_pbft.sign_message(msg);
+        m_last_proof_sig = signature;
     std::string encoded_sig = base64_encode(signature);
 
     std::string b64_evidence = base64_encode(evidence_json);
@@ -1353,13 +1369,15 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
             std::cout << "[CRITICAL] PBFT Final Quorum Reached! Target " << target_id
                       << " (seq=" << seq << ") — executing MitigationEngine response." << std::endl;
             m_journal.append("EXECUTED", target_id, evidence_json);
-            if (m_bridge) {
-                std::ignore = m_bridge->push_telemetry(
-                    "{\"event\":\"entropy_spike\",\"value\":0.98,\"threshold\":0.65,"
-                    "\"target\":\"" + target_id + "\","
-                    "\"quorum\":" + std::to_string(m_pbft.quorum_size()) + ","
-                    "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
+
+            // Append to proof chain for verifiable audit trail
+            if (m_proof_chain) {
+                m_proof_chain->append(crypto::ProofEventType::CONSENSUS_REACHED,
+                    target_id, evidence_json,
+                    signature);
+                m_proof_chain->export_file();
             }
+
             // Execute mitigation (fork+exec iptables — non-blocking at OS level)
             if (m_mitigation) {
                 try {
@@ -1587,6 +1605,7 @@ namespace {
     static std::vector<pid_t> s_reaper_queue;
     static std::thread s_reaper_thread;
     static std::atomic<bool> s_reaper_running{false};
+    static std::once_flag s_reaper_once;
 
     static void reaper_loop() {
         while (s_reaper_running.load(std::memory_order_acquire)) {
@@ -1611,10 +1630,10 @@ namespace {
     }
 
     static void start_reaper() {
-        if (!s_reaper_running.load(std::memory_order_acquire)) {
+        std::call_once(s_reaper_once, [] {
             s_reaper_running.store(true, std::memory_order_release);
             s_reaper_thread = std::thread(reaper_loop);
-        }
+        });
     }
 
     static void enqueue_reap(pid_t pid) {

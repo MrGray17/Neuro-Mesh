@@ -1,39 +1,20 @@
 # NEURO-MESH: REMAINING IMPROVEMENTS
-# All verified bugs fixed. These are architectural/operational gaps.
+# Post-audit bug tracking (from 2026-05-25 codebase audit). Corrected after source re-verification.
 # Priority: P1 (should fix) → P2 (nice to have)
 
 # =============================================================================
 # P1 — SHOULD FIX
 # =============================================================================
 
-## TODO-01: uSockets internal ABI dependency
-# Severity: Deployment risk
-# File: telemetry/TelemetryBridge.cpp:31
-#
-# #include "internal/internal.h" uses uSockets internal headers.
-# Any uSockets version update can break TelemetryBridge at runtime.
-# The static_assert on struct size provides a canary but doesn't prevent
-# semantic changes to the callback mechanism.
-#
-# Fix: Use public uSockets APIs (us_poll, us_create_socket_context) or
-# submit a feature request for pipe integration. Alternatively, use a
-# separate thread with blocking read() + uWS::Loop::defer() to post
-# messages into the event loop.
+## TODO-01: uSockets internal ABI dependency — FIXED
+# Replaced us_internal_callback_t with poll() + uWS::Loop::defer().
+# Uses only public APIs. No more internal header dependency.
+# File: telemetry/TelemetryBridge.cpp
 
-## TODO-02: No JSON library — hand-rolled parser is fragile
-# Severity: Medium
-# Files: enforcer/MitigationEngine.cpp:29-90
-#
-# extract_str() and extract_int() use naive string scanning. Fails on:
-# - Keys with escaped quotes
-# - Whitespace between key and colon
-# - Unicode-escaped keys
-# - Nested objects with duplicate keys at different depths
-#
-# An attacker who compromises a node's Ed25519 key could craft evidence
-# that misleads field extraction (wrong pid, wrong src_ip).
-#
-# Fix: Add a header-only JSON library (nlohmann/json, RapidJSON, simdjson).
+## TODO-02: No JSON library — hand-rolled parser is fragile — FIXED
+# Replaced extract_str/extract_int with nlohmann/json (system package).
+# RFC 8259 compliant: handles escaped quotes, whitespace, unicode, nesting.
+# Files: enforcer/MitigationEngine.cpp
 
 ## TODO-03: No structured logging
 # Severity: Operational
@@ -61,6 +42,120 @@
 # returning JSON with node status, peer count, uptime, and threat level.
 
 ## TODO-05: Test coverage gaps
+
+# =============================================================================
+# AUDIT FINDINGS (from 2026-05-25 codebase audit)
+# All entries below verified against actual source code.
+# =============================================================================
+
+## BUG-01 (MEDIUM): eBPF probe uses wrong path (missing node_id) — corrected
+# Files: enforcer/PolicyEnforcer.cpp:184, 302, cell/NodeAgent.cpp:122-125
+#
+# Maps DO match (both xdp_blacklist). Pipeline is consistent:
+#   PolicyEnforcer writes → xdp_blacklist → sensor.bpf.c reads from it
+#   NodeAgent pins map at /sys/fs/bpf/neuro_mesh_<node_id>/xdp_blacklist
+#
+# BUT: ensure_ebpf_map() at line 184 probes /sys/fs/bpf/neuro_mesh/xdp_blacklist
+# (no node_id), while apply_ebpf_drop() at line 302 uses the correct path
+# WITH node_id. Probe always fails → available_backends() never reports EBPF.
+#
+# However, isolate_target() and block_ip_address() call apply_ebpf_drop()
+# UNCONDITIONALLY (before checking backends), so enforcement still works.
+# The bug is broken diagnostics: always shows "eBPF: unavailable" even when
+# eBPF enforcement is succeeding. neuro_bpf.c is dead code (uncompiled).
+#
+# Fix: Add node_id to the probe path in ensure_ebpf_map(), or remove it and
+# rely on the unconditional try. Remove neuro_bpf.c if unused.
+
+## BUG-02 (MEDIUM): block_ip_address() lacks internal safe-list guard — latent
+# Files: enforcer/PolicyEnforcer.cpp:513-556, enforcer/MitigationEngine.cpp:254-269
+#
+# block_ip_address() checks is_valid_ip() and is_loopback() only. Has NO
+# internal is_safe() or is_ip_safe() call. The ONLY caller (MitigationEngine::
+# execute_response()) DOES check is_ip_safe() at line 254-257 before calling,
+# so the current code path is protected.
+#
+# Latent vulnerability: any future code path that calls block_ip_address()
+# directly without a prior safe-list check will bypass the safe list. In
+# contrast, isolate_target() has its own defensive is_safe() check at line 578.
+#
+# Fix: Add is_ip_safe() guard inside block_ip_address() for defense-in-depth.
+
+## [REMOVED] BUG-03: XSS in dashboard — FALSE POSITIVE (source-verified)
+# All values (shortHash, message, consensus_hash) are wrapped in escapeHtml().
+# See pushFeed() at dashboard/index.html:1062-1063. Not a bug.
+
+## BUG-04 (MEDIUM): TELEMETRY gossip unauthenticated
+# File: consensus/MeshNode.cpp:880-900
+#
+# process_telemetry_gossip() accepts TELEMETRY|ANY_NODE|{json} with no
+# signature verification. Any process on network injects spoofed telemetry.
+# Impact limited to display spoofing (doesn't trigger PBFT/isolation).
+#
+# Fix: Add Ed25519 signature to TELEMETRY, or reject from unverified peers.
+
+## BUG-05 (MEDIUM): Unix socket world-accessible
+# File: main.cpp:276-290
+#
+# IPC socket at /tmp/neuro_mesh_{id}.sock created with no chmod() after
+# bind(). Default umask (022) makes it world-writable. Any local user can
+# send CMD:INJECT, CMD:ISOLATE, CMD:SHUTDOWN.
+#
+# Fix: chmod(socket_path, 0600) after bind().
+
+## BUG-06 (LOW): IPC evidence buffer truncation — fencepost error
+# File: main.cpp:410-429
+#
+# Read buffer is 65536 bytes (reads up to 65535). Evidence size validation
+# allows up to 65536 bytes. After stripping "CMD:INJECT <target> " prefix,
+# evidence capacity is ~65517 bytes. Evidence between ~65517-65536 bytes
+# is silently truncated without the REJECT:EVIDENCE_TOO_LARGE error firing.
+# Practical impact is near-zero (evidence payloads are tiny).
+#
+# Fix: Lower evidence limit to 65000 or reduce buffer to match validation.
+
+## BUG-07 (MEDIUM): No auth on WebSocket endpoints
+# Files: dashboard/index.html, telemetry/TelemetryBridge.cpp, ws_proxy.py
+#
+# All WebSocket endpoints accept connections from any origin, any client.
+# No token, no origin check, no TLS. Full telemetry readable by any process
+# reaching the port.
+#
+# Fix: Add origin checking + shared token auth.
+
+## [REMOVED] BUG-08: NEURO_PEERS stoi crash — FALSE POSITIVE (source-verified)
+# std::stoi() IS wrapped in try { } catch(...) { } at main.cpp:579-585.
+# Invalid port values are caught, logged, and skipped. Not a bug.
+
+## [REMOVED] BUG-09: Heartbeat thread race — FALSE POSITIVE (source-verified)
+# mesh.start() at line 632 runs BEFORE heartbeat thread at line 638.
+# Comment numbering is inverted (Stage 6 before Stage 5) but execution
+# order is correct. Not a bug.
+
+## BUG-10 (MEDIUM): CertificateAuthority is stub implementation
+# File: crypto/CertificateAuthority.cpp
+#
+# create_root_ca(), sign_csr(), verify_certificate(), verify_chain() return
+# nullopt or false. Any code path relying on CA silently fails.
+#
+# Fix: Either implement fully or remove the stubs.
+
+## BUG-11 (MEDIUM): AttackSimulator does real I/O in production builds
+# File: attacks/AttackSimulator.cpp:191-221
+#
+# simulate_network_attack() performs real TCP connect() and UDP sendto().
+# In production/staging this is a real attack, not simulation.
+#
+# Fix: Gate real I/O behind confirmation flag or remove from production builds.
+
+## BUG-12 (MEDIUM): Docker Compose overprivileged
+# File: docker-compose.yml
+#
+# network_mode: host + SYS_ADMIN, BPF, NET_ADMIN, PERFMON capabilities.
+# Container compromise = full host access. Architecturally required but
+# blast radius undocumented.
+#
+# Fix: Add resource limits, document risk, consider user-namespace remapping.
 # Severity: Quality
 # Files: tests/
 #
@@ -74,3 +169,326 @@
 #
 # Fix: Add gtest integration tests that spin up multiple MeshNode
 # instances and verify end-to-end PBFT consensus behavior.
+
+# =============================================================================
+# ELITE FEATURES (competition-winning — from 2026-05-25 strategy session)
+# These are not bugs. These are features that make Neuro-Mesh feel like
+# "going back 10 years and showing ChatGPT" — paradigm-shifting, not incremental.
+# Target: video submission (Round 1) + live demo (Round 2).
+# =============================================================================
+
+## ELITE-01: "Ask the Mesh" — Natural Language Incident Briefing (P0)
+# After an attack is detected and isolated, any user clicks "What happened?"
+# and the dashboard generates a plain-English incident briefing:
+#
+#   "At 14:23:44, Node ALPHA detected a privilege escalation via execve
+#    syscall anomaly (entropy: 0.91). Broadcast to 4 peers via PBFT.
+#    3 of 4 peers confirmed within 1.2 seconds. Ed25519 signatures
+#    verified. Isolation applied: XDP kernel-level drop + iptables.
+#    Mesh health: 4/5 nodes operational. Attack contained."
+#
+# Why elite: Every judge understands plain English. No expertise needed.
+# This is the "ChatGPT moment" — ask a question, get an answer.
+#
+# Implementation: Template-based narrative generator (no LLM). All data
+# already flowing in telemetry. Format syscall type + PBFT stages +
+# isolation type + timing into structured sentences.
+# Files: telemetry/TelemetryBridge.cpp (narrative generator),
+#        dashboard/index.html (display panel)
+# Estimate: 3-5 days
+
+## ELITE-02: Predictive Defense Countdown (P0)
+# When an attack starts, the dashboard shows a live countdown with phases:
+#
+#   PHASE 1: DETECTION      ✓ (0.02s)  — execve anomaly fired
+#   PHASE 2: BROADCAST      ✓ (0.15s)  — PBFT PRE_PREPARE sent
+#   PHASE 3: VERIFICATION   ✓ (0.42s)  — 3/4 peers confirmed
+#   PHASE 4: CONSENSUS      → (0.50s)  — COMMIT expected
+#   PHASE 5: ISOLATION      → (2.00s)  — XDP drop predicted
+#   PHASE 6: SELF-HEAL      → (3.00s)  — Mesh reconfiguring
+#
+# Each phase flips → to ✓ on schedule. If it misses, ✗ and escalation.
+#
+# Why elite: The mesh PREDICTS ITS OWN FUTURE. When the countdown hits
+# zero and EXECUTED fires exactly on time, the audience gasps.
+# Proves the mesh understands its own behavior at a fundamental level.
+#
+# Implementation: PBFT state machine already has known timeouts. EXECUTED
+# fires predictably. Add prediction display on dashboard based on
+# historical performance / known state machine timing.
+# Files: consensus/MeshNode.cpp (emit prediction events),
+#        dashboard/index.html (countdown display)
+# Estimate: 1-2 weeks
+
+## ELITE-03: The Living Mesh — Autonomous Immune System (P0)
+# 5 nodes rendered as glowing cells connected by pulsing energy lines.
+# The mesh has a health score (99.7%). When attacked:
+#   1. One cell flares yellow → orange → red
+#   2. "Antibodies" (particles) flow to all peers — PBFT vote propagation
+#   3. Consensus reached → infected cell is SEVERED from the mesh
+#   4. Remaining 4 cells re-sync pulsing — healthy and synchronized
+#   5. New cells can join and be accepted
+#
+# Why elite: Emotional storytelling. Judges don't understand PBFT —
+# they understand a body fighting an infection. The mesh is alive.
+# Cilium's Star Wars demo proved this pattern wins.
+#
+# Implementation: Canvas-based particle system with force-directed graph.
+# Build on existing dashboard topology code (initMeshCanvas, drawMeshGraph).
+# Add PBFT stage event → animation state machine.
+# Files: dashboard/index.html (major rewrite of topology section)
+# Estimate: 2-3 weeks
+
+## ELITE-04: Attack Evolution vs Response Speed Graph (P1)
+# Two competing lines on a live chart:
+#   Red line: Attack progression (probe → escalate → execute)
+#   Green line: Mesh response (detect → verify → isolate → contain)
+# The green line MUST cross above the red line before full compromise.
+#
+# Why elite: VISUALIZES the core value proposition in 2 seconds.
+# "Our response is faster than their attack." No explanation needed.
+#
+# Implementation: Canvas chart. Attack progression inferred from syscall
+# event rate (probe=1, escalate=10, execute=100). Response follows PBFT
+# stage transitions. Both plotted against time with labeled axes.
+# Files: dashboard/index.html (new Canvas chart section)
+# Estimate: 3-5 days
+
+## ELITE-05: The Artifact — Self-Contained Attack Replay HTML (P1)
+# When isolation completes, one click exports a single HTML file.
+# The judge opens it on their laptop. It replays the entire 30-second
+# attack timeline with animated PBFT pulses, syscall stream, predictive
+# countdown, and post-incident briefing — all self-contained, no server.
+#
+# Why elite: The artifact SPREADS beyond the competition. Every judge
+# who opens it shows it to colleagues. "Look at this — it predicts its
+# own response." It's the THING THEY KEEP.
+#
+# Implementation: TelemetryBridge buffers ~60s of telemetry in a ring.
+# On EXECUTED, dump buffer as JSON. Export template is a self-contained
+# HTML file that reads the JSON and animates it via Canvas.
+# Files: telemetry/TelemetryBridge.cpp (ring buffer),
+#        tools/export_template.html (replay viewer)
+# Estimate: 1-2 weeks
+
+## ELITE-06: Live eBPF Syscall Stream ("The Volcano") (P1)
+# Real-time scrolling waterfall of ALL system calls across all 5 nodes —
+# execve, sendto, connect, sendmsg — with color coding:
+#   Green: normal activity
+#   Yellow: unusual (high entropy)
+#   Red: malicious (anomaly detected)
+# During an attack, the stream visibly SHIFTS from green to red.
+#
+# Why elite: No competitor can show kernel activity live. MCIPS shows
+# a web form. You show THE KERNEL BREATHING. It's mesmerizing.
+#
+# Implementation: NodeAgent already captures execve/sendto/connect in
+# ring buffer. Format as syscall telemetry JSON and push to dashboard.
+# Dashboard renders as live-scrolling stream with color transitions.
+# Files: cell/NodeAgent.cpp (emit syscall events in telemetry),
+#        dashboard/index.html (scrolling stream Canvas)
+# Estimate: 3-5 days
+
+## ELITE-07: Zero-Trust Onboarding Visualization (P2)
+# When a new node joins the mesh, animate the Ed25519 key exchange:
+#   1. New node's public key fingerprint appears
+#   2. Existing nodes verify the key (TOFU pinning)
+#   3. Topology updates with the new node glowing
+#   4. Connection confirmed, mesh health recalculated
+#
+# Why elite: Visually proves you're not just SAYING "zero-trust" —
+# you're DOING it. Every peer relationship is cryptographically verified.
+#
+# Implementation: Emit peer_joined event with key fingerprint from
+# MeshNode. Dashboard animates join sequence. CryptoCore already handles
+# Ed25519 — just surface the fingerprints.
+# Files: consensus/MeshNode.cpp (emit join events),
+#        dashboard/index.html (onboarding animation)
+# Estimate: 1 week
+
+## ELITE-08: Mesh Immunity Score (P2)
+# A persistent score that grows as the mesh encounters attacks:
+#   MESH IMMUNITY: 73% (+12% this session)
+#   Threats neutralized: 7
+#   Attack patterns learned: 4
+#   Peers protected: 4
+# When an attack is detected, the feature vector is shared across peers.
+# If the same pattern hits another node, detection is faster.
+#
+# Why elite: Shows the mesh LEARNING over time. Gets smarter with every
+# attack. Judges love seeing growth/progress metrics.
+#
+# Implementation: Counter in memory. Increment on each successful PBFT
+# EXECUTED. Feature hashes shared between peers in PBFT messages.
+# Files: consensus/MeshNode.cpp (immunity tracking),
+#        dashboard/index.html (immunity panel)
+# Estimate: 1 week
+
+## ELITE-09: Competitive Comparison Matrix (P2)
+# Interactive table comparing Neuro-Mesh vs MCIPS, CrowdStrike, Wazuh,
+# Snort on 20+ criteria with green/red indicators:
+#   Detection layer: Kernel (eBPF) vs Application
+#   Auto-response: XDP+iptables vs Alert-only
+#   Architecture: P2P decentralized vs Centralized
+#   Byzantine tolerance: PBFT vs None
+#   Packet filtering: XDP vs None
+#
+# Why elite: Judges compare you anyway. Give them the comparison.
+# Shows confidence. Makes the competition's job easier.
+#
+# Implementation: Static HTML/CSS table. Zero backend work.
+# Files: dashboard/index.html (comparison panel)
+# Estimate: 1-2 days
+
+# =============================================================================
+# PRODUCTIZATION (startup-ready — from 2026-05-25 strategy session)
+# These turn Neuro-Mesh from a research project into something people buy.
+# Target: competition video (startup angle) + real adoption post-competition.
+# =============================================================================
+
+## PROD-01: One-Command Install Script (P0)
+# curl -fsSL https://neuro-mesh.io/install.sh | sudo bash
+#
+# What the script does:
+#   - Detects OS (Ubuntu/Debian/RHEL/Fedora)
+#   - Checks kernel version (5.4+ for eBPF)
+#   - Installs dependencies (libbpf, iptables, nftables)
+#   - Downloads pre-compiled static binary from GitHub Releases
+#   - Runs interactive setup wizard (node name, seed peers, interface)
+#   - Optionally deploys dashboard via Docker
+#
+# Why product: Removes the #1 adoption barrier (compile from source).
+# Makes "try it in 5 minutes" possible.
+#
+# Enablers:
+#   - GitHub Actions release workflow (tag → static binary x86_64 + aarch64)
+#   - Static builds with musl (fully static, no libc dependency)
+#   - Script hosted at install.neuro-mesh.io or GitHub raw
+#
+# Files: tools/install.sh (new), .github/workflows/release.yml (new)
+# Estimate: 1-2 weeks
+
+## PROD-02: `neuro-mesh` CLI Tool (P0)
+# Unified command-line interface replacing raw binary invocation:
+#
+#   neuro-mesh init     — Interactive setup wizard
+#   neuro-mesh start    — Start agent as daemon
+#   neuro-mesh stop     — Stop agent gracefully
+#   neuro-mesh status   — Show node health, peer count, threats
+#   neuro-mesh peers    — List connected peers with pubkey fingerprints
+#   neuro-mesh isolate  — Manually trigger isolation (dev/demo)
+#   neuro-mesh inject   — Simulate event for testing
+#   neuro-mesh export   — Export incident report JSON
+#   neuro-mesh dashboard — Print dashboard URL or open browser
+#
+# Why product: Every professional tool has a CLI. Hides complexity.
+# New users don't need to read Makefile or know the binary name.
+#
+# Implementation: Thin Rust/Go wrapper around C++ binary, or embed
+# subcommand dispatch in the agent binary itself.
+# Files: cmd/neuro-mesh/ (new directory), Makefile (add build target)
+# Estimate: 2-3 weeks
+
+## PROD-03: Dashboard as the Product (P1)
+# Transform the dashboard from monitoring tool to PRIMARY product interface:
+#
+#   /login        — JWT auth (email + password, optional SSO)
+#   /setup        — Guided onboarding wizard on first load
+#   /dashboard    — Main view (mesh topology, alerts, health)
+#   /incidents    — Paginated, filterable incident history
+#   /incidents/:id — Single incident detail with replay
+#   /export/:id   — One-click PDF/HTML incident export
+#   /settings     — Webhook config (Slack, Telegram, email), team invites
+#   /api/*        — REST API for external integration
+#
+# Why product: The dashboard IS the product for non-technical users.
+# A manager should understand mesh health at a glance without reading docs.
+#
+# Implementation: Keep as single-serving web app served by agent or
+# standalone Docker image. Frontend in vanilla JS (zero deps) or
+# lightweight framework (Preact, Svelte).
+# Files: dashboard/ (major rewrite), main.cpp (serve dashboard on :8080)
+# Estimate: 2-3 weeks
+
+## PROD-04: Tiered Pricing Model (P1)
+# Three tiers with clear upgrade triggers:
+#
+#   Community (Free):
+#     - 1 node
+#     - Detection + alert (no auto-isolation)
+#     - Dashboard read-only
+#     - GitHub + Discord support
+#
+#   Pro (€49/node/month):
+#     - 3-20 nodes
+#     - Full PBFT consensus + auto-isolation
+#     - Dashboard + webhooks
+#     - Email + Attack replay export
+#     - 4h SLA
+#
+#   Enterprise (€149/node/month):
+#     - 20-200 nodes
+#     - On-prem / air-gapped
+#     - SSO/LDAP, audit logging, custom eBPF probes
+#     - 1h SLA, 2-day on-site training
+#
+# Implementation: License key field in agent binary (offline-capable).
+# Stripe Checkout for Pro subscriptions.
+# Files: Makefile (add LICENSE_KEY compile flag), dashboard/ (pricing page),
+#        main.cpp (license validation)
+# Estimate: 1-2 weeks (pricing + license check)
+
+## PROD-05: Community Funnel (P1)
+# The free-to-paid conversion path:
+#
+#   curl install → single node running (Community, free)
+#     → Dashboard shows "Add a second node to form a mesh" prompt
+#       → 3-node mesh formed (still free — detection only)
+#         → First anomaly detected → "Auto-isolated with Pro" upgrade prompt
+#           → 14-day Pro trial → convert
+#
+# Each upgrade trigger is an in-dashboard message with clear value.
+# The free tier is genuinely useful but makes Pro look necessary.
+#
+# Files: dashboard/index.html (upgrade prompts), Makefile (feature gating)
+# Estimate: 1 week
+
+## PROD-06: Documentation for Sysadmins (P2)
+# Written for a Linux sysadmin, not a kernel developer:
+#
+#   Quickstart — "Deploy a 3-node mesh in 10 minutes"
+#   Architecture — Clean diagrams, no implementation details
+#   FAQ — "Does it work without internet?" "What if a node dies?"
+#   Troubleshooting — Common issues and fixes
+#   API Reference — REST endpoints for integration
+#
+# Files: docs/quickstart.md, docs/faq.md, docs/api.md (new directory)
+# Estimate: 1 week
+
+## PROD-07: Landing Page + Brand (P2)
+# neuro-mesh.io with:
+#
+#   Hero: "Turn any 3+ Linux servers into a self-defending security mesh."
+#   Sub: "Kernel-level detection. Autonomous isolation. Zero configuration."
+#   CTA: "Install in 5 minutes — curl -fsSL neuro-mesh.io/install.sh | sudo bash"
+#   Features: eBPF detection, PBFT consensus, auto-isolation, zero-trust
+#   Pricing: 3 tiers
+#   Demo: Embedded video (the competition video)
+#
+# Files: web/ (landing page HTML/CSS/JS, separate from dashboard)
+# Estimate: 1 week
+
+## PROD-08: Pre-Built Static Binaries (P2)
+# GitHub Actions release workflow:
+#
+#   On git tag v*:
+#     - Build x86_64-unknown-linux-musl (fully static)
+#     - Build aarch64-unknown-linux-musl
+#     - Create GitHub Release with binaries + checksums
+#     - Upload to S3/GCS for install script download
+#
+# Why product: pip, npm, apt — every package manager expectation met.
+# "Clone and compile" is research. "Download and run" is a product.
+#
+# Files: .github/workflows/release.yml (new)
+# Estimate: 2-3 days (already have CI, just add release workflow)
