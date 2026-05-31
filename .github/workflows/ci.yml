@@ -22,7 +22,11 @@ jobs:
         compiler: [clang, gcc]
         mode: [release, debug, sanitize]
     steps:
-      - uses: actions/checkout@v4
+            - uses: actions/checkout@v4
+ - name: Clone uWebSockets
+        run: |
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
 
       - name: Install system dependencies
         run: |
@@ -77,9 +81,12 @@ jobs:
     name: Docker Build & Integration
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
+            - uses: actions/checkout@v4
+      - name: Clone uWebSockets
+        run: |
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+ - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker images
@@ -126,9 +133,12 @@ jobs:
     name: Static Analysis
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
+            - uses: actions/checkout@v4
+      - name: Clone uWebSockets
+        run: |
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+ - name: Install dependencies
         run: |
           set -o pipefail
           sudo apt-get update -qq
@@ -173,9 +183,12 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Check for banned C/C++ functions
+            - uses: actions/checkout@v4
+      - name: Clone uWebSockets
+        run: |
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+ - name: Check for banned C/C++ functions
         run: |
           echo "=== Checking for unsafe C functions ==="
           FOUND=0
@@ -242,9 +255,12 @@ jobs:
     name: Fuzz Testing
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
+            - uses: actions/checkout@v4
+      - name: Clone uWebSockets
+        run: |
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+ - name: Install system dependencies
         run: |
           set -o pipefail
           sudo apt-get update -qq
@@ -281,9 +297,12 @@ jobs:
     name: Python Linting
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
+            - uses: actions/checkout@v4
+      - name: Clone uWebSockets
+        run: |
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+ - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -304,9 +323,12 @@ jobs:
     name: Shell Linting
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install shellcheck
+            - uses: actions/checkout@v4
+      - name: Clone uWebSockets
+        run: |
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+ - name: Install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
 
       - name: Run shellcheck
@@ -320,11 +342,15 @@ jobs:
     name: Dockerfile Linting
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Run hadolint
+            - uses: actions/checkout@v4
+      - name: Clone uWebSockets
+        run: |
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+ - name: Run hadolint
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
           failure-threshold: warning
           ignore: DL3008,DL3013,DL3018,DL3042,DL3047,DL3049,DL3059
+

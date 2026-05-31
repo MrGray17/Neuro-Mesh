@@ -337,5 +337,5 @@ lint:
 # Clean
 # ============================================================
 clean:
-	rm -rf $(OBJ_DIR) $(BIN_DIR) kernel/sensor.skel.h
+	rm -rf $(OBJ_DIR) $(BIN_DIR)
 	@echo "Clean complete"

@@ -60,11 +60,11 @@ mkdir -p "${LOG_DIR}"
 # ---------------------------------------------------------------------------
 say "Phase 1: Launching 3-node P2P mesh..."
 "${BIN_DIR}/neuro_agent" NODE_1 > "${LOG_DIR}/node1.log" 2>&1 &
-PID1=$!; STRESS_PIDS+=($PID1)
+PID1=$!; STRESS_PIDS+=("$PID1")
 "${BIN_DIR}/neuro_agent" NODE_2 > "${LOG_DIR}/node2.log" 2>&1 &
-PID2=$!; STRESS_PIDS+=($PID2)
+PID2=$!; STRESS_PIDS+=("$PID2")
 "${BIN_DIR}/neuro_agent" NODE_3 > "${LOG_DIR}/node3.log" 2>&1 &
-PID3=$!; STRESS_PIDS+=($PID3)
+PID3=$!; STRESS_PIDS+=("$PID3")
 sleep 4
 
 # Verify all nodes booted
@@ -108,7 +108,7 @@ pass "Pre-enforcement state clean — no existing rule for ${TARGET_IP}"
 # ---------------------------------------------------------------------------
 say "Phase 3: Launching event injection targeting ${TARGET_IP}..."
 "${BIN_DIR}/inject_event" --node NODE_1 --target "${TARGET_IP}" --event entropy_spike --verdict CRITICAL > "${LOG_DIR}/simulator.log" 2>&1 &
-SIM_PID=$!; STRESS_PIDS+=($SIM_PID)
+SIM_PID=$!; STRESS_PIDS+=("$SIM_PID")
 
 # Wait for consensus to propagate
 sleep 12
@@ -175,7 +175,7 @@ for id in NODE_1 NODE_2 NODE_3 NODE_SIMULATOR; do
 
     if grep -q "Zero-Trust Rule Applied" "${logfile}" 2>/dev/null; then
         RULE=$(grep "Zero-Trust Rule Applied" "${logfile}" | tail -1)
-        pass "${id}: $(echo ${RULE} | sed 's/.*\[ENFORCER\] //')"
+        pass "${id}: ${RULE#*\[ENFORCER\] }"
     fi
 done
 

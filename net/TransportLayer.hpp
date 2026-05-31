@@ -112,6 +112,11 @@ public:
     void set_on_peer_discovered(std::function<void(const PeerInfo&)> cb);
     void set_on_peer_lost(std::function<void(const std::string&)> cb);
 
+    // Fuzz harness accessor for libFuzzer
+    bool fuzz_handle_beacon(const char* data, size_t len, const sockaddr_in& src) {
+        return handle_incoming_beacon(data, len, src);
+    }
+
 private:
     void beacon_loop();
     void cleanup_stale_peers();

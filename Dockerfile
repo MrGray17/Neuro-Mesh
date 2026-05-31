@@ -37,7 +37,8 @@ COPY tools/train_iforest.py tools/train_iforest.py
 RUN python3 tools/train_iforest.py --output isolation_forest.onnx --samples 10000
 
 COPY . .
-RUN rm -rf bin obj kernel/sensor.skel.h && make -j$(nproc)
+RUN git clone --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+RUN rm -rf bin obj && make -j"$(nproc)"
 
 # ============================================================
 # Stage 2: Runtime (distroless-style minimal image)
