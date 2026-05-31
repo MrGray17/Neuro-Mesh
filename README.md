@@ -1,61 +1,39 @@
-# Neuro-Mesh
-
 <p align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-%2300599C?logo=c%2B%2B" alt="C++20">
   <img src="https://img.shields.io/badge/eBPF-kernel--native-%23ebc334?logo=linux" alt="eBPF">
   <img src="https://img.shields.io/badge/consensus-PBFT-%23934fff?logo=blockchaindotcom" alt="PBFT">
   <img src="https://img.shields.io/badge/crypto-Ed25519-%23000000?logo=letsencrypt" alt="Ed25519">
-  <img src="https://img.shields.io/badge/docker-ready-%232496ED?logo=docker" alt="Docker">
+  <img src="https://img.shields.io/badge/docker--ready-%232496ED?logo=docker" alt="Docker">
   <img src="https://github.com/MrGray17/Neuro-Mesh/actions/workflows/ci.yml/badge.svg" alt="CI">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
+<h1 align="center">NEURO-MESH</h1>
+
 <p align="center"><b>No master. No control plane. No single point of failure.</b></p>
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Neuro-Mesh Architecture" width="90%">
+  <img src="docs/architecture.svg" alt="Neuro-Mesh Architecture" width="85%">
 </p>
-
-**Neuro-Mesh** is a decentralized P2P security fabric. Every node runs eBPF kernel probes, detects anomalies with entropy-based inference, votes on threats via Ed25519-signed PBFT consensus over UDP, and enforces network isolation — all without a central coordinator. If one node falls, the mesh votes and moves on.
 
 ---
 
-## How It Works
+Neuro-Mesh is a decentralized P2P security fabric. Every node runs eBPF kernel probes,
+detects anomalies with entropy-based inference, votes on threats via Ed25519-signed
+PBFT consensus over UDP, and enforces network isolation — all without a central
+coordinator. If one node falls, the mesh votes and moves on.
 
 ```
-   KERNEL                    USERSPACE                         NETWORK
-
-  eBPF probes         InferenceEngine                   ┌──────────────────┐
-  ┌──────────┐        ┌──────────────┐                  │   P2P MESH       │
-  │ execve   │──┐     │              │     PBFT vote    │                  │
-  │ sendto   │  │     │  Entropy     │──────────────────▶│  PRE_PREPARE     │
-  │ connect  │  │────▶│  Scoring     │                   │  PREPARE         │
-  │ XDP      │  │     │              │◀──────────────────│  COMMIT          │
-  └──────────┘  │     └──────────────┘   votes from      │  EXECUTED        │
-                │                        peers           └────────┬─────────┘
-                │     ┌──────────────┐                           │
-                │     │              │     isolation order       │
-                └────▶│  NodeAgent   │◀──────────────────────────┘
-                      │              │
-                      └──────┬───────┘
-                             │
-                      ┌──────▼───────┐
-                      │ Policy       │
-                      │ Enforcer     │
-                      │              │
-                      │ eBPF map     │
-                      │ nftables     │
-                      │ iptables     │
-                      └──────────────┘
+    ┌──────────┐     eBPF probe     ┌────────────┐     PBFT vote     ┌────────────┐
+    │  KERNEL  │ ──────────────────► │  NODE AGENT│ ────────────────► │  MESH P2P  │
+    │  sensor  │    ring buffer     │  entropy AI│   Ed25519 sigs   │  UDP:9999  │
+    └──────────┘                    └────────────┘                   └─────┬──────┘
+                                                                          │
+                                     ┌────────────┐     iptables         │ quorum
+                                     │  ENFORCER  │ ◄────────────────────┘
+                                     │  isolation │     EXECUTED
+                                     └────────────┘
 ```
-
-1. **eBPF probes** hook `execve`, `sendto`, `connect`, and XDP — capturing kernel-level events in real time
-2. **InferenceEngine** scores event entropy; anomalies trigger a consensus round
-3. **PBFT consensus** runs over UDP broadcast — every node votes, every vote is Ed25519-signed
-4. **PolicyEnforcer** isolates guilty peers via a 3-tier cascade: eBPF map → nftables (IP + loopback interface rules) → iptables
-5. **Telemetry gossip** — each node unicasts its state to all peers; any node can serve the full mesh dashboard
-
-No leader election. No raft. The mesh *is* the authority.
 
 ---
 
@@ -63,199 +41,223 @@ No leader election. No raft. The mesh *is* the authority.
 
 ### Prerequisites
 
-| Dependency | Why |
-|------------|-----|
-| clang/LLVM 18+ | C++20 + eBPF backend |
-| libbpf, libelf, zlib | eBPF loader |
-| OpenSSL 3.x | Ed25519 signatures |
+```bash
+# Ubuntu / Debian
+sudo apt install clang-18 libbpf-dev libelf-dev zlib1g-dev \
+  libssl-dev bpftool nlohmann-json3-dev libseccomp-dev \
+  libonnxruntime-dev nftables iptables
+```
+
+| Dependency | Purpose |
+|------------|---------|
+| clang/LLVM 18+ | C++20 compiler + eBPF backend |
+| libbpf, libelf, zlib | eBPF loader and BPF object handling |
+| OpenSSL 3.x | Ed25519 signatures and TLS 1.3 mTLS |
 | bpftool | eBPF skeleton generation |
-| nlohmann-json3-dev | JSON parsing (MitigationEngine) |
+| nlohmann-json3-dev | JSON parsing for evidence and telemetry |
 | libseccomp-dev | Process sandboxing (seccomp BPF) |
-| libonnxruntime-dev | Anomaly detection (ONNX inference) |
-| nftables / iptables | Network isolation |
-| Docker (optional) | Containerized mesh |
+| libonnxruntime-dev | Anomaly detection via ONNX inference |
+| nftables / iptables | Network isolation enforcement |
+| Docker (optional) | Containerized multi-node mesh |
 
 ### Build
 
 ```bash
 make clean && make       # build neuro_agent
-make test                # build & run all tests
-make tools               # inject_event + test_crypto
+make tools               # build inject_event + test_crypto
 ```
 
-Four binaries land in `bin/`: `neuro_agent` (the node), `inject_event` (threat injector), plus 9 test binaries under `bin/test_*`.
+Binaries land in `bin/`: `neuro_agent` (the node), `inject_event` (threat injector),
+and test binaries.
 
-### Run
+### Run a Single Node
 
 ```bash
-# Single node
 ./bin/neuro_agent ALPHA
+```
 
-# 5-node mesh (background processes)
+### Launch a 5-Node Mesh
+
+```bash
+# Background processes
 for node in ALPHA BRAVO CHARLIE DELTA ECHO; do
-    ./bin/neuro_agent $node &>/tmp/neuro_$node.log &
+    NEURO_UNSAFE_NO_SANDBOX=1 ./bin/neuro_agent $node \
+      &>/tmp/neuro_$node.log &
 done
 
 # Or via tmux grid
 ./mesh_dashboard.sh
 
-# Serve the dashboard (static HTML + WebSocket)
-python3 -m http.server 8888 -d dashboard/ &
-# Dashboard: http://localhost:8888
-# Connects to ws://localhost:9000–9040 for live telemetry
+# Or Docker Compose
+docker compose up -d
 ```
 
-Each node binds a unique WebSocket port for its TelemetryBridge:
+### Dashboard
 
-| Node | WebSocket | IPC Socket |
-|------|-----------|------------|
+```bash
+# Serve the dashboard (static HTML + WebSocket)
+python3 -m http.server 8080 --directory dashboard/ &
+
+# Open: http://localhost:8080
+# The dashboard connects to ws://localhost:9000-9040 for live telemetry
+```
+
+Each node binds a unique WebSocket port:
+
+| Node | WS Port | IPC Socket |
+|------|---------|------------|
 | ALPHA | 9000 | `/tmp/neuro_mesh_ALPHA.sock` |
 | BRAVO | 9010 | `/tmp/neuro_mesh_BRAVO.sock` |
 | CHARLIE | 9020 | `/tmp/neuro_mesh_CHARLIE.sock` |
 | DELTA | 9030 | `/tmp/neuro_mesh_DELTA.sock` |
 | ECHO | 9040 | `/tmp/neuro_mesh_ECHO.sock` |
 
-A stateless WS proxy (`orchestration/ws_proxy.py`) on port 9001 tries all 5 backends with failover — useful when the browser can't reach host-network ports directly (Docker/WSL2). On native Linux the dashboard connects straight to node IPs.
-
-### Docker
-
-```bash
-docker compose up -d                         # 5 nodes + dashboard
-docker compose ps                            # verify all 5 running
-open http://localhost:8080                   # dashboard
-docker compose down                          # tear down
-
----
-
-## Testing
-
-### Unit Tests
-
-```bash
-make test   # Build & run all test binaries (gtest + standalone)
-```
-
-Nine test binaries cover every subsystem (79 tests):
-
-| Binary | What it tests |
-|--------|---------------|
-| `test_common` (gtest) | `UniqueFD`, `Result`, `Base64`, `StateJournal` — 21 tests |
-| `test_mitigation` (gtest) | `MitigationEngine` response orchestration — 9 tests |
-| `test_auditlogger` (gtest) | `AuditLogger` JSON emit, sanitization — 7 tests |
-| `test_pbft` | PBFT state machine — quorum, signature binding, dedup — 11 tests |
-| `test_enforcer` | PolicyEnforcer safe-list, IP validation, cascade — 9 tests |
-| `test_meshnode` | Discovery, PEX handshake, peer management — 9 tests |
-| `test_inference` | ONNX entropy scoring, decay — 5 tests |
-| `test_crypto` | Ed25519 sign/verify — 3 tests |
-| `test_stress` | Concurrent discovery (20 threads), 100K PBFT ops, adversarial inputs, PeerManager concurrency (8 threads), rate limiting — 5 tests |
-
-All tests must pass before any merge.
-
-### Integration Test
-
-Full end-to-end pipeline: Docker Compose boot → event injection → PBFT consensus → network isolation verification:
-
-```bash
-sudo ./tests/integration_test.sh
-```
-
-What it asserts:
-1. All 5 nodes + dashboard container start successfully
-2. Cross-node network reachability
-3. `inject_event` delivers a CRITICAL threat into the mesh
-4. PBFT consensus reaches COMMIT and triggers PolicyEnforcer
-5. `iptables -S` shows the target peer isolated
-6. Safe list prevents self-isolation (loopback still works)
-
-### CI Pipeline
-
-Every push to `main` triggers [GitHub Actions](.github/workflows/build.yml):
-- **Build**: Full `make clean && make` compilation
-- **Unit tests**: All 5 test binaries executed
-- **Lint**: `clang-tidy` on key source files
-- **Security audit**: grep for banned functions (`system()`, `gets()`, `strcpy`)
-- **Docker integration**: `docker compose up` → inject → verify isolation
+A stateless WS proxy (`orchestration/ws_proxy.py`) on port 9001 tries all 5
+backends with failover -- useful inside Docker or WSL2 where the browser can't
+reach host-network ports.
 
 ---
 
 ## Attack Simulation
 
-### Targeted injection — make one node accuse another
+### Targeted Injection -- Make One Node Accuse Another
 
 ```bash
 # Native (IPC socket)
-./bin/inject_event --node CHARLIE --target DELTA \
-  --event entropy_spike --verdict CRITICAL --tag mytest
+./bin/inject_event --node CHARLIE --target ALPHA \
+  --event entropy_spike --verdict CRITICAL
 
 # Docker
 docker exec neuro_charlie /app/inject_event \
-  --node CHARLIE --target ALPHA \
-  --event entropy_spike --verdict CRITICAL
+  --node CHARLIE --target DELTA \
+  --event entropy_spike --verdict CRITICAL --tag mytest
 ```
 
-The injector sends `CMD:INJECT` over the node's Unix socket. The node kicks off a PBFT round against the target. Evidence is base64-encoded in the VOTE wire format, then decoded on receipt — pipe chars inside JSON evidence cannot break the protocol.
+The injector sends `CMD:INJECT` over the node's Unix socket. The node kicks off a
+PBFT round. Evidence is base64-encoded in the wire format -- pipe characters inside
+JSON evidence cannot break the protocol.
 
-Watch the dashboard — consensus stages fire, votes flood the mesh, and the target gets isolated (on a real Linux host with CAP_NET_ADMIN).
-
-### Full-mesh chaos — trigger eBPF entropy on every node
+### Python Attack Runner -- Full MITRE Scenarios
 
 ```bash
-docker exec neuro_charlie python3 /app/traffic_generator.py \
-  --target 127.0.0.1 --duration 15 --threads 8
+# Run a random MITRE ATT&CK scenario
+python3 tools/attack_runner.py --random
+
+# Run a specific scenario
+python3 tools/attack_runner.py --scenario lateral_movement
+
+# Replay a recorded session
+python3 tools/attack_runner.py --replay recordings/session_2025.json
 ```
 
-Multi-threaded UDP flood + TCP port scan. Since all containers share `network_mode: host`, a flood to `127.0.0.1` lights up every node's eBPF sensors simultaneously.
+Four MITRE scenarios: `lateral_movement`, `ransomware`, `c2_beacon`, `supply_chain`.
+21 event types with IPC-socket injection and Docker-fallback.
+
+### LLM Copilot
+
+```bash
+# Mesh status summary
+python3 tools/llm_analyst.py status
+
+# Explain the last event
+python3 tools/llm_analyst.py explain
+
+# Interactive ask mode
+python3 tools/llm_analyst.py ask "What triggered the isolation of BRAVO?"
+```
+
+Uses OpenAI API if `OPENAI_API_KEY` is set, otherwise displays the raw prompt. Works offline.
+
+### Proof Chain Verification
+
+```bash
+# Verify cryptographic integrity of a proof file
+python3 tools/test_proof.py /tmp/neuro_proof_ALPHA.proof
+```
+
+Validates every link's hash chain and Merkle proof structure. Outputs `PASSED` or
+pinpoints which link is broken.
 
 ---
 
-## PBFT Consensus
+## Architecture
 
-Four stages, no leader:
+```
+eBPF kernel probe (kernel/sensor.bpf.c)
+  |
+  v
+NodeAgent (cell/) -- polls ring buffer, feeds InferenceEngine
+  |
+  v
+InferenceEngine (cell/) -- entropy analysis, ONNX anomaly detection
+  |
+  v
+MeshNode (consensus/) -- UDP broadcast PBFT voting, Ed25519 signatures
+  |
+  v
+PBFTConsensus (consensus/PBFT.hpp) -- multi-hop state machine (PRE_PREPARE/PREPARE/COMMIT/EXECUTED)
+  |
+  v
+PolicyEnforcer (enforcer/) -- iptables + eBPF blocklist + process suspension
+  |
+  v
+Telemetry gossip (TELEMETRY|node_id|json) to all peers via UDP:9998
+  |
+  v
+TelemetryBridge (telemetry/) -- uWebSockets child process on unique port
+  |
+  v
+Dashboard (dashboard/) -- vanilla JS, zero dependencies, Canvas + WebSocket
+```
 
-| Stage | What Happens |
-|-------|--------------|
-| `PRE_PREPARE` | Detector broadcasts target + evidence |
-| `PREPARE` | Peers verify & broadcast their vote |
-| `COMMIT` | Quorum reached — prepare to execute |
-| `EXECUTED` | MitigationEngine enforces isolation |
+### Directory Map
 
-Quorum = `2 * ((n - 1) / 3) + 1` ≥ `2f + 1` Byzantine fault tolerance. Every message binds `(stage | target | evidence)` under Ed25519 — no cross-stage replay, no spoofed votes. Self-votes go through the same verification path as external votes. Zero trust.
+```
+neuro_mesh/
+|-- kernel/              eBPF probes (sensor.bpf.c, neuro_bpf.c, vmlinux.h)
+|-- cell/                Node intelligence (NodeAgent, InferenceEngine)
+|-- consensus/           P2P mesh + PBFT consensus (MeshNode, PBFT, PeerManager)
+|-- crypto/              Ed25519 identity (CryptoCore, KeyManager, ProofChain)
+|-- enforcer/            Policy enforcement (PolicyEnforcer, MitigationEngine)
+|-- telemetry/           Structured logging + WS bridge (TelemetryBridge, AuditLogger)
+|-- net/                 TLS 1.3 transport layer (TransportLayer)
+|-- attacks/             Attack simulation engine (AttackSimulator)
+|-- orchestration/       Python tools (mesh_manager, ws_proxy, anomaly_classifier)
+|-- dashboard/           Vanilla JS dashboard (HTML/CSS/JS, zero dependencies)
+|-- tools/               CLI tools (inject_event, test_crypto, attack_runner, llm_analyst, test_proof)
+|-- main.cpp             Entry point
+|-- common/              Shared utilities (UniqueFD, Result<T,E>)
+|-- _archive_old/        Archived experiments
+```
 
-Evidence is base64-encoded in the wire protocol — pipe characters inside JSON payloads can't corrupt message parsing.
+### Key Design Decisions
 
-Self-vote EXECUTED attacks are blocked: the node refuses to execute isolation on itself when no external peers have voted.
-
-Rounds expire after 120s of inactivity to bound memory.
-
----
-
-## Enforcement
-
-PolicyEnforcer probes available backends at startup and picks the best:
-
-| Priority | Backend | Mechanism |
-|----------|---------|-----------|
-| 1 | eBPF map | `BPF_MAP_TYPE_HASH` blocklist in `/sys/fs/bpf/neuro_mesh/` |
-| 2 | nftables | Dedicated `neuro_mesh` chain |
-| 3 | iptables | `fork()` + `execv()` — no shell, no injection |
-
-MitigationEngine extends this with process termination (SIGSTOP → SIGKILL) and network isolation in detached threads.
-
-The TelemetryBridge runs as a sandboxed child process: `fork()` → `prctl(PR_SET_NO_NEW_PRIVS)` → `chroot("/var/empty")` → uid/gid drop to `nobody` → 47-syscall seccomp-BPF default-kill filter. On WSL2 or unprivileged containers, sandbox stages degrade gracefully (warn-and-continue) so the WebSocket bridge stays operational.
-
-**Safe list** — `add_safe_node()` prevents self-isolation. Loopback (`127.0.0.0/8`) is always refused.
+| Decision | Rationale |
+|----------|-----------|
+| PBFT over UDP broadcast to `127.0.0.1:9999` | All nodes on localhost; discovery is implicit via broadcast |
+| Ed25519 signatures on every PBFT message | Prevents spoofed votes; binds `(stage + target + evidence)` |
+| Safe list in PolicyEnforcer | Prevents node from isolating itself or critical infrastructure |
+| Zero-trust self-vote | Self-votes verified through same `verify_message()` path as external votes |
+| Timeout-based PBFT cleanup | Rounds evicted after 120s of inactivity |
+| fork+exec iptables | No shell injection; arguments passed as separate `argv[]` entries |
+| RAII file descriptors | `UniqueFD` wraps raw socket FDs |
+| Continuous eBPF drain | Ring buffer drained in tight `while(ring_buffer__poll()>0)` loop |
+| TOFU (Trust On First Use) | TLS cert pinned on first discovery; no CA infrastructure needed |
+| Binary-safe crypto | `std::string::data()`/`size()` used instead of `c_str()` |
+| POSIX file locking | `flock()` on shared JSON sink prevents corruption |
+| Proof chain (SHA-256 + Merkle tree) | Cryptographic audit trail of every consensus event |
 
 ---
 
 ## Security
 
-| Property | How |
-|----------|-----|
+| Property | Implementation |
+|----------|---------------|
 | Shell injection impossible | `fork()` + `execv()` with `argv[]`, never `system()` |
-| FD leak prevention | `close_range()` syscall in all fork children — no racy per-FD loops |
-| Binary-safe crypto | `std::string::data()` / `size()` — no null-byte truncation |
+| FD leak prevention | `close_range()` syscall in all fork children -- no racy per-FD loops |
+| Binary-safe crypto | `std::string::data()` / `size()` -- no null-byte truncation |
 | Cross-stage replay protection | Signatures bind `(stage + target + evidence)` |
-| Pipe-delimiter injection | Evidence base64-encoded in VOTE messages — pipe chars in JSON don't break protocol |
+| Pipe-delimiter injection | Evidence base64-encoded in VOTE messages -- pipe chars in JSON don't break protocol |
 | SSRF prevention | Webhook URL DNS-resolved and checked against 10 private IP ranges before curl fork |
 | Self-isolation prevention | Safe list + loopback guard + self-vote EXECUTED quorum check |
 | mTLS | TLS 1.3 with mutual certificate verification (CA path required), cert loaded from keystore |
@@ -263,69 +265,34 @@ The TelemetryBridge runs as a sandboxed child process: `fork()` → `prctl(PR_SE
 | Atomic telemetry | `flock()` on shared JSON sink |
 | RAII resources | `UniqueFD` wraps all socket FDs |
 | Crash recovery | `StateJournal` replays journal on boot |
-| nftables compatibility | Handle-based rule deletion (`nft --handle list` → parse → `nft delete rule ... handle <N>`) for v1.0.9+ |
-| TOCTOU race prevention | `has_peer()` guard + `try_increment_peers()` atomic check-and-increment for concurrent peer discovery |
+| nftables compatibility | Handle-based rule deletion (`nft --handle list` -> parse -> `nft delete rule ... handle <N>`) |
+| TOCTOU race prevention | `try_increment_peers()` atomic check-and-increment for concurrent peer discovery |
 | POSIX signal safety | `global_running` uses `volatile sig_atomic_t` instead of `std::atomic<bool>` |
 
 ---
 
-## Project Map
-
-```
-neuro_mesh/
-├── kernel/            eBPF probes (sensor.bpf.c, neuro_bpf.c XDP filter)
-├── cell/              NodeAgent + InferenceEngine (entropy scoring)
-├── consensus/         MeshNode (UDP P2P gossip) + PeerManager + PBFT state machine
-├── crypto/            Ed25519 keygen, sign, verify (OpenSSL EVP) + KeyManager (PKCS#11)
-├── enforcer/          PolicyEnforcer (3-tier block) + MitigationEngine (process kill)
-├── telemetry/         AuditLogger (UDP JSON) + TelemetryBridge (sandboxed WS child, seccomp)
-├── net/               TLS 1.3 transport layer (mTLS, cert loading, rate-limited accept)
-├── common/            StateJournal, UniqueFD, Result<T,E>, Base64
-├── attacks/           AttackSimulator (synthetic threat patterns)
-├── orchestration/     Python tools — ws_proxy, mesh_manager, anomaly_classifier
-├── tools/             inject_event, test_crypto, traffic_generator, benchmark_mesh,
-│                      attack_runner.py, llm_analyst.py, test_proof.py
-├── dashboard/         Vanilla JS dashboard (Canvas + WebSocket, zero dependencies)
-├── main.cpp           Entry point — wires all subsystems
-└── docker-compose.yml 5-node decentralized mesh
-```
-
----
-
-## MITRE D3FEND & NIST CSF
-
-Neuro-Mesh maps to the **D3FEND** countermeasure framework and the **NIST Cybersecurity Framework** across all five functions:
-
-| CSF Function | Neuro-Mesh Capability |
-|--------------|----------------------|
-| **IDENTIFY** | UDP peer discovery, StateJournal crash replay, `/proc/net/dev` baselining |
-| **PROTECT** | Ed25519 PBFT signing, safe-list, seccomp sandbox, fork+execv hardening |
-| **DETECT** | eBPF tracepoints (execve/sendto/connect), entropy scoring, traffic anomaly classifier |
-| **RESPOND** | PBFT BFT consensus → MitigationEngine isolation → 3-backend network block |
-| **RECOVER** | `CMD:RESET` releases all blocks, StateJournal provides full forensic audit trail |
-
-Full D3FEND technique mapping (D3-PT, D3-NTF, D3-IPI, D3-SEA, D3-PM, D3-IRA) with file:line references is in [CLAUDE.md](CLAUDE.md).
-
----
-
-## Platform Notes
-
-### WSL2 / Unprivileged Containers
+## WSL2 / Unprivileged Containers
 
 Running without full root capabilities (WSL2, restricted Docker containers) has known limitations:
 
-| Feature | Native Linux | WSL2 |
-|---------|-------------|------|
+| Feature | Native Linux | WSL2 / Unprivileged |
+|---------|-------------|---------------------|
 | eBPF sensors | Full kernel probes | Falls back to `/proc/net/dev` entropy |
 | iptables enforcement | Works | Requires `sudo` / `CAP_NET_ADMIN` |
 | TelemetryBridge sandbox | Full chroot + seccomp + uid drop | Sandbox degrades gracefully (warn-and-continue) |
-| PBFT consensus | Full | Full — no root needed for voting |
+| PBFT consensus | Full -- no root needed | Full -- no root needed |
 | Dashboard + telemetry | Full | Full |
 
-PBFT consensus, telemetry gossip, and the dashboard work identically on WSL2. Only kernel-level enforcement and eBPF probing are degraded.
+PBFT consensus, telemetry gossip, and the dashboard work identically on WSL2.
+Only kernel-level enforcement and eBPF probing are degraded.
+
+To bypass the TelemetryBridge sandbox on unprivileged systems:
+```bash
+NEURO_UNSAFE_NO_SANDBOX=1 ./bin/neuro_agent ALPHA
+```
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT -- see [LICENSE](LICENSE).
