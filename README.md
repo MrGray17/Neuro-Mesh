@@ -64,10 +64,11 @@ sudo apt install clang-18 libbpf-dev libelf-dev zlib1g-dev \
 
 ```bash
 make clean && make       # build neuro_agent
-make tools               # build inject_event + test_crypto
+make tools               # build all CLI tools + test binaries
 ```
 
 Binaries land in `bin/`: `neuro_agent` (the node), `inject_event` (threat injector),
+`attack_injector` (adversarial UDP flood), `register_attacker` (keypair gen + TOFU),
 and test binaries.
 
 ### Run a Single Node
@@ -153,6 +154,33 @@ python3 tools/attack_runner.py --replay recordings/session_2025.json
 Four MITRE scenarios: `lateral_movement`, `ransomware`, `c2_beacon`, `supply_chain`.
 21 event types with IPC-socket injection and Docker-fallback.
 
+### Adversarial Testing — Flood + Auto-Ban
+
+```bash
+# Generate attacker keypair and get NEURO_PEER_KEYS value
+./bin/register_attacker ZOMBIE
+# output: NEURO_PEER_KEYS=ZOMBIE:<base64_pem>
+
+# Boot a node with the pre-provisioned attacker key
+NEURO_PEER_KEYS="ZOMBIE:<base64_pem>" ./bin/neuro_agent ALPHA
+
+# Register the attacker via signed ANNOUNCE (TOFU bypass)
+./bin/register_attacker ZOMBIE
+
+# Flood with 800 forged VOTE messages over 4s
+./bin/attack_injector --attacker-id ZOMBIE --duration 4 --rate 50 --threads 4
+```
+
+After 100 consecutive signature failures, the node auto-bans the attacker.
+The heartbeat drains recent bans and initiates a cross-node `BAN_PEER` PBFT
+round, propagating the ban to all mesh peers via 2f+1 quorum.
+
+Full adversarial test suite:
+```bash
+sudo tests/integration/test_5node_adversarial.py      # 5-node UDP flood survival
+sudo tests/integration/test_autoban.py               # auto-ban + cross-node propagation
+```
+
 ### LLM Copilot
 
 ```bash
@@ -224,7 +252,7 @@ neuro_mesh/
 |-- attacks/             Attack simulation engine (AttackSimulator)
 |-- orchestration/       Python tools (mesh_manager, ws_proxy, anomaly_classifier)
 |-- dashboard/           Vanilla JS dashboard (HTML/CSS/JS, zero dependencies)
-|-- tools/               CLI tools (inject_event, test_crypto, attack_runner, llm_analyst, test_proof)
+|-- tools/               CLI tools (inject_event, attack_injector, register_attacker, attack_runner, llm_analyst)
 |-- main.cpp             Entry point
 |-- common/              Shared utilities (UniqueFD, Result<T,E>)
 |-- _archive_old/        Archived experiments
@@ -238,6 +266,7 @@ neuro_mesh/
 | Ed25519 signatures on every PBFT message | Prevents spoofed votes; binds `(stage + target + evidence)` |
 | Safe list in PolicyEnforcer | Prevents node from isolating itself or critical infrastructure |
 | Zero-trust self-vote | Self-votes verified through same `verify_message()` path as external votes |
+| BAN_PEER auto-ban + cross-node propagation | 100 consecutive signature failures → auto-ban → heartbeat drains → broadcasts `BAN_PEER` PBFT round via 2f+1 quorum |
 | Timeout-based PBFT cleanup | Rounds evicted after 120s of inactivity |
 | fork+exec iptables | No shell injection; arguments passed as separate `argv[]` entries |
 | RAII file descriptors | `UniqueFD` wraps raw socket FDs |
@@ -345,6 +374,15 @@ docker compose -f docker-compose.yml build --no-cache
 docker compose -f docker-compose.yml up -d
 docker compose -f docker-compose.yml down
 ```
+
+---
+
+## Documentation
+
+- [Known Limitations](docs/KNOWN_LIMITATIONS.md) — Design tradeoffs, operational caveats, and planned fixes (L1–L11)
+- [Threat Model](docs/THREAT_MODEL.md) — Adversary capabilities, trust boundaries, and attack surface
+- [ADR](docs/adr/) — Architecture Decision Records (PBFT, Ed25519 binding, TOFU, fork+exec, sandbox)
+- [Benchmarks](docs/benchmarks/) — PBFT latency measurements (n=3→1926μs, n=7→10981μs per round)
 
 ---
 
