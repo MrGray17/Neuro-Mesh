@@ -107,6 +107,8 @@ MeshNode::MeshNode(const std::string& node_id,
                 pem = base64_decode(pem).value_or(pem);
             }
             m_peer_manager.pre_provision_peer_key(peer_id, pem);
+            m_pbft.register_peer_key(peer_id, pem);
+            m_pbft.increment_peers();
             std::cout << "[INFO] Pre-provisioned peer key for " << peer_id << std::endl;
         }
     }
@@ -312,6 +314,10 @@ void MeshNode::discovery_beacon_loop() {
               << " (TCP PEX port " << m_tcp_port << ")" << std::endl;
 
     while (m_running) {
+        // Phase 3: drain auto-banned peers and propose cross-node BAN_PEER rounds.
+        for (const auto& banned_id : m_pbft.drain_recent_bans()) {
+            propose_ban(banned_id, "local_auto_ban");
+        }
         send_discovery_beacon();
         for (int i = 0; i < HEARTBEAT_SEC && m_running; ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -1058,13 +1064,18 @@ bool MeshNode::validate_message(const std::string& msg) const {
 // =============================================================================
 
 void MeshNode::process_message(const std::string& msg, const std::string& sender_ip) {
+    // ---- Rate limit FIRST ----
+    // Without this ordering, an adversarial peer sending invalid messages
+    // bypasses the rate limiter and floods stderr with "Invalid message
+    // rejected" logs at line rate (Belt-and-suspenders with the discovery
+    // socket which already rate-limits; the consensus port does not).
+    if (!m_peer_manager.check_rate_limit(sender_ip)) return;
+
     // ---- Input validation ----
     if (!validate_message(msg)) {
         std::cerr << "[DEFENSE] Invalid message rejected from " << sender_ip << std::endl;
         return;
     }
-
-    if (!m_peer_manager.check_rate_limit(sender_ip)) return;
 
     std::vector<std::string> tokens = split_string(msg, '|');
     if (tokens.size() < 3) return;
@@ -1167,7 +1178,7 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
         std::string evidence_decoded = base64_decode(tokens[6]).value_or("");
         if (evidence_decoded.empty() || evidence_decoded.size() > m_max_evidence_size) return;
         if (evidence_decoded[0] != '{') return;
-        if (stage_str != "PRE_PREPARE" && stage_str != "PREPARE" && stage_str != "COMMIT") return;
+        if (stage_str != "PRE_PREPARE" && stage_str != "PREPARE" && stage_str != "COMMIT" && stage_str != "BAN_PEER") return;
 
         uint64_t seq = 0;
         int view = 0;
@@ -1214,7 +1225,27 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
                 }
                 broadcast_pbft_stage("COMMIT", incoming_msg.target_id, incoming_msg.evidence_json);
             }
-            else if (next_stage == PBFTStage::EXECUTED) {
+             else if (next_stage == PBFTStage::EXECUTED) {
+                // Phase 3: handle BAN_PEER EXECUTED. Check evidence_json for
+                // the ban action marker — the round type is encoded in evidence,
+                // not the stage_str (which changes from PRE_PREPARE to PREPARE
+                // to COMMIT as the round progresses). Also accept legacy
+                // stage_str=="BAN_PEER" for backward compat with older nodes.
+                bool is_ban_round = incoming_msg.evidence_json.find("\"action\":\"ban\"") != std::string::npos;
+                if (is_ban_round || incoming_msg.stage_str == "BAN_PEER") {
+                    std::string ban_reason = incoming_msg.evidence_json;
+                    if (incoming_msg.stage_str == "BAN_PEER") {
+                        ban_reason = "cross_node_bft: " + incoming_msg.evidence_json;
+                    }
+                    m_pbft.ban_peer_local(incoming_msg.target_id, ban_reason);
+                    m_journal.append("BAN_PEER_EXECUTED",
+                                     incoming_msg.target_id,
+                                     incoming_msg.evidence_json);
+                    std::cout << "[BAN_PEER] Cross-node ban EXECUTED for "
+                              << incoming_msg.target_id << std::endl;
+                    return;
+                }
+
                 // Require at least one external peer for consensus.
                 // With n=1 (self only), quorum=1 and a single node could
                 // unilaterally isolate any target — bypassing BFT entirely.
@@ -1232,9 +1263,12 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
 
                 // Append to proof chain for verifiable audit trail
                 if (m_proof_chain) {
+                    std::string round_key = crypto::IdentityCore::sha256_hex(
+                        incoming_msg.evidence_json + "|" + incoming_msg.target_id);
+                    std::string commit_sig = m_pbft.get_round_commit_sig(round_key);
                     m_proof_chain->append(crypto::ProofEventType::CONSENSUS_REACHED,
                         incoming_msg.target_id, incoming_msg.evidence_json,
-                        m_last_proof_sig);
+                        commit_sig);
                     m_proof_chain->export_file();
                     // Push proof data to dashboard via telemetry bridge
                     if (m_bridge) {
@@ -1287,6 +1321,31 @@ void MeshNode::process_message(const std::string& msg, const std::string& sender
 // PBFT consensus helpers
 // =============================================================================
 
+bool MeshNode::propose_ban(const std::string& target_id, const std::string& reason) {
+    if (target_id.empty() || target_id == m_node_id) return false;
+
+    // Cross-node BFT ban propagation: broadcast a normal PRE_PREPARE PBFT
+    // round with evidence encoding the ban action. The round type is carried
+    // in the evidence_json (not the stage_str), so it survives PREPARE →
+    // COMMIT → EXECUTED transitions. At EXECUTED, nodes check evidence_json
+    // for "\"action\":\"ban\"" to distinguish ban rounds from isolation.
+    std::string ban_evidence = "{\"action\":\"ban\",\"reason\":\"" + reason + "\"}";
+    broadcast_pbft_stage("PRE_PREPARE", target_id, ban_evidence);
+
+    if (m_pbft.is_banned(target_id)) return true;  // already banned locally
+
+    m_pbft.ban_peer_local(target_id, reason);
+    m_journal.append("BAN_PEER_LOCAL", target_id, reason);
+    std::cout << "[BAN_PEER] Local ban proposed for " << target_id
+              << " reason=" << reason << std::endl;
+
+    return true;
+}
+
+bool MeshNode::is_banned(const std::string& peer_id) const {
+    return m_pbft.is_banned(peer_id);
+}
+
 void MeshNode::initiate_consensus(const std::string& target_id, const std::string& evidence_json) {
     if (m_peer_manager.is_on_cooldown(target_id)) {
         std::cerr << "[DEFENSE] Consensus rate-limited for " << target_id << std::endl;
@@ -1315,7 +1374,11 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
     msg.prev_message_hash = prev_hash;
 
     std::string signature = m_pbft.sign_message(msg);
-        m_last_proof_sig = signature;
+    if (stage_str == "COMMIT") {
+        m_pbft.set_round_commit_sig(
+            crypto::IdentityCore::sha256_hex(evidence_json + "|" + target_id),
+            signature);
+    }
     std::string encoded_sig = base64_encode(signature);
 
     std::string b64_evidence = base64_encode(evidence_json);
@@ -1357,8 +1420,22 @@ void MeshNode::broadcast_pbft_stage(const std::string& stage_str, const std::str
                     "\"mitre_attack\":[\"T1059\",\"T1021\",\"T1571\",\"T1090\"]}");
             }
             broadcast_pbft_stage("COMMIT", target_id, evidence_json);
-        } else if (next_stage == PBFTStage::EXECUTED) {
-            // Require at least one external peer for consensus.
+ } else if (next_stage == PBFTStage::EXECUTED) {
+        // Phase 3: handle BAN_PEER EXECUTED in self-vote path.
+        // Same evidence-based detection as process_message's handler.
+        bool is_ban_round = evidence_json.find("\"action\":\"ban\"") != std::string::npos;
+        if (is_ban_round || stage_str == "BAN_PEER") {
+            std::string ban_reason = evidence_json;
+            if (stage_str == "BAN_PEER") {
+                ban_reason = "cross_node_bft: " + evidence_json;
+            }
+            m_pbft.ban_peer_local(target_id, ban_reason);
+            m_journal.append("BAN_PEER_EXECUTED", target_id, evidence_json);
+            std::cout << "[BAN_PEER] Cross-node ban EXECUTED for "
+                      << target_id << std::endl;
+            return;
+        }
+        // Require at least one external peer for consensus.
             // With n=1 (self only), quorum=1 and a single node could
             // unilaterally isolate any target — bypassing BFT entirely.
             if (m_peer_manager.peer_count() < 1) {
@@ -1537,7 +1614,14 @@ void MeshNode::prune_stale_peers() {
                 m_transport->close(fd);
             }
             m_peer_manager.remove_peer(id);
-            m_pbft.prune_peer(id);
+            // Phase 3: do NOT prune pre-provisioned peers from PBFT.
+            // Pre-provisioned peers (set via NEURO_PEER_KEYS) are known
+            // attackers used for adversarial testing. Pruning them from
+            // PBFT's key registry breaks auto-ban detection, since
+            // verify_message silently drops messages from unregistered peers.
+            if (!m_peer_manager.is_peer_pre_provisioned(id)) {
+                m_pbft.prune_peer(id);
+            }
         }
         n_after = m_peer_manager.peer_count() + 1;
     }

@@ -63,6 +63,11 @@ private:
     float m_threshold;
     bool m_loaded;
     std::atomic<float> m_last_score{0.0f};
+
+    // Audit A1: throttle stderr logs from analyze() to prevent flooding
+    // when the ONNX model is broken or producing invalid output.
+    std::atomic<bool> m_run_failure_logged{false};
+    std::atomic<bool> m_output_failure_logged{false};
 };
 
 } // namespace neuro_mesh::ai

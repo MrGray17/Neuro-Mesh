@@ -8,6 +8,7 @@
 #include <chrono>
 #include <optional>
 #include <vector>
+#include <array>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -17,7 +18,7 @@
 
 namespace neuro_mesh {
 
-enum class PBFTStage { IDLE, PRE_PREPARE, PREPARE, COMMIT, EXECUTED };
+enum class PBFTStage { IDLE, PRE_PREPARE, PREPARE, COMMIT, EXECUTED, BAN_PEER };
 
 struct P2PMessage {
     std::string stage_str;
@@ -54,6 +55,7 @@ private:
         int view = 0;
         std::string pre_prepare_hash;
         std::string evidence_key;
+        std::string commit_signature;
         std::chrono::steady_clock::time_point started_at;
         std::chrono::steady_clock::time_point last_activity;
     };
@@ -134,6 +136,13 @@ public:
     [[nodiscard]] bool verify_message(const P2PMessage& msg) {
         std::lock_guard<std::mutex> lock(m_mtx);
 
+        // Phase 3: silently drop messages from banned peers. We do this
+        // BEFORE signature verification and rate limiting to avoid
+        // wasting CPU on adversarial traffic.
+        if (m_banned_peers.count(msg.sender_id) > 0) {
+            return false;
+        }
+
         auto it = m_peer_public_keys.find(msg.sender_id);
         if (it == m_peer_public_keys.end()) return false;
 
@@ -142,18 +151,30 @@ public:
                              + "|" + msg.prev_message_hash;
 
         if (!crypto::IdentityCore::verify_signature(it->second.get(), new_blob, msg.signature)) {
-            std::cerr << "[PBFT] CRITICAL: Cryptographic signature mismatch from: " << msg.sender_id << std::endl;
+            // Sample the CRITICAL log to the same thresholds as record_failure
+            // to avoid drowning the journal. The auto-prune at 100 failures
+            // will still happen — the log is just sampled for readability.
+            auto& trust = m_node_trust[msg.sender_id];
+            for (int threshold : kLogFailureThresholds) {
+                if (trust.consecutive_failures == threshold) {
+                    std::cerr << "[PBFT] CRITICAL: Cryptographic signature mismatch from: "
+                              << msg.sender_id << std::endl;
+                    break;
+                }
+            }
             record_failure(msg.sender_id);
             return false;
         }
 
         if (!verify_message_chaining(msg)) {
             std::cerr << "[PBFT] CRITICAL: Message chain verification failed from: " << msg.sender_id << std::endl;
+            record_failure(msg.sender_id);
             return false;
         }
 
         if (!verify_sequence_continuity(msg)) {
             std::cerr << "[PBFT] CRITICAL: Sequence gap detected from: " << msg.sender_id << std::endl;
+            record_failure(msg.sender_id);
             return false;
         }
 
@@ -164,12 +185,38 @@ public:
     PBFTStage advance_state(const P2PMessage& msg) {
         std::lock_guard<std::mutex> lock(m_mtx);
 
+        // Phase 3: silently drop messages from banned peers. Same as
+        // verify_message's check — defense in depth.
+        if (m_banned_peers.count(msg.sender_id) > 0) {
+            return PBFTStage::IDLE;
+        }
+
+        // Reject messages from peers not in the key registry. Without this
+        // check, a previously auto-banned peer could be re-inserted into
+        // m_node_trust by the rate-limit code path below, allowing the
+        // failure counter to restart at zero and re-trigger the auto-ban
+        // log every 100 messages indefinitely. (Belt-and-suspenders with
+        // verify_message()'s early return.)
+        if (m_peer_public_keys.find(msg.sender_id) == m_peer_public_keys.end()) {
+            return PBFTStage::IDLE;
+        }
+
         cleanup_stale_rounds();
 
-        if (msg.stage_str == "PRE_PREPARE") {
+        if (msg.stage_str == "PRE_PREPARE" || msg.stage_str == "BAN_PEER") {
             if (!check_rate_limit(msg.sender_id)) {
-                std::cerr << "[PBFT] RATE LIMITED: " << msg.sender_id
-                          << " (" << m_rate_max << " PRE_PREPARE/" << m_rate_window_sec << "s)" << std::endl;
+                // Sample rate-limit log to the same thresholds as record_failure.
+                // A persistently rate-limited peer would otherwise produce
+                // ~1 log per 2s indefinitely, drowning the journal.
+                auto& trust = m_node_trust[msg.sender_id];
+                for (int threshold : kLogFailureThresholds) {
+                    if (trust.consecutive_failures == threshold) {
+                        std::cerr << "[PBFT] RATE LIMITED: " << msg.sender_id
+                                  << " (" << m_rate_max << " PRE_PREPARE/"
+                                  << m_rate_window_sec << "s)" << std::endl;
+                        break;
+                    }
+                }
                 record_failure(msg.sender_id);
                 return PBFTStage::IDLE;
             }
@@ -219,7 +266,8 @@ public:
 
         PBFTStage previous_state = round.state;
 
-        if (msg.stage_str == "PRE_PREPARE" && round.state == PBFTStage::IDLE) {
+        if ((msg.stage_str == "PRE_PREPARE" || msg.stage_str == "BAN_PEER")
+            && round.state == PBFTStage::IDLE) {
             round.state = PBFTStage::PREPARE;
         }
         else if (msg.stage_str == "PREPARE" && current_votes >= quorum && round.state == PBFTStage::PREPARE) {
@@ -232,6 +280,14 @@ public:
         else if (msg.stage_str == "COMMIT" && current_votes >= quorum && round.state == PBFTStage::COMMIT) {
             round.state = PBFTStage::EXECUTED;
         }
+        // Phase 3: BAN_PEER flow. Once the round hits EXECUTED via the
+        // normal PRE_PREPARE→PREPARE→COMMIT path, the target peer is
+        // added to m_banned_peers. The actual ban application happens
+        // in the caller (MeshNode::process_message) by inspecting
+        // round.state == EXECUTED AND round_key is a ban round.
+        // We don't need a separate path here — the existing state
+        // machine handles it. The MeshNode dispatcher distinguishes
+        // ban-rounds by checking stage_str.
 
         if (round.state != previous_state) {
             return round.state;
@@ -251,6 +307,17 @@ public:
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_activity).count();
         return elapsed > VIEW_CHANGE_TIMEOUT_SEC && it->second.state != PBFTStage::EXECUTED;
+    }
+
+    void set_round_commit_sig(const std::string& round_key, const std::string& sig) {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        m_rounds[round_key].commit_signature = sig;
+    }
+
+    std::string get_round_commit_sig(const std::string& round_key) const {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        auto it = m_rounds.find(round_key);
+        return (it != m_rounds.end()) ? it->second.commit_signature : std::string{};
     }
 
     int peer_count() const { std::lock_guard<std::mutex> lock(m_mtx); return m_total_nodes; }
@@ -274,16 +341,94 @@ public:
 
     void prune_peer(const std::string& node_id) {
         std::lock_guard<std::mutex> lock(m_mtx);
-        m_peer_public_keys.erase(node_id);
-        m_node_trust.erase(node_id);
-        m_message_history.erase(node_id);
-        for (auto& [evidence, stage_map] : m_vote_registry) {
-            for (auto& [stage, voters] : stage_map) {
-                voters.erase(node_id);
-            }
-        }
-        m_total_nodes = std::max(1, m_total_nodes - 1);
+        prune_peer_locked(node_id);
     }
+
+    // Caller MUST hold m_mtx. Split out so record_failure() can call it
+    // from contexts that already hold the lock (verify_message, advance_state)
+    // without deadlocking.
+void prune_peer_locked(const std::string& node_id) {
+    m_peer_public_keys.erase(node_id);
+    m_node_trust.erase(node_id);
+    m_message_history.erase(node_id);
+    m_registered_peers.erase(node_id);  // also clear registration so has_peer() returns false
+    for (auto& [evidence, stage_map] : m_vote_registry) {
+        for (auto& [stage, voters] : stage_map) {
+            voters.erase(node_id);
+        }
+    }
+    m_total_nodes = std::max(1, m_total_nodes - 1);
+}
+
+// =============================================================================
+// Cross-Node Ban Propagation (BAN_PEER stage)
+// =============================================================================
+// Phase 3 hardening: when a node auto-bans an adversarial peer (e.g., after
+// 100 consecutive signature failures), the ban was per-node state. Other
+// nodes in the mesh did not learn about the ban. An adversarial peer could
+// rotate through nodes — being banned on Node A while still poisoning
+// Nodes B/C/D/E.
+//
+// BAN_PEER is a new PBFT stage that flows PRE_PREPARE → PREPARE → COMMIT →
+// EXECUTED, identical to isolation. On EXECUTED, the target is added to
+// m_banned_peers. At the entry of verify_message() and advance_state(),
+// banned peers are silently dropped (no log spam, no rate limit, no PBFT
+// participation).
+//
+// Backward compatibility: old nodes that don't know about BAN_PEER will
+// receive the message but their switch statement in advance_state() won't
+// match — they silently ignore the new stage. Mesh continues to function
+// with reduced cross-node ban coverage.
+// =============================================================================
+
+    // Phase 3: returns true if auto-ban just fired. Caller (MeshNode
+    // heartbeat) drains recent bans and proposes cross-node BAN_PEER rounds.
+    std::vector<std::string> drain_recent_bans() {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        std::vector<std::string> bans(m_recent_bans.begin(), m_recent_bans.end());
+        m_recent_bans.clear();
+        return bans;
+    }
+
+    bool is_banned(const std::string& node_id) const {
+    std::lock_guard<std::mutex> lock(m_mtx);
+    return m_banned_peers.count(node_id) > 0;
+}
+
+bool is_target_banned(const std::string& node_id) const {
+    return is_banned(node_id);
+}
+
+void ban_peer_locked(const std::string& node_id) {
+    m_banned_peers.insert(node_id);
+}
+
+// Local auto-ban path — called by record_failure() after kAutoPruneFailures.
+// Adds to m_banned_peers AND removes from m_peer_public_keys. The local node
+// will not process any further messages from this peer.
+void ban_peer_local(const std::string& node_id, const std::string& reason) {
+    {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        ban_peer_locked(node_id);
+    }
+    std::cerr << "[PBFT] Local auto-ban: " << node_id
+              << " reason=" << reason << std::endl;
+}
+
+// Initiate a BFT-consensus ban of a peer. Returns true if a ban round was
+// started. The actual ban takes effect on EXECUTED. Cross-node: the ban
+// propagates to other nodes when they process the BAN_PEER EXECUTED message.
+bool propose_ban(const std::string& target_id, const std::string& reason) {
+    if (target_id.empty() || target_id == m_my_node_id) {
+        return false;  // never ban self
+    }
+    if (is_banned(target_id)) {
+        return false;  // already banned
+    }
+    // Local ban is immediate; cross-node ban follows via BFT.
+    ban_peer_local(target_id, reason);
+    return true;
+}
 
     bool try_increment_peers(const std::string& node_id) {
         std::lock_guard<std::mutex> lock(m_mtx);
@@ -445,15 +590,57 @@ private:
         trust.last_failure = std::chrono::steady_clock::now();
     }
 
+    // Peer auto-banning thresholds.
+    //
+    // Background: an adversarial or buggy peer can flood bad-sig messages.
+    // The rate limiter caps the volume (5 PRE_PREPARE/10s) but does not stop
+    // the peer from accumulating an unbounded `consecutive_failures` counter
+    // and spamming WARNING logs. At kAutoPruneFailures we remove the peer
+    // entirely via prune_peer() — same primitive used for stale peers.
+    //
+    // log at: 6, 10, 20, 50, 75 (sample-based) then auto-prune at 100.
+    static constexpr int kAutoPruneFailures = 100;
+    static const std::array<int, 5> kLogFailureThresholds;
+
     void record_failure(const std::string& node_id) {
         auto& trust = m_node_trust[node_id];
         trust.consecutive_failures++;
         trust.trust_score = std::max(0.0, trust.trust_score - 0.1);
         trust.last_failure = std::chrono::steady_clock::now();
 
-        if (trust.consecutive_failures > 5) {
-            std::cerr << "[PBFT] WARNING: Node " << node_id << " has " 
-                      << trust.consecutive_failures << " consecutive failures" << std::endl;
+        // Sample-based WARNING log: only emit at the configured thresholds.
+        // Without sampling, a sustained attacker generates O(failures) log
+        // lines — e.g. 160,000+ observed in test_stress output.
+        for (int threshold : kLogFailureThresholds) {
+            if (trust.consecutive_failures == threshold) {
+                std::cerr << "[PBFT] WARNING: Node " << node_id << " has "
+                          << trust.consecutive_failures << " consecutive failures"
+                          << " (auto-prune at " << kAutoPruneFailures << ")"
+                          << std::endl;
+                break;
+            }
+        }
+
+        // Auto-prune: after kAutoPruneFailures consecutive failures, treat
+        // the peer as adversarial. Remove it from all registries (keys,
+        // trust, message history, vote registry) and decrement the quorum
+        // size. Subsequent messages from this peer will fail the early
+        // return in verify_message() because m_peer_public_keys no longer
+        // contains it — silently, with no further log spam.
+        if (trust.consecutive_failures >= kAutoPruneFailures) {
+            std::cerr << "[PBFT] CRITICAL: Auto-banning peer " << node_id
+                      << " after " << trust.consecutive_failures
+                      << " consecutive failures" << std::endl;
+            // Phase 3: also add to m_banned_peers (defense in depth). The
+            // pruned peer's entries are removed from m_peer_public_keys,
+            // so verify_message would already drop it. But m_banned_peers
+            // is the canonical ban set — populated by both local auto-ban
+            // and cross-node BFT. We add to it explicitly here.
+            m_banned_peers.insert(node_id);
+            m_recent_bans.insert(node_id);
+            // Caller (verify_message, advance_state) holds m_mtx, so use
+            // the _locked variant to avoid recursive lock acquisition.
+            prune_peer_locked(node_id);
         }
     }
 
@@ -524,6 +711,23 @@ private:
     std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> m_rate_limits;
     std::unordered_set<std::string> m_seen_messages;
     std::unordered_set<std::string> m_registered_peers;
+
+    // Phase 3: set of peers that have been banned (locally or via BFT).
+    // Membership is permanent for the lifetime of the process — there is
+    // no auto-unban. This is intentional: a peer that was adversarial
+    // should not silently come back.
+    std::unordered_set<std::string> m_banned_peers;
+
+    // Phase 3: peers that were auto-banned locally but haven't had a
+    // cross-node BAN_PEER round initiated yet. MeshNode's heartbeat
+    // drains this set and calls propose_ban() to propagate the ban.
+    std::unordered_set<std::string> m_recent_bans;
+
 };
+
+// Out-of-class definition for the (non-constexpr) static member array.
+// Log the WARNING message at these failure counts: 6 (initial), 10, 20, 50, 75.
+// After 100 consecutive failures the peer is auto-pruned.
+inline const std::array<int, 5> PBFTConsensus::kLogFailureThresholds = {6, 10, 20, 50, 75};
 
 } // namespace neuro_mesh

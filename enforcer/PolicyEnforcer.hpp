@@ -51,13 +51,23 @@ public:
     void add_safe_node(const std::string& node_id);
 
     // IP validation utilities (stateless, safe for external use)
-    static bool is_loopback(const std::string& ip);
-    static bool is_loopback_ipv6(const std::string& ip);
+    static bool is_valid_ip(const std::string& ip);
     static bool is_valid_ipv4(const std::string& ip);
     static bool is_valid_ipv6(const std::string& ip);
-    static bool is_valid_ip(const std::string& ip);
+    static bool is_loopback(const std::string& ip);
+    static bool is_loopback_ipv6(const std::string& ip);
     bool is_safe(const std::string& target_id) const;
+    // Caller MUST hold m_mtx. Used internally by isolate_target() to avoid
+    // recursive lock acquisition on a non-recursive shared_mutex.
+    bool is_safe_locked(const std::string& target_id) const;
     bool is_ip_safe(const std::string& ip);
+
+    // Fork+exec helpers (public so unit tests can verify the output cap and
+    // error handling on adversarial inputs — see tools/test_enforcer.cpp).
+    // Use these in preference to direct fork()/execv() so all child processes
+    // get the same FD-leak protection and output cap.
+    static bool fork_exec_wait(const char* path, const char* const* argv);
+    static std::pair<bool, std::string> fork_exec_capture(const char* path, const char* const* argv);
 
 private:
     // Returns process-wide available backends (probed once, static — immune to instance corruption)
@@ -86,10 +96,6 @@ private:
     static bool apply_iptables_drop(const std::string& ip);
     static bool remove_iptables_drop(const std::string& ip);
 
-    // Fork+exec helpers
-    static bool fork_exec_wait(const char* path, const char* const* argv);
-    static std::pair<bool, std::string> fork_exec_capture(const char* path, const char* const* argv);
-
     // nftables handle-based deletion helpers (v1.0.9 requires handles)
     static std::string list_nftables_rules();
     static std::vector<int> find_nft_handles(const std::string& list_output,
@@ -97,7 +103,7 @@ private:
     static bool delete_nft_handle(int handle);
     static bool remove_nftables_rules_matching(const std::string& match_substr);
 
-    std::mutex m_mtx;
+    mutable std::shared_mutex m_mtx;
     std::string m_node_id;
     std::set<std::string> m_isolated_nodes;
     std::set<std::string> m_safe_list;

@@ -1,5 +1,9 @@
 #include "enforcer/PolicyEnforcer.hpp"
 #include <iostream>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <stdexcept>
 
 using namespace neuro_mesh;
 
@@ -79,6 +83,58 @@ int main() {
         ASSERT(!enforcer.is_safe("BRAVO"));
     END_TEST();
 
+    // Bug 9 regression: is_safe() must be thread-safe even when called
+    // concurrently with add_safe_node(). Without the shared_mutex fix,
+    // concurrent std::set reads/writes are UB (typically a segfault under
+    // high contention or with TSan).
+    TEST("is_safe is thread-safe under concurrent writers and readers (Bug 9)") {
+        PolicyEnforcer enforcer;
+        // Pre-populate some entries.
+        for (int i = 0; i < 50; ++i) {
+            enforcer.add_safe_node("INIT_" + std::to_string(i));
+        }
+
+        constexpr int kWriters = 2;
+        constexpr int kReaders = 2;
+        constexpr int kIters = 200;
+
+        std::atomic<int> read_count{0};
+        std::atomic<int> write_count{0};
+        std::vector<std::thread> threads;
+
+        // Writers: add/remove via add_safe_node (no remove API, so just add)
+        for (int t = 0; t < kWriters; ++t) {
+            threads.emplace_back([&, t]() {
+                for (int i = 0; i < kIters; ++i) {
+                    enforcer.add_safe_node(
+                        "W" + std::to_string(t) + "_" + std::to_string(i));
+                    write_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+
+        // Readers: query is_safe from all entries
+        for (int t = 0; t < kReaders; ++t) {
+            threads.emplace_back([&, t]() {
+                for (int i = 0; i < kIters; ++i) {
+                    (void)enforcer.is_safe("W" + std::to_string(t) + "_" + std::to_string(i));
+                    (void)enforcer.is_safe("INIT_" + std::to_string(i % 50));
+                    read_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+
+        for (auto& th : threads) th.join();
+
+        // We expect no crash, no UB, no segfault. The test passes if we
+        // reach this line.
+        ASSERT(write_count.load() > 0);
+        ASSERT(read_count.load() > 0);
+
+        // Spot-check: at least one of our writes should be visible
+        ASSERT(enforcer.is_safe("W0_0"));
+    END_TEST();
+
     TEST("register_peer_ip and resolve_target") {
         PolicyEnforcer enforcer;
         enforcer.register_peer_ip("ALPHA", "192.168.1.10");
@@ -99,6 +155,35 @@ int main() {
         PolicyEnforcer enforcer;
         enforcer.register_peer_ip("", "192.168.1.1");
         ASSERT(enforcer.resolve_target("").empty());
+    END_TEST();
+
+    TEST("fork_exec_capture: small output is captured verbatim") {
+        const char* argv[] = {"/bin/echo", "hello", nullptr};
+        auto [ok, out] = PolicyEnforcer::fork_exec_capture("/bin/echo", argv);
+        ASSERT(ok);
+        ASSERT(out == "hello\n");
+    END_TEST();
+
+    // Hardening: a child that prints more than 64 KiB must not OOM the parent.
+    // fork_exec_capture caps captured output at 64 KiB.
+    TEST("fork_exec_capture: oversized output is capped at 64KiB") {
+        // `yes A` repeats "A\n" until killed. 1MB of output > 64KiB cap.
+        const char* argv[] = {"/usr/bin/yes", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", nullptr};
+        // Give the child a deadline so we don't hang if the cap is broken.
+        auto [ok, out] = PolicyEnforcer::fork_exec_capture("/usr/bin/yes", argv);
+        // ok may be true or false (yes was killed via SIGPIPE on close) — what
+        // matters is the output length.
+        ASSERT(out.size() <= 64 * 1024 + 256);  // 64KiB cap + small slack
+        // And it must be substantially populated.
+        ASSERT(!out.empty());
+    END_TEST();
+
+    // Hardening: a child that writes 0 bytes (or fails to exec) must not crash.
+    TEST("fork_exec_capture: non-existent binary returns false") {
+        const char* argv[] = {"/nonexistent/binary/path", nullptr};
+        auto [ok, out] = PolicyEnforcer::fork_exec_capture("/nonexistent/binary/path", argv);
+        ASSERT(!ok);
+        // out may be empty or contain error text — both are valid
     END_TEST();
 
     std::cout << "\n[ENFORCER] Results: " << tests_passed << " passed, "

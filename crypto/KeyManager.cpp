@@ -389,10 +389,6 @@ std::unique_ptr<KeyPair> KeyManager::generate_key(KeyType type, const std::strin
 bool KeyManager::store_key(const KeyPair& key_pair) {
     if (m_keystore_path.empty()) return false;
 
-    std::string key_file = m_keystore_path + "/" + key_pair.key_id + ".pem";
-    std::ofstream out(key_file, std::ios::binary);
-    if (!out) return false;
-
     if (!key_pair.private_key) return false;
 
     BIO* bio = BIO_new(BIO_s_mem());
@@ -407,11 +403,27 @@ bool KeyManager::store_key(const KeyPair& key_pair) {
     long len = BIO_get_mem_data(bio, &data);
     std::string blob(data, len);
     std::string encrypted = encrypt_blob(blob);
-    out.write(encrypted.data(), encrypted.size());
-    out.close();
     BIO_free(bio);
 
-    ::chmod(key_file.c_str(), 0600);
+    // Atomic write: serialize to a temp file with 0600, then rename. This
+    // prevents torn writes (a SIGKILL mid-write would leave an empty or
+    // truncated key file, which would be loaded as a valid (but wrong) key).
+    std::string key_file = m_keystore_path + "/" + key_pair.key_id + ".pem";
+    std::string tmp_file = key_file + ".tmp." + std::to_string(::getpid());
+    std::ofstream out(tmp_file, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(encrypted.data(), encrypted.size());
+    out.flush();
+    if (!out.good()) {
+        ::unlink(tmp_file.c_str());
+        return false;
+    }
+    out.close();
+    ::chmod(tmp_file.c_str(), 0600);
+    if (::rename(tmp_file.c_str(), key_file.c_str()) != 0) {
+        ::unlink(tmp_file.c_str());
+        return false;
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_cached_key_mtx);
@@ -586,10 +598,6 @@ std::unique_ptr<Certificate> KeyManager::load_certificate(const std::string& cer
 bool KeyManager::store_certificate(const Certificate& cert) {
     if (m_cert_store_path.empty()) return false;
 
-    std::string cert_file = m_cert_store_path + "/" + cert.key_id + ".crt";
-    std::ofstream out(cert_file, std::ios::binary);
-    if (!out) return false;
-
     BIO* bio = BIO_new(BIO_s_mem());
     if (!bio) return false;
 
@@ -601,9 +609,24 @@ bool KeyManager::store_certificate(const Certificate& cert) {
     long len = BIO_get_mem_data(bio, &data);
     std::string blob(data, len);
     std::string encrypted = encrypt_blob(blob);
-    out.write(encrypted.data(), encrypted.size());
     BIO_free(bio);
+
+    // Atomic write: temp file + rename to prevent torn writes.
+    std::string cert_file = m_cert_store_path + "/" + cert.key_id + ".crt";
+    std::string tmp_file  = cert_file + ".tmp." + std::to_string(::getpid());
+    std::ofstream out(tmp_file, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(encrypted.data(), encrypted.size());
+    out.flush();
+    if (!out.good()) {
+        ::unlink(tmp_file.c_str());
+        return false;
+    }
     out.close();
+    if (::rename(tmp_file.c_str(), cert_file.c_str()) != 0) {
+        ::unlink(tmp_file.c_str());
+        return false;
+    }
 
     return true;
 }
@@ -671,7 +694,8 @@ bool SoftHSMBackend::generate_key(KeyType type, const std::string& key_id, Uniqu
 
     if (!m_slot.empty() && priv_key) {
         std::string path = m_slot + "/" + key_id + ".pem";
-        std::ofstream out(path, std::ios::binary);
+        std::string tmp = path + ".tmp." + std::to_string(::getpid());
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (out) {
             BIO* bio = BIO_new(BIO_s_mem());
             PEM_write_bio_PrivateKey(bio, priv_key.get(), nullptr, nullptr, 0, nullptr, nullptr);
@@ -679,8 +703,15 @@ bool SoftHSMBackend::generate_key(KeyType type, const std::string& key_id, Uniqu
             long len = BIO_get_mem_data(bio, &data);
             out.write(data, len);
             BIO_free(bio);
+            out.flush();
             out.close();
-            ::chmod(path.c_str(), 0600);
+            if (::chmod(tmp.c_str(), 0600) == 0) {
+                if (::rename(tmp.c_str(), path.c_str()) != 0) {
+                    ::unlink(tmp.c_str());
+                }
+            } else {
+                ::unlink(tmp.c_str());
+            }
         }
     }
 

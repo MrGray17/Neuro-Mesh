@@ -38,6 +38,15 @@ public:
     void stop();
     void initiate_consensus(const std::string& target_id, const std::string& evidence_json);
 
+    // Phase 3: propose banning a peer via BFT consensus. The local node
+    // immediately adds the target to its ban set; cross-node nodes will
+    // learn about the ban when the BAN_PEER EXECUTED message propagates.
+    // Returns false if target is self, empty, or already banned.
+    bool propose_ban(const std::string& target_id, const std::string& reason);
+
+    // True if the given peer_id is in this node's local ban set.
+    bool is_banned(const std::string& peer_id) const;
+
     void gossip_telemetry(const std::string& telemetry_json);
     void gossip_event_json(const std::string& json);
     std::string get_mesh_telemetry() const;
@@ -99,7 +108,6 @@ private:
     std::string m_public_key_pem;
     std::string m_public_key_b64;
     PBFTConsensus m_pbft;
-    std::string m_last_proof_sig;
     std::atomic<uint64_t> m_sequence_number{0};
 
     // === TLS infrastructure ===

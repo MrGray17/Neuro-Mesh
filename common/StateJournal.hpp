@@ -141,7 +141,15 @@ public:
         ::fsync(m_fd);
 
         if (written < 0) {
-            std::cerr << "[JOURNAL] Write failed: " << m_path << std::endl;
+            // Audit A3: log only on first write failure to prevent stderr
+            // flooding when the disk is full or the journal is unavailable.
+            // The operator can monitor disk health out-of-band.
+            if (!m_write_failure_logged.exchange(true)) {
+                std::cerr << "[JOURNAL] Write failed: " << m_path
+                          << " (further errors suppressed)" << std::endl;
+            }
+        } else {
+            m_write_failure_logged.store(false);
         }
 
         return seq;
@@ -170,6 +178,9 @@ private:
     std::atomic<uint64_t> m_seq;
     std::mutex m_write_mtx;
     int m_fd;
+    // Audit A3: gate the "write failed" stderr log so a full disk or
+    // closed fd doesn't generate one log line per append() call.
+    std::atomic<bool> m_write_failure_logged{false};
 };
 
 } // namespace neuro_mesh

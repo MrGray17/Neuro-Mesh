@@ -160,10 +160,17 @@ std::pair<bool, std::string> PolicyEnforcer::fork_exec_capture(const char* path,
     }
 
     close(pipefd[1]);
+    // Cap captured output at 64 KiB. A misbehaving child (or a malicious
+    // /sbin/iptables replacement) could otherwise OOM the parent.
+    constexpr size_t kMaxCaptureBytes = 64 * 1024;
     std::string stdout_output;
     char buf[256];
     ssize_t n;
     while ((n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
+        if (stdout_output.size() + static_cast<size_t>(n) > kMaxCaptureBytes) {
+            stdout_output.append(buf, kMaxCaptureBytes - stdout_output.size());
+            break;
+        }
         buf[n] = '\0';
         stdout_output += buf;
     }
@@ -232,6 +239,22 @@ bool PolicyEnforcer::is_safe(const std::string& target_id) const {
     std::string normalized = target_id;
     std::transform(normalized.begin(), normalized.end(), normalized.begin(),
                    [](unsigned char c) { return std::toupper(c); });
+    // Bug 9 fix: acquire shared_lock for read. m_mtx is now mutable shared_mutex.
+    // Multiple concurrent readers are safe; writers (add_safe_node) get exclusive lock.
+    //
+    // IMPORTANT: callers that already hold m_mtx (e.g., isolate_target) must
+    // call is_safe_locked() instead to avoid recursive lock acquisition
+    // (which would deadlock on a non-recursive shared_mutex).
+    std::shared_lock<std::shared_mutex> lock(m_mtx);
+    return m_safe_list.find(normalized) != m_safe_list.end();
+}
+
+// Caller MUST hold m_mtx. Used by isolate_target() which already holds
+// the lock for the validation phase.
+bool PolicyEnforcer::is_safe_locked(const std::string& target_id) const {
+    std::string normalized = target_id;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return std::toupper(c); });
     return m_safe_list.find(normalized) != m_safe_list.end();
 }
 
@@ -239,7 +262,8 @@ void PolicyEnforcer::add_safe_node(const std::string& node_id) {
     std::string normalized = node_id;
     std::transform(normalized.begin(), normalized.end(), normalized.begin(),
                    [](unsigned char c) { return std::toupper(c); });
-    std::lock_guard<std::mutex> lock(m_mtx);
+    // Bug 9 fix: use unique_lock (write path) to coordinate with shared_lock readers.
+    std::unique_lock<std::shared_mutex> lock(m_mtx);
     m_safe_list.insert(normalized);
     m_last_enforce_time = {};
     std::cout << "[ENFORCER] Safe-listed node: " << normalized << std::endl;
@@ -247,7 +271,7 @@ void PolicyEnforcer::add_safe_node(const std::string& node_id) {
 
 bool PolicyEnforcer::is_ip_safe(const std::string& ip) {
     if (!is_valid_ip(ip)) return false;
-    std::lock_guard<std::mutex> safe_lock(m_mtx);
+    std::shared_lock<std::shared_mutex> safe_lock(m_mtx);
     std::shared_lock<std::shared_mutex> ip_lock(m_ip_map_mtx);
     for (const auto& node_id : m_safe_list) {
         auto it = m_peer_ip_map.find(node_id);
@@ -561,7 +585,7 @@ bool PolicyEnforcer::isolate_target(const std::string& target) {
     // Phase 1: validation under short lock — never hold mutex during fork_exec_wait
     std::string resolved_ip;
     {
-        std::lock_guard<std::mutex> lock(m_mtx);
+        std::lock_guard<std::shared_mutex> lock(m_mtx);
 
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_last_enforce_time).count();
@@ -575,7 +599,7 @@ bool PolicyEnforcer::isolate_target(const std::string& target) {
             return true;
         }
 
-        if (is_safe(target)) {
+        if (is_safe_locked(target)) {
             std::cout << "[ENFORCER] REFUSED: " << target
                       << " is safe-listed. Isolation blocked." << std::endl;
             return false;
@@ -613,7 +637,7 @@ bool PolicyEnforcer::isolate_target(const std::string& target) {
             port_success = true;
         }
         {
-            std::lock_guard<std::mutex> lock(m_mtx);
+            std::lock_guard<std::shared_mutex> lock(m_mtx);
             if (port_success) {
                 m_isolated_nodes.insert(target);
                 m_last_enforce_time = std::chrono::steady_clock::now();
@@ -651,7 +675,7 @@ bool PolicyEnforcer::isolate_target(const std::string& target) {
 
     // Phase 4: record result under lock (short)
     {
-        std::lock_guard<std::mutex> lock(m_mtx);
+        std::lock_guard<std::shared_mutex> lock(m_mtx);
         if (any_success) {
             m_isolated_nodes.insert(target);
             m_last_enforce_time = std::chrono::steady_clock::now();
@@ -677,7 +701,7 @@ bool PolicyEnforcer::isolate_target(const std::string& target) {
 // ---------------------------------------------------------------------------
 
 void PolicyEnforcer::release_target(const std::string& target) {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::lock_guard<std::shared_mutex> lock(m_mtx);
 
     if (m_isolated_nodes.erase(target) == 0) return;
 
@@ -705,7 +729,7 @@ void PolicyEnforcer::release_target(const std::string& target) {
 
 // D3FEND: D3-PT (Process Termination) — SIGSTOP halts compromised process for forensic triage
 void PolicyEnforcer::suspend_process(uint32_t pid) {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::lock_guard<std::shared_mutex> lock(m_mtx);
     if (m_suspended_pids.find(pid) != m_suspended_pids.end()) return;
 
     m_suspended_pids.insert(pid);
@@ -728,7 +752,7 @@ void PolicyEnforcer::suspend_process(uint32_t pid) {
 }
 
 void PolicyEnforcer::reset_enforcement() {
-    std::lock_guard<std::mutex> lock(m_mtx);
+    std::lock_guard<std::shared_mutex> lock(m_mtx);
     std::cout << "[ENFORCER] Eradicating " << m_suspended_pids.size() << " jailed processes." << std::endl;
     for (auto pid : m_suspended_pids) {
         // Use pidfd if available — immune to PID reuse race condition.

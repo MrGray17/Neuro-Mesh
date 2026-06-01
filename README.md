@@ -249,6 +249,30 @@ neuro_mesh/
 
 ---
 
+## Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `NEURO_UNSAFE_NO_SANDBOX` | (unset) | Set to `1` to bypass chroot+seccomp sandbox (dev only) |
+| `NEURO_WS_PORT` | auto (9000-9040) | Override WebSocket port for telemetry bridge |
+| `NEURO_XDP_IFACE` | auto-detect | Network interface for XDP attach (e.g., `eth0`); auto-scans `/sys/class/net` if unset |
+| `NEURO_PEERS` | (none) | Comma-separated `ip:port` pairs for seed peers |
+| `NEURO_MODEL_PATH` | `./isolation_forest.onnx` | Path to ONNX isolation forest model |
+| `NEURO_IPC_TOKEN` | (none) | Shared secret for IPC socket authentication |
+| `NEURO_WEBHOOK_URL` | (none) | URL for webhook alerts on consensus events |
+| `NEURO_PEER_KEYS` | (none) | Comma-separated `node_id:public_key_pem` for pre-provisioned trust |
+| `NEURO_PBFT_EVIDENCE_MAX` | 10240 | Max evidence payload size in bytes |
+| `NEURO_PBFT_RATE_WINDOW` | 10 | Window in seconds for PBFT rate limiting |
+| `NEURO_PBFT_RATE_MAX` | 5 | Max PRE_PREPARE messages per window |
+| `NEURO_UDP_JITTER_MIN` | 0 | Min microseconds of jitter for UDP broadcasts |
+| `NEURO_UDP_JITTER_MAX` | 0 | Max microseconds of jitter for UDP broadcasts |
+| `NEURO_DISCOVERY_JITTER_MIN` | 0 | Min microseconds of jitter for discovery beacons |
+| `NEURO_DISCOVERY_JITTER_MAX` | 0 | Max microseconds of jitter for discovery beacons |
+| `NEURO_UNICAST_JITTER_MIN` | 0 | Min microseconds of jitter for unicast messages |
+| `NEURO_UNICAST_JITTER_MAX` | 0 | Max microseconds of jitter for unicast messages |
+
+---
+
 ## Security
 
 | Property | Implementation |
@@ -289,6 +313,37 @@ Only kernel-level enforcement and eBPF probing are degraded.
 To bypass the TelemetryBridge sandbox on unprivileged systems:
 ```bash
 NEURO_UNSAFE_NO_SANDBOX=1 ./bin/neuro_agent ALPHA
+```
+
+---
+
+## Production Deployment
+
+### Requirements
+
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| Linux kernel | 5.1+ (pidfd) | 5.15+ (full eBPF BTF) |
+| Root privileges | Required (eBPF + iptables) | Full root with `CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` |
+| OpenSSL | 3.0+ | 3.1+ |
+| ONNX Runtime | 1.17+ | 1.18+ |
+| Memory per node | 64 MB | 256 MB |
+
+### Security Checklist
+
+1. **Sandbox**: Do NOT set `NEURO_UNSAFE_NO_SANDBOX=1` in production. The TelemetryBridge child process must run under chroot + seccomp + uid drop.
+2. **Key management**: Pre-provision peer public keys via `NEURO_PEER_KEYS` to bypass TOFU on first deploy. Rotate keys by calling `unpin_peer_key()` on each node.
+3. **Firewall**: Allow UDP 9998 (discovery), UDP 9999 (consensus), TCP 10000-10099 (data plane), TCP 10500-10599 (TLS), and TCP 9000-9040 (WebSocket telemetry) between mesh nodes.
+4. **IPC security**: Set `NEURO_IPC_TOKEN` to a random 32-byte hex string. The IPC socket at `/tmp/neuro_mesh_{id}.sock` requires authentication.
+5. **Model integrity**: Verify the `isolation_forest.onnx` model hash before deployment.
+6. **Monitoring**: Connect dashboard to any node's telemetry WebSocket port. All nodes push telemetry via gossip — any single node provides a full mesh view.
+
+### Docker
+
+```bash
+docker compose -f docker-compose.yml build --no-cache
+docker compose -f docker-compose.yml up -d
+docker compose -f docker-compose.yml down
 ```
 
 ---

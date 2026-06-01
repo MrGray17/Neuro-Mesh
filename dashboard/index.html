@@ -129,6 +129,44 @@ body{
 .alert-text{font-size:28px;font-weight:700;color:var(--red)}
 .alert-sub{font-size:13px;color:var(--t2);margin-top:4px}
 .header-quorum{font-size:11px;color:var(--t2);padding:3px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px}
+/* === RESPONSIVE BREAKPOINTS === */
+@media(max-width:1100px){
+  #main-grid{grid-template-columns:1fr 280px}
+  .kill-entry .ts{width:120px}
+}
+@media(max-width:720px){
+  #main-grid{grid-template-columns:1fr;grid-template-rows:1fr auto}
+  #center-panel{grid-column:1;grid-row:1}
+  #right-panel{grid-column:1;grid-row:2;max-height:300px}
+  #header{flex-wrap:wrap;height:auto;min-height:36px;padding:4px 8px}
+  #footer{flex-wrap:wrap;height:auto;padding:4px 8px}
+  .node-card{padding:6px 8px}
+  #alert-overlay .alert-text{font-size:18px}
+}
+/* === LIGHT THEME === */
+[data-theme="light"]{
+  --bg:#ffffff;
+  --bg-alt:#f6f8fa;
+  --bg-card:#ffffff;
+  --border:#d0d7de;
+  --border-hover:#8b949e;
+  --t1:#1f2328;
+  --t2:#656d76;
+  --t3:#8b949e;
+  --accent:#0969da;
+}
+[data-theme="light"] .kill-entry:nth-child(even){background:rgba(208,215,222,0.2)}
+[data-theme="light"] .kill-entry:nth-child(even):hover{background:rgba(208,215,222,0.4)}
+#theme-toggle{background:none;border:none;cursor:pointer;color:var(--t2);font-size:13px;padding:0 4px;line-height:1;font-family:var(--system);flex-shrink:0}
+#theme-toggle:hover{color:var(--t1)}
+/* === EVENT FILTER === */
+#filter-row{display:flex;align-items:center;gap:6px;padding:4px 16px;height:28px;min-height:28px;background:var(--bg-alt);border-bottom:1px solid var(--border);flex-shrink:0}
+#filter-input{background:var(--bg);border:1px solid var(--border);color:var(--t1);padding:2px 8px;font-size:10px;font-family:var(--mono);border-radius:3px;width:140px;outline:none}
+#filter-input:focus{border-color:var(--accent)}
+#filter-clear{background:none;border:none;color:var(--t2);cursor:pointer;font-size:10px;display:none}
+#filter-clear.visible{display:inline}
+#filter-count{font-size:10px;color:var(--t3);margin-left:auto}
+.kill-entry.filtered{display:none!important}
 </style>
 
 </head>
@@ -152,8 +190,9 @@ body{
       <div class="stat-chip"><span class="label">PBFT</span><span class="value" id="pbft-rounds">0</span></div>
       <div id="mesh-dot"></div>
       <span id="mesh-status-label" style="display:none"></span>
-      <span id="conn-label">--</span>
-      <div id="conn-dot"></div>
+      <span id="conn-label" role="status" aria-live="polite">--</span>
+      <div id="conn-dot" aria-hidden="true"></div>
+      <button id="theme-toggle" aria-label="Toggle theme" title="Toggle dark/light theme">◐</button>
     </div>
   </div>
   <div id="main-grid">
@@ -161,6 +200,11 @@ body{
       <div id="canvas-panel"><canvas id="mesh-canvas"></canvas><canvas id="spectro-canvas"></canvas></div>
       <div class="event-feed-container">
         <div class="panel-header"><span>EVENT LOG</span><span id="feed-count">0</span></div>
+        <div id="filter-row">
+          <input id="filter-input" placeholder="filter..." aria-label="Filter events by type or text" tabindex="0">
+          <button id="filter-clear" aria-label="Clear filter" tabindex="0">x</button>
+          <span id="filter-count"></span>
+        </div>
         <div id="event-feed"></div>
       </div>
     </div>
@@ -248,6 +292,10 @@ const dom = {
   tickFrame:    $('tick-frame'),
   connDot:      $('conn-dot'),
   connLabel:    $('conn-label'),
+  themeToggle:  $('theme-toggle'),
+  filterInput:  $('filter-input'),
+  filterClear:  $('filter-clear'),
+  filterCount:  $('filter-count'),
   alertOverlay: $('alert-overlay'),
   alertDetail: $('alert-detail'),
   meshCanvas:   $('mesh-canvas'),
@@ -1260,6 +1308,55 @@ function startSimulation() {
 }
 
 /* ==========================================================================
+   THEME TOGGLE
+   ========================================================================== */
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  dom.themeToggle.textContent = theme === 'light' ? '◑' : '◐';
+}
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = current === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  try { localStorage.setItem('neuro-theme', next); } catch(e) {}
+}
+(function loadTheme() {
+  try {
+    const saved = localStorage.getItem('neuro-theme');
+    if (saved) applyTheme(saved);
+  } catch(e) {}
+})();
+/* ==========================================================================
+   EVENT FILTER
+   ========================================================================== */
+const filterState = { text: '' };
+function applyFilter() {
+  const txt = filterState.text.toLowerCase();
+  let visible = 0, total = 0;
+  dom.eventFeed.querySelectorAll('.kill-entry').forEach(el => {
+    total++;
+    if (!txt || el.textContent.toLowerCase().includes(txt)) {
+      el.classList.remove('filtered');
+      visible++;
+    } else {
+      el.classList.add('filtered');
+    }
+  });
+  dom.filterClear.classList.toggle('visible', txt.length > 0);
+  if (dom.filterCount) dom.filterCount.textContent = txt ? `${visible}/${total}` : '';
+}
+/* ==========================================================================
+   KEYBOARD SHORTCUTS
+   ========================================================================== */
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return; // don't steal from filter input
+  switch(e.key) {
+    case 't': case 'T': toggleTheme(); break;
+    case 'f': case 'F': dom.filterInput.focus(); dom.filterInput.select(); e.preventDefault(); break;
+    case 'Escape': filterState.text = ''; dom.filterInput.value = ''; applyFilter(); break;
+  }
+});
+/* ==========================================================================
    INIT
    ========================================================================== */
 function init() {
@@ -1269,6 +1366,21 @@ function init() {
   pushFeed('HEARTBEAT', 'Neuro-Mesh Console ready', '');
 
   window.addEventListener('resize', onResize);
+
+  // Theme toggle
+  dom.themeToggle.addEventListener('click', toggleTheme);
+
+  // Event filter
+  dom.filterInput.addEventListener('input', () => {
+    filterState.text = dom.filterInput.value;
+    applyFilter();
+  });
+  dom.filterClear.addEventListener('click', () => {
+    dom.filterInput.value = '';
+    filterState.text = '';
+    applyFilter();
+    dom.filterInput.focus();
+  });
 
   // Start WebSocket connection
   wsConnect();

@@ -78,3 +78,5 @@ _encoded_*
 *_full_dump/
 *_full.*
 _all_files_*
+.build_logs/
+.build_logs/

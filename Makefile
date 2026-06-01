@@ -162,6 +162,8 @@ $(AGENT_TARGET): $(USOCK_OBJS) $(AGENT_OBJS)
 # Tools
 # ============================================================
 SIM_TARGET := $(BIN_DIR)/inject_event
+ATTACK_INJECTOR_TARGET := $(BIN_DIR)/attack_injector
+REGISTER_ATTACKER_TARGET := $(BIN_DIR)/register_attacker
 CRYPTO_TEST_TARGET := $(BIN_DIR)/test_crypto
 PBFT_TEST_TARGET := $(BIN_DIR)/test_pbft
 ENFORCER_TEST_TARGET := $(BIN_DIR)/test_enforcer
@@ -171,6 +173,14 @@ INFERENCE_TEST_TARGET := $(BIN_DIR)/test_inference
 $(SIM_TARGET): tools/inject_event.cpp
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< -o $@
+
+$(ATTACK_INJECTOR_TARGET): tools/attack_injector.cpp
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+$(REGISTER_ATTACKER_TARGET): tools/register_attacker.cpp $(OBJ_DIR)/crypto/CryptoCore.o
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS)
 
 $(CRYPTO_TEST_TARGET): tools/test_crypto.cpp $(OBJ_DIR)/crypto/CryptoCore.o
 	@mkdir -p $(BIN_DIR)
@@ -214,9 +224,29 @@ $(BIN_DIR)/test_mitigation: tests/unit/test_mitigation.cpp $(OBJ_DIR)/enforcer/M
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/enforcer/MitigationEngine.o $(OBJ_DIR)/enforcer/PolicyEnforcer.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(BPF_LIBS) $(GTEST_FLAGS) $(LDFLAGS_OPT)
 
+$(BIN_DIR)/test_proofchain: tests/unit/test_proofchain.cpp $(OBJ_DIR)/crypto/CryptoCore.o
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(GTEST_FLAGS) $(LDFLAGS_OPT)
+
+$(BIN_DIR)/test_pbft_consensus: tests/unit/test_pbft_consensus.cpp $(OBJ_DIR)/crypto/CryptoCore.o
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(GTEST_FLAGS) $(LDFLAGS_OPT)
+
+$(BIN_DIR)/test_pbft_perf: tools/test_pbft_perf.cpp $(OBJ_DIR)/crypto/CryptoCore.o
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(LDFLAGS_OPT)
+
+$(BIN_DIR)/test_telemetrybridge: tests/unit/test_telemetrybridge.cpp $(OBJ_DIR)/telemetry/TelemetryBridge.o $(OBJ_DIR)/crypto/CryptoCore.o $(USOCK_OBJS)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/telemetry/TelemetryBridge.o $(OBJ_DIR)/crypto/CryptoCore.o $(USOCK_OBJS) -o $@ $(SSL_LIBS) $(SECC_LIBS) $(BPF_LIBS) $(GTEST_FLAGS) $(LDFLAGS_OPT)
+
 $(BIN_DIR)/test_auditlogger: tests/unit/test_auditlogger.cpp $(OBJ_DIR)/telemetry/AuditLogger.o $(OBJ_DIR)/crypto/CryptoCore.o
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< $(OBJ_DIR)/telemetry/AuditLogger.o $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS) $(GTEST_FLAGS) $(LDFLAGS_OPT)
+
+$(BIN_DIR)/test_meshnode_ratelimit: tests/unit/test_meshnode_ratelimit.cpp $(MESHNODE_TEST_OBJS) $(USOCK_OBJS)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< $(USOCK_OBJS) $(MESHNODE_TEST_OBJS) -o $@ $(SSL_LIBS) $(BPF_LIBS) $(SECC_LIBS) $(GTEST_FLAGS) $(LDFLAGS_OPT)
 
 STRESS_TEST_OBJS := $(OBJ_DIR)/consensus/PeerManager.o \
                     $(OBJ_DIR)/enforcer/PolicyEnforcer.o \
@@ -243,9 +273,11 @@ $(BIN_DIR)/fuzz_pbft_message: tests/fuzz/fuzz_pbft_message.cpp $(OBJ_DIR)/crypto
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(FUZZ_FLAGS) $< $(OBJ_DIR)/crypto/CryptoCore.o -o $@ $(SSL_LIBS)
 
-tools: $(SIM_TARGET) $(CRYPTO_TEST_TARGET) $(PBFT_TEST_TARGET) \
+tools: $(SIM_TARGET) $(ATTACK_INJECTOR_TARGET) $(REGISTER_ATTACKER_TARGET) $(CRYPTO_TEST_TARGET) $(PBFT_TEST_TARGET) \
        $(ENFORCER_TEST_TARGET) $(MESHNODE_TEST_TARGET) $(INFERENCE_TEST_TARGET) \
        $(BIN_DIR)/test_common $(BIN_DIR)/test_mitigation $(BIN_DIR)/test_auditlogger \
+       $(BIN_DIR)/test_proofchain $(BIN_DIR)/test_pbft_consensus $(BIN_DIR)/test_telemetrybridge \
+       $(BIN_DIR)/test_meshnode_ratelimit \
        $(BIN_DIR)/test_stress
 
 # ============================================================
@@ -270,6 +302,14 @@ test: tools
 	$(BIN_DIR)/test_mitigation || FAILED=1; \
 	echo "--- test_auditlogger (gtest) ---"; \
 	$(BIN_DIR)/test_auditlogger || FAILED=1; \
+	echo "--- test_proofchain (gtest) ---"; \
+	$(BIN_DIR)/test_proofchain || FAILED=1; \
+	echo "--- test_pbft_consensus (gtest) ---"; \
+	$(BIN_DIR)/test_pbft_consensus || FAILED=1; \
+	echo "--- test_telemetrybridge (gtest) ---"; \
+	$(BIN_DIR)/test_telemetrybridge || FAILED=1; \
+	echo "--- test_meshnode_ratelimit (gtest) ---"; \
+	$(BIN_DIR)/test_meshnode_ratelimit || FAILED=1; \
 	echo "--- test_stress (concurrent + adversarial) ---"; \
 	$(BIN_DIR)/test_stress || FAILED=1; \
 	echo "=== All Tests Complete ==="; \

@@ -85,15 +85,29 @@ bool InferenceEngine::analyze(const std::string& comm, const std::string& payloa
             input_names, &input_tensor, 1,
             output_names, 1);
     } catch (const Ort::Exception& e) {
-        std::cerr << "[INFERENCE] ONNX Run failed: " << e.what() << std::endl;
+        // Audit A1: log only on first failure to prevent log spam.
+        // (If the model is broken, analyze() can be called thousands of
+        // times per second under load.)
+        bool expected = false;
+        if (m_run_failure_logged.compare_exchange_strong(expected, true)) {
+            std::cerr << "[INFERENCE] ONNX Run failed: " << e.what()
+                      << " (further errors suppressed until success)" << std::endl;
+        }
         return false;
     }
+    // Reset log gate on success
+    m_run_failure_logged.store(false, std::memory_order_relaxed);
 
     // 4. Extract anomaly score
     if (outputs.empty() || !outputs[0].IsTensor()) {
-        std::cerr << "[INFERENCE] ONNX returned invalid output" << std::endl;
+        bool expected = false;
+        if (m_output_failure_logged.compare_exchange_strong(expected, true)) {
+            std::cerr << "[INFERENCE] ONNX returned invalid output"
+                      << " (further errors suppressed until success)" << std::endl;
+        }
         return false;
     }
+    m_output_failure_logged.store(false, std::memory_order_relaxed);
     float* scores = outputs[0].GetTensorMutableData<float>();
     float score = scores[0];
 
