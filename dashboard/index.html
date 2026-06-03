@@ -52,19 +52,96 @@ body{
 #conn-dot{width:8px;height:8px;border-radius:50%;background:var(--border);margin-left:4px}
 #conn-dot.live{background:var(--green)}
 #conn-label{font-size:11px;color:var(--t3)}
-#main-grid{flex:1;display:grid;grid-template-columns:1fr 340px;grid-template-rows:1fr;gap:0;overflow:hidden;min-height:0}
-#center-panel{grid-column:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
-#right-panel{grid-column:2;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);border-left:1px solid var(--border)}
-#left-panel{display:none}
-/* Layout: split canvas-panel into two isolated sub-panels (mesh + spectro)
-   so they cannot overlap. Each gets its own bounded container. */
-#canvas-panel{display:flex;flex-direction:column;flex:0 0 auto;height:50%;min-height:0;background:var(--bg-alt);border-bottom:1px solid var(--border);overflow:hidden}
-#mesh-panel{position:relative;flex:1 1 60%;min-height:0;overflow:hidden;border-bottom:1px solid var(--border)}
-#spectro-panel{position:relative;flex:1 1 40%;min-height:0;overflow:hidden;background:#0d1117}
-#mesh-canvas,#spectro-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-/* Mesh canvas keeps pointer events for click-to-select; spectro is visual-only */
-#spectro-canvas{pointer-events:none}
-.event-feed-container{flex:1 1 50%;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+/* ============================================================================
+   STRICT GRID LAYOUT — cannot collapse or overlap
+   - Page: header (auto) + main-grid (1fr) + footer (auto), all in 100vh
+   - main-grid: 3fr (left viewing area) | 1fr (right "Node Vitals" sidebar)
+   - left column: nested grid with explicit row tracks
+       Row 1 auto  : viewing context sub-bar
+       Row 2 1fr   : Network Topology panel
+       Row 3 1fr   : Entropy Spectrogram panel
+       Row 4 1fr   : Event Log panel
+       Row 5 auto  : footer
+   - Every panel uses position:relative + 100%/100% + overflow:hidden.
+     No negative margins, no transforms, no absolute positioning outside
+     the panels themselves.
+============================================================================ */
+
+#main-grid{
+  flex:1 1 auto; min-height:0;
+  display:grid; grid-template-columns:3fr 1fr; grid-template-rows:1fr;
+  gap:0; height:100%; overflow:hidden;
+  background:var(--bg);
+}
+
+#center-panel{
+  grid-column:1; grid-row:1;
+  display:grid;
+  grid-template-rows:auto minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) auto;
+  grid-template-columns:1fr;
+  min-height:0; min-width:0;
+  overflow:hidden; background:var(--bg);
+}
+
+#right-panel{
+  grid-column:2; grid-row:1;
+  display:flex; flex-direction:column; min-height:0; min-width:0;
+  overflow:hidden; background:var(--bg);
+  border-left:1px solid var(--border);
+}
+
+/* Row 1: context sub-bar (auto) */
+#context-bar{
+  grid-row:1; grid-column:1;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:6px 16px; min-height:32px;
+  background:var(--bg-alt); border-bottom:1px solid var(--border);
+  font-size:11px; color:var(--t2);
+}
+#context-bar .left{display:flex; align-items:center; gap:10px}
+#context-bar .right{display:flex; align-items:center; gap:8px}
+#viewing-context{font-family:var(--mono); font-size:12px; color:var(--t1); font-weight:600}
+
+/* Row 2: Network Topology — dedicated bounded cell */
+#mesh-panel{
+  grid-row:2; grid-column:1;
+  position:relative; width:100%; height:100%;
+  min-height:0; min-width:0; overflow:hidden;
+  background:var(--bg-alt);
+  border-bottom:1px solid var(--border);
+}
+#mesh-panel .panel-header{height:32px; min-height:32px; padding:0 16px}
+
+/* Row 3: Entropy Spectrogram — completely separated, no shared canvas */
+#spectro-panel{
+  grid-row:3; grid-column:1;
+  position:relative; width:100%; height:100%;
+  min-height:0; min-width:0; overflow:hidden;
+  background:#0d1117;
+  border-bottom:1px solid var(--border);
+}
+#spectro-panel .panel-header{height:32px; min-height:32px; padding:0 16px}
+
+/* Both canvases are isolated inside their own panel cells. No overlap. */
+#mesh-canvas{position:absolute; inset:0; width:100%; height:100%; display:block}
+#spectro-canvas{position:absolute; inset:0; width:100%; height:100%; display:block; pointer-events:none}
+
+/* Row 4: Event Log — bounded cell, scrollable inside */
+#event-feed-container{
+  grid-row:4; grid-column:1;
+  display:flex; flex-direction:column; min-height:0; min-width:0;
+  overflow:hidden; background:var(--bg);
+}
+#event-feed{flex:1 1 auto; min-height:0; overflow-y:auto; padding:4px 0}
+
+/* Row 5: footer (auto) */
+#page-footer{
+  grid-row:5; grid-column:1;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 16px; height:30px; min-height:30px;
+  background:var(--bg-alt); border-top:1px solid var(--border);
+  font-size:11px; color:var(--t3); gap:12px;
+}
 .panel-header{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;height:36px;min-height:36px;background:var(--bg-alt);border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--t2);text-transform:uppercase;letter-spacing:0.04em}
 #feed-count{font-family:var(--mono);font-size:11px;color:var(--t3);font-weight:400}
 #event-feed{flex:1;overflow-y:auto;padding:4px 0}
@@ -126,7 +203,7 @@ body{
 .vkey{color:var(--t3);text-transform:uppercase;font-size:10px}
 .vval{font-family:var(--mono);color:var(--t2);font-size:11px}
 /* footer */
-#footer{display:flex;align-items:center;justify-content:space-between;padding:0 16px;height:30px;min-height:30px;background:var(--bg-alt);border-top:1px solid var(--border);font-size:11px;color:var(--t3);gap:12px}
+#footer{font-size:11px;color:var(--t3)}
 #footer .right{display:flex;align-items:center;gap:10px}
 #tick-clock,#tick-frame{font-family:var(--mono);font-size:11px;white-space:nowrap}
 /* alert overlay */
@@ -145,7 +222,7 @@ body{
   #center-panel{grid-column:1;grid-row:1}
   #right-panel{grid-column:1;grid-row:2;max-height:300px}
   #header{flex-wrap:wrap;height:auto;min-height:36px;padding:4px 8px}
-  #footer{flex-wrap:wrap;height:auto;padding:4px 8px}
+  #page-footer{flex-wrap:wrap;height:auto;padding:4px 8px}
   .node-card{padding:6px 8px}
   #alert-overlay .alert-text{font-size:18px}
 }
@@ -203,11 +280,32 @@ body{
   </div>
   <div id="main-grid">
     <div id="center-panel">
-      <div id="canvas-panel">
-        <div id="mesh-panel"><canvas id="mesh-canvas"></canvas></div>
-        <div id="spectro-panel"><canvas id="spectro-canvas"></canvas></div>
+
+      <!-- Row 1 auto: viewing context sub-bar -->
+      <div id="context-bar">
+        <div class="left">
+          <span style="color:var(--t3);text-transform:uppercase;letter-spacing:0.05em">Viewing</span>
+          <span id="viewing-context">--</span>
+        </div>
+        <div class="right">
+          <span id="peer-count" style="color:var(--t2)">0 peers</span>
+        </div>
       </div>
-      <div class="event-feed-container">
+
+      <!-- Row 2 1fr: Network Topology (isolated cell, no overlap) -->
+      <div id="mesh-panel">
+        <div class="panel-header"><span>NETWORK TOPOLOGY</span><span id="mesh-pill"></span></div>
+        <canvas id="mesh-canvas"></canvas>
+      </div>
+
+      <!-- Row 3 1fr: Entropy Spectrogram (completely separate cell) -->
+      <div id="spectro-panel">
+        <div class="panel-header"><span>ENTROPY SPECTROGRAM</span><span id="entropy-pill" style="color:var(--t3)"></span></div>
+        <canvas id="spectro-canvas"></canvas>
+      </div>
+
+      <!-- Row 4 1fr: Event Log (scrollable, bounded) -->
+      <div id="event-feed-container">
         <div class="panel-header"><span>EVENT LOG</span><span id="feed-count">0</span></div>
         <div id="filter-row">
           <input id="filter-input" placeholder="filter..." aria-label="Filter events by type or text" tabindex="0">
@@ -216,19 +314,22 @@ body{
         </div>
         <div id="event-feed"></div>
       </div>
+
+      <!-- Row 5 auto: footer (inside the left column grid) -->
+      <div id="page-footer">
+        <div class="right">
+          <span>CLOCK <span id="tick-clock">--:--:--</span></span>
+          <span>FRAME <span id="tick-frame">--</span></span>
+          <span style="color:var(--t3);margin-left:4px">v9.0</span>
+        </div>
+      </div>
+
     </div>
     <div id="right-panel">
       <div class="vitals-section">
-        <div id="vit-header"><span>NODES</span><div style="display:flex;gap:6px"><span id="mesh-pill"></span><span id="vitals-pill"></span></div></div>
+        <div id="vit-header"><span>NODES</span><div style="display:flex;gap:6px"><span id="vitals-pill"></span></div></div>
         <div id="vitals-body"></div>
       </div>
-    </div>
-  </div>
-  <div id="footer">
-    <div class="right">
-      <span>CLOCK <span id="tick-clock">--:--:--</span></span>
-      <span>FRAME <span id="tick-frame">--</span></span>
-      <span style="color:var(--t3);margin-left:4px">v9.0</span>
     </div>
   </div>
 </div>
@@ -254,6 +355,7 @@ let wsUrlIndex = 0;
 const MAX_FEED    = 200;
 const SPEC_BARS   = 64;
 const ENTROPY_MAX = 1.0;
+const MAX_HISTORY = 100;  // ring-buffer cap for telemetry time-series
 
 // ---- State ----
 const state = {
@@ -275,6 +377,12 @@ const state = {
   edges: [],
   // Spectrogram history
   specHistory: [],
+  // Telemetry time-series — RING BUFFER capped at MAX_HISTORY=100.
+  // .slice(-100) on every push prevents unbounded growth over long sessions.
+  entropyHistory: [],   // [{t, v}, ...]  entropy over time
+  cpuHistory:     [],   // [{t, v}, ...]  CPU load %
+  ramHistory:     [],   // [{t, v}, ...]  RAM MB
+  pbftHistory:    [],   // [{t, v, stage, target}, ...]  PBFT rounds
   // Operator context — null = follow self node; string = viewing a specific peer
   selectedNode: null,
   // Alert cooldown — tracks when entropy last spiked so the UI can auto-clear
@@ -294,6 +402,7 @@ const dom = {
   quorum:       $('quorum-display'),
   meshPill:     $('mesh-pill'),
   vitalsPill:   $('vitals-pill'),
+  viewingContext: $('viewing-context'),
   vitalsBody:   $('vitals-body'),
   feedCount:    $('feed-count'),
   eventFeed:     $('event-feed'),
@@ -522,6 +631,7 @@ function switchNodeContext(nodeId) {
     dom.contextLabel.textContent = 'Node';
     dom.nodeId.textContent = state.nodeId;
     dom.viewIndicator.style.display = 'none';
+    if (dom.viewingContext) dom.viewingContext.textContent = state.nodeId;
     pushFeed('HEARTBEAT', `Context reset — following local node ${state.nodeId}`, '');
     return;
   }
@@ -533,12 +643,14 @@ function switchNodeContext(nodeId) {
     dom.contextLabel.textContent = 'Node';
     dom.nodeId.textContent = state.nodeId;
     dom.viewIndicator.style.display = 'none';
+    if (dom.viewingContext) dom.viewingContext.textContent = state.nodeId;
     pushFeed('HEARTBEAT', `Context locked — monitoring local node ${nodeId}`, '');
   } else {
     dom.contextLabel.textContent = 'Viewing';
     dom.nodeId.textContent = nodeId;
     dom.viewIndicator.textContent = '[REMOTE]';
     dom.viewIndicator.style.display = 'inline';
+    if (dom.viewingContext) dom.viewingContext.textContent = nodeId;
     pushFeed('HEARTBEAT', `Context switched — now viewing ${nodeId}`, '');
   }
 
@@ -775,6 +887,19 @@ function pushSpectrogram(value) {
   // Cap history
   const maxRows = Math.floor(specH / 3.5) || 60;
   while (state.specHistory.length > maxRows) state.specHistory.shift();
+  // Mirror raw value into the 100-point ring buffer for trend rendering
+  pushHistoryPoint(state.entropyHistory, value);
+}
+
+/* ============================================================================
+   RING BUFFER — enforces a hard ceiling on every telemetry time-series.
+   .slice(-MAX_HISTORY) keeps only the most recent N points and drops the rest
+   in O(1) amortized. This is the single most important memory-leak guard
+   for a long-lived dashboard session.
+============================================================================ */
+function pushHistoryPoint(arr, v) {
+  arr.push({ t: Date.now(), v });
+  if (arr.length > MAX_HISTORY) arr.splice(0, arr.length - MAX_HISTORY);
 }
 
 function drawSpectrogram() {
@@ -987,6 +1112,8 @@ function routeMessage(data) {
       dom.pbftRounds.textContent = state.pbftRounds;
       const stage = data.stage || '';
       const target = data.target || '';
+      // Ring buffer: cap the PBFT round history to 100 entries
+      pushHistoryPoint(state.pbftHistory, { stage, target, quorum: data.quorum });
       if (stage === 'EXECUTED') {
         pushFeed('PBFT',
           `Consensus EXECUTED — target: ${target} quorum: ${data.quorum || '?'}`,
@@ -1010,7 +1137,11 @@ function routeMessage(data) {
       // Vitals & spectrogram — only update for the selected node context
       if (matchesSelectedNode(data)) {
         state.cpuLoad = parseFloat(data.cpu) || state.cpuLoad;
-        state.ramMb = parseInt(data.mem_mb) || parseInt(data.RAM_MB) || state.ramMb;
+        state.ramMb   = parseInt(data.mem_mb) || parseInt(data.RAM_MB) || state.ramMb;
+        // Ring buffer: every telemetry point is appended then capped to MAX_HISTORY.
+        // This is the leak guard — no historical array in state can exceed 100 entries.
+        pushHistoryPoint(state.cpuHistory, state.cpuLoad);
+        pushHistoryPoint(state.ramHistory, state.ramMb);
         if (data.entropy !== undefined) {
           state.entropy = parseFloat(data.entropy) || 0;
           pushSpectrogram(state.entropy);
@@ -1381,6 +1512,7 @@ function init() {
   initMeshCanvas();
   initSpectroCanvas();
   buildGauges();
+  if (dom.viewingContext) dom.viewingContext.textContent = state.nodeId;
   pushFeed('HEARTBEAT', 'Neuro-Mesh Console ready', '');
 
   window.addEventListener('resize', onResize);
@@ -1420,6 +1552,26 @@ function init() {
       animFrame = requestAnimationFrame(renderLoop);
     }
   });
+
+  // Cleanup on page unload — release all timers and the WebSocket
+  // so they cannot hold references after navigation.
+  window.addEventListener('pagehide', teardown);
+  window.addEventListener('beforeunload', teardown);
+}
+
+/* Teardown: stop render loop, simulation, reconnect, WS, and clear all
+   time-series arrays. Prevents detached-DOM and zombie-listener leaks. */
+function teardown() {
+  if (animFrame) { cancelAnimationFrame(animFrame); animFrame = 0; }
+  if (simInterval)  { clearInterval(simInterval);  simInterval  = null; }
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if (alertTimeout) { clearTimeout(alertTimeout); alertTimeout = null; }
+  if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+  state.entropyHistory.length = 0;
+  state.cpuHistory.length     = 0;
+  state.ramHistory.length     = 0;
+  state.pbftHistory.length    = 0;
+  state.specHistory.length    = 0;
 }
 
 document.addEventListener('DOMContentLoaded', init);
