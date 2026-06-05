@@ -70,10 +70,30 @@ MeshNode::MeshNode(const std::string& node_id,
         std::cout << "[ALERT] Webhook endpoint: " << safe_url << std::endl;
     }
 
-    m_private_key = crypto::IdentityCore::generate_ed25519_key();
-    m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
+    // Persistent identity — load from keystore on restart, generate only once.
+    // Without this, every agent restart produces a new Ed25519 keypair,
+    // causing TOFU dual-path MISMATCH on all peers (stale pin vs fresh key).
+    auto existing = m_key_manager.load_key(m_node_id + "_ed25519_identity");
+    if (existing && existing->private_key) {
+        m_private_key = std::move(existing->private_key);
+        m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
+        std::cout << "[INFO] Node " << m_node_id << " loaded persistent Ed25519 identity." << std::endl;
+    } else {
+        m_private_key = crypto::IdentityCore::generate_ed25519_key();
+        m_public_key_pem = crypto::IdentityCore::get_pem_from_pubkey(m_private_key.get());
+        // Persist for future restarts
+        crypto::UniquePKEY pub_dup(EVP_PKEY_dup(m_private_key.get()));
+        crypto::UniquePKEY priv_dup(EVP_PKEY_dup(m_private_key.get()));
+        if (pub_dup && priv_dup) {
+            crypto::KeyPair kp(m_node_id + "_ed25519_identity",
+                               std::move(pub_dup),
+                               std::move(priv_dup),
+                               crypto::KeyType::Ed25519);
+            m_key_manager.store_key(kp);
+        }
+        std::cout << "[INFO] Node " << m_node_id << " generated new Ed25519 Node Identity." << std::endl;
+    }
     m_public_key_b64 = base64_encode(m_public_key_pem);
-    std::cout << "[INFO] Node " << m_node_id << " generated Ed25519 Node Identity." << std::endl;
 
     // Register self so self-votes pass verification
     m_pbft.register_peer_key(m_node_id, m_public_key_pem);
@@ -393,17 +413,17 @@ void MeshNode::send_udp_discovery(const std::string& payload) {
         }
     }
 
-    // IPv4 multicast discovery (239.255.255.250 = SSDP, works in Docker)
+    // IPv4 multicast discovery — fallback for netns/docker where
+    // 255.255.255.255 broadcast may lack a route. Uses SSDP group
+    // (239.255.255.250) which transits bridges without per-hop routing.
     if (m_discovery_mcast_fd >= 0) {
         struct sockaddr_in mcast_addr{};
         mcast_addr.sin_family = AF_INET;
         mcast_addr.sin_port = htons(DISCOVERY_UDP_PORT);
         inet_pton(AF_INET, "239.255.255.250", &mcast_addr.sin_addr);
-        ssize_t sent = sendto(m_discovery_mcast_fd, payload.c_str(), payload.length(), 0,
+        sendto(m_discovery_mcast_fd, payload.c_str(), payload.length(), 0,
                (struct sockaddr*)&mcast_addr, sizeof(mcast_addr));
-        if (sent < 0) {
-            std::cerr << "[NETWORK] Discovery sendto (v4 mcast) failed: " << strerror(errno) << std::endl;
-        }
+        // Best-effort; failure is not fatal.
     }
 
     // IPv6 multicast discovery (ff02::1 = all-nodes link-local)

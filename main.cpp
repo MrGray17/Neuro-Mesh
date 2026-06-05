@@ -377,6 +377,8 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
             continue;
         }
 
+        std::string cmd;
+
         // Token auth handshake (if NEURO_IPC_TOKEN is set)
         if (!ipc_token.empty()) {
             char auth_buf[256];
@@ -388,6 +390,9 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
             std::string received_token;
             if (auth_line.rfind("AUTH ", 0) == 0) {
                 received_token = auth_line.substr(5);
+                size_t nl_pos = received_token.find_first_of("\n\r");
+                if (nl_pos != std::string::npos)
+                    received_token = received_token.substr(0, nl_pos);
             } else {
                 received_token = auth_line;
             }
@@ -405,16 +410,27 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                 close(client_fd);
                 continue;
             }
+            // Extract any trailing command data that was sent back-to-back with AUTH.
+            // TCP is stream-oriented; a client may send AUTH + CMD in one write burst.
+            size_t auth_end = auth_line.find('\n');
+            if (auth_end != std::string::npos && auth_end + 1 < auth_line.size()) {
+                cmd = auth_line.substr(auth_end + 1);
+                cmd.erase(0, cmd.find_first_not_of("\n\r"));
+            }
         }
 
-        char buf[65536];
-        ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
-        if (n > 0) {
+        if (cmd.empty()) {
+            char buf[65536];
+            ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
+            if (n <= 0) { close(client_fd); continue; }
             buf[n] = '\0';
-            std::string cmd(buf);
+            cmd = buf;
+        }
+
+        if (!cmd.empty())
             std::cout << "[IPC] Received command: " << cmd << std::endl;
 
-            if (cmd.rfind("CMD:INJECT ", 0) == 0) {
+        if (!cmd.empty() && cmd.rfind("CMD:INJECT ", 0) == 0) {
                 std::string payload = cmd.substr(strlen("CMD:INJECT "));
                 size_t space = payload.find(' ');
                 if (space != std::string::npos) {
@@ -486,7 +502,6 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
             } else if (cmd == "CMD:SHUTDOWN") {
     global_running.store(false, std::memory_order_seq_cst);
             }
-        }
         close(client_fd);
     }
 
@@ -501,6 +516,17 @@ int main(int argc, char* argv[]) {
     std::signal(SIGPIPE, SIG_IGN);   // survive broken pipe to dead child
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+
+    // Unbuffered stdout — mesh_manager pipes agent output to log files.
+    // Without this, discovery/TOFU/PBFT messages are invisible until process exit.
+    // Both C++ and C levels must be made unbuffered because:
+    //   - std::cout with sync_with_stdio(true) shares C stdio buffer
+    //   - std::cout's own buffer stays in unitbuf mode
+    //   - C stdio defaults to full buffering for non-TTY fds
+    // CRITICAL: setbuf MUST come before any stream operation on std::cout
+    // (including setf), otherwise the buffer is already initialized.
+    setbuf(stdout, nullptr);
+    std::cout.setf(std::ios::unitbuf);
 
     std::string node_id = "ALPHA";
     if (argc > 1) {

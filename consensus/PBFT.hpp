@@ -268,14 +268,22 @@ public:
         int quorum = quorum_size_unlocked();
         int current_votes = static_cast<int>(stage_voters.size());
 
+        std::cerr << "[PBFT] " << msg.stage_str << " vote from " << msg.sender_id
+                  << " for " << msg.target_id
+                  << " (" << current_votes << "/" << quorum << ")"
+                  << " state=" << static_cast<int>(round.state) << std::endl;
+
         PBFTStage previous_state = round.state;
 
         if ((msg.stage_str == "PRE_PREPARE" || msg.stage_str == "BAN_PEER")
             && round.state == PBFTStage::IDLE) {
             round.state = PBFTStage::PREPARE;
+            std::cerr << "[PBFT] STATE IDLE->PREPARE for " << msg.target_id << std::endl;
         }
         else if (msg.stage_str == "PREPARE" && current_votes >= quorum && round.state == PBFTStage::PREPARE) {
             round.state = PBFTStage::COMMIT;
+            std::cerr << "[PBFT] STATE PREPARE->COMMIT for " << msg.target_id
+                      << " (" << current_votes << "/" << quorum << " PREPARE votes)" << std::endl;
         }
         else if (msg.stage_str == "COMMIT" && current_votes >= quorum && round.state == PBFTStage::COMMIT) {
             // Quorum intersection guard at the COMMIT→EXECUTED transition.
@@ -298,6 +306,8 @@ public:
                 return PBFTStage::IDLE;
             }
             round.state = PBFTStage::EXECUTED;
+            std::cerr << "[PBFT] STATE COMMIT->EXECUTED for " << msg.target_id
+                      << " (" << current_votes << "/" << quorum << " COMMIT votes)" << std::endl;
         }
         // Phase 3: BAN_PEER flow. Once the round hits EXECUTED via the
         // normal PRE_PREPARE→PREPARE→COMMIT path, the target peer is

@@ -33,6 +33,16 @@ def cleanup(sig: int, frame: Any) -> None:
     global running
     print("\n[SYSTEM] Terminating Mesh...")
     running = False
+    # Kill agents inside network namespaces first.  "ip netns exec" forks
+    # the child, so terminating the ip process alone orphans the agent.
+    # We must explicitly kill the agents inside each namespace.
+    for node_id in nodes:
+        ns_file = f"/run/netns/{node_id}"
+        if os.path.exists(ns_file):
+            subprocess.run(
+                ["ip", "netns", "exec", node_id, "pkill", "-9", "neuro_agent"],
+                capture_output=True, timeout=3
+            )
     for p in processes:
         if p.poll() is None:
             p.terminate()
@@ -78,10 +88,11 @@ def restart_node(index: int, node_id: str) -> None:
     except Exception:
         pass
 
-    log_file = open(f"logs/{node_id}.log", "a")
+    log_file = open(f"logs/{node_id}.log", "a", buffering=1)
     log_files[index] = log_file
+    cmd = ["ip", "netns", "exec", node_id, "./bin/neuro_agent", node_id] if os.path.exists(f"/run/netns/{node_id}") else ["./bin/neuro_agent", node_id]
     new_p = subprocess.Popen(
-        ["./bin/neuro_agent", node_id],
+        cmd,
         stdout=log_file,
         stderr=subprocess.STDOUT,
         env={**os.environ, "NEURO_IPC_TOKEN": ipc_token},
@@ -105,10 +116,11 @@ os.makedirs("logs", exist_ok=True)
 
 print("[BOOT] Launching Neuro-Mesh...")
 for i, node_id in enumerate(nodes):
-    log_file = open(f"logs/{node_id}.log", "a")
+    log_file = open(f"logs/{node_id}.log", "a", buffering=1)
     log_files.append(log_file)
+    cmd = ["ip", "netns", "exec", node_id, "./bin/neuro_agent", node_id] if os.path.exists(f"/run/netns/{node_id}") else ["./bin/neuro_agent", node_id]
     p = subprocess.Popen(
-        ["./bin/neuro_agent", node_id],
+        cmd,
         stdout=log_file,
         stderr=subprocess.STDOUT,
         env={**os.environ, "NEURO_IPC_TOKEN": ipc_token},
