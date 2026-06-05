@@ -78,8 +78,15 @@ jobs:
         if: matrix.mode == 'sanitize'
         run: make clean && make -j$(nproc) SANITIZE=1
 
-      - name: Run unit tests
+      - name: Run unit tests (release)
+        if: matrix.mode == 'release'
         run: make test
+      - name: Run unit tests (debug)
+        if: matrix.mode == 'debug'
+        run: make test DEBUG=1
+      - name: Run unit tests (sanitize)
+        if: matrix.mode == 'sanitize'
+        run: make test SANITIZE=1
 
   # ─────────────────────────────────────────────
   # Docker build & integration

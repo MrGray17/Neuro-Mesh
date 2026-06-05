@@ -15,7 +15,9 @@
 #   ============================================================
 
 # ---- Toolchain ----
-CXX := clang++
+ifeq ($(origin CXX),default)
+  CXX := clang++
+endif
 CC  := clang
 
 # ---- Build mode ----

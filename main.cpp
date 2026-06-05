@@ -72,8 +72,8 @@ static float network_entropy_score() {
     uint64_t total = 0;
     char line[256];
     // Skip the two header lines
-    std::fgets(line, sizeof(line), f);
-    std::fgets(line, sizeof(line), f);
+    (void)std::fgets(line, sizeof(line), f);
+    (void)std::fgets(line, sizeof(line), f);
 
     while (std::fgets(line, sizeof(line), f)) {
         char* colon = std::strchr(line, ':');
@@ -114,7 +114,7 @@ static float onnx_to_entropy(float score) {
 
 void signal_handler(int /*signum*/) {
     const char msg[] = "\n[SYS] Interrupt signal received. Initiating shutdown...\n";
-    ::write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)::write(STDERR_FILENO, msg, sizeof(msg) - 1);
     global_running.store(false, std::memory_order_seq_cst);
 }
 
@@ -317,7 +317,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                 std::cerr << "[IPC] REJECTED: command from uid=" << cred.uid
                           << " pid=" << cred.pid << " (not authorized)" << std::endl;
                 const char* reject = "REJECT:AUTH\n";
-                write(client_fd, reject, strlen(reject));
+                (void)write(client_fd, reject, strlen(reject));
                 close(client_fd);
                 continue;
             }
@@ -365,7 +365,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                     std::cerr << "[IPC] REJECTED: rate limit exceeded for uid=" << cred.uid
                               << " (" << rl.window.size() << " req/sec)" << std::endl;
                     const char* reject = "REJECT:RATE_LIMIT\n";
-                    write(client_fd, reject, strlen(reject));
+                    (void)write(client_fd, reject, strlen(reject));
                     close(client_fd);
                     continue;
                 }
@@ -406,7 +406,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                 CRYPTO_memcmp(received_token.data(), ipc_token.data(), received_token.size()) != 0) {
                 std::cerr << "[IPC] REJECTED: invalid token from uid=" << cred.uid << std::endl;
                 const char* reject = "REJECT:AUTH_TOKEN\n";
-                write(client_fd, reject, strlen(reject));
+                (void)write(client_fd, reject, strlen(reject));
                 close(client_fd);
                 continue;
             }
@@ -439,19 +439,19 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
 
                     if (inject_target.empty() || inject_target.size() > 64) {
                         const char* reject = "REJECT:INVALID_TARGET\n";
-                        write(client_fd, reject, strlen(reject));
+                        (void)write(client_fd, reject, strlen(reject));
                         close(client_fd);
                         continue;
                     }
                     if (evidence.empty() || evidence.size() > 65536) {
                         const char* reject = "REJECT:EVIDENCE_TOO_LARGE\n";
-                        write(client_fd, reject, strlen(reject));
+                        (void)write(client_fd, reject, strlen(reject));
                         close(client_fd);
                         continue;
                     }
                     if (evidence[0] != '{' || evidence.find('\0') != std::string::npos) {
                         const char* reject = "REJECT:INVALID_EVIDENCE\n";
-                        write(client_fd, reject, strlen(reject));
+                        (void)write(client_fd, reject, strlen(reject));
                         close(client_fd);
                         continue;
                     }
@@ -461,7 +461,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                     mesh.initiate_consensus(inject_target, evidence);
 
                     const char* ack = "ACK:INJECT\n";
-                    write(client_fd, ack, strlen(ack));
+                    (void)write(client_fd, ack, strlen(ack));
                 }
             } else if (cmd.rfind("CMD:ISOLATE ", 0) == 0) {
                 std::string payload = cmd.substr(strlen("CMD:ISOLATE "));
@@ -472,19 +472,19 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
 
                     if (isolate_target.empty() || isolate_target.size() > 64) {
                         const char* reject = "REJECT:INVALID_TARGET\n";
-                        write(client_fd, reject, strlen(reject));
+                        (void)write(client_fd, reject, strlen(reject));
                         close(client_fd);
                         continue;
                     }
                     if (evidence.empty() || evidence.size() > 65536) {
                         const char* reject = "REJECT:EVIDENCE_TOO_LARGE\n";
-                        write(client_fd, reject, strlen(reject));
+                        (void)write(client_fd, reject, strlen(reject));
                         close(client_fd);
                         continue;
                     }
                     if (evidence[0] != '{' || evidence.find('\0') != std::string::npos) {
                         const char* reject = "REJECT:INVALID_EVIDENCE\n";
-                        write(client_fd, reject, strlen(reject));
+                        (void)write(client_fd, reject, strlen(reject));
                         close(client_fd);
                         continue;
                     }
@@ -494,7 +494,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                     mesh.initiate_consensus(isolate_target, evidence);
 
                     const char* ack = "ACK:ISOLATE\n";
-                    write(client_fd, ack, strlen(ack));
+                    (void)write(client_fd, ack, strlen(ack));
                 }
             } else if (cmd == "CMD:RESET") {
                 jailer.reset_enforcement();

@@ -92,9 +92,8 @@ def query_llm(prompt):
         # `req` is built from a hardcoded endpoint; user data is only in `payload`.
         # The URL is constructed from a constant in `data["endpoint"]` validated by the
         # analysis pipeline; `ctx` enforces certificate verification (no MITM).
-        resp = json.loads(
-            urllib.request.urlopen(req, context=ctx).read()
-        )  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+        resp = json.loads(urllib.request.urlopen(req, context=ctx).read())
         print(resp["choices"][0]["message"]["content"])
     except Exception as e:
         print("LLM call failed:", e)
