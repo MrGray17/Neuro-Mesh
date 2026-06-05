@@ -68,3 +68,6 @@ package-lock.json
 
 # Pre-commit
 .pre-commit-config.yaml
+
+# Third-party (cloned fresh inside Dockerfile to ensure submodules)
+third_party/

@@ -225,7 +225,7 @@ jobs:
           echo "=== Checking for unsafe Python functions ==="
           FOUND=0
           for pattern in 'os\.system(' '\beval(' '\bexec('; do
-            MATCHES=$(grep -rn "$pattern" --include='*.py' . | grep -v '_archive_old' || true)
+            MATCHES=$(grep -rn "$pattern" --include='*.py' . | grep -v '_archive_old' | grep -v 'third_party' || true)
             if [ -n "$MATCHES" ]; then
               echo "WARNING: Found $pattern:"
               echo "$MATCHES"

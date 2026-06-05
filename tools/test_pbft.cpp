@@ -161,17 +161,21 @@ int main() {
         ASSERT(pbft.verify_message(msg1));
         ASSERT(pbft.advance_state(msg1) == PBFTStage::PREPARE);
 
+        auto msg1b = make_msg("PREPARE", "A", "B", key_a.get());
+        ASSERT(pbft.verify_message(msg1b));
+        ASSERT(pbft.advance_state(msg1b) == PBFTStage::IDLE);  // 1 vote, need 3
+
         auto msg2 = make_msg("PREPARE", "B", "B", key_b.get());
         ASSERT(pbft.verify_message(msg2));
-        ASSERT(pbft.advance_state(msg2) == PBFTStage::IDLE);  // 1 vote, need 3
+        ASSERT(pbft.advance_state(msg2) == PBFTStage::IDLE);  // 2 votes, need 3
 
         auto msg3 = make_msg("PREPARE", "C", "B", key_c.get());
         ASSERT(pbft.verify_message(msg3));
-        ASSERT(pbft.advance_state(msg3) == PBFTStage::IDLE);  // 2 votes, need 3
+        ASSERT(pbft.advance_state(msg3) == PBFTStage::COMMIT);  // 3 votes (A,B,C), advance
 
         auto msg3b = make_msg("PREPARE", "D", "B", key_d.get());
         ASSERT(pbft.verify_message(msg3b));
-        ASSERT(pbft.advance_state(msg3b) == PBFTStage::COMMIT);  // 3 votes, quorum=3
+        ASSERT(pbft.advance_state(msg3b) == PBFTStage::IDLE);  // already COMMIT
 
         auto msg4 = make_msg("COMMIT", "A", "B", key_a.get());
         ASSERT(pbft.verify_message(msg4));
