@@ -2,6 +2,7 @@
 #include "kernel/sensor.skel.h"
 #include <iostream>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <net/if.h>
 #include <dirent.h>
 #include <unordered_set>
@@ -39,8 +40,46 @@ NodeAgent::Result NodeAgent::create(const std::string& node_id) {
 }
 
 std::string NodeAgent::load_and_attach_ebpf() {
+    // Bump RLIMIT_MEMLOCK explicitly so libbpf's "Failed to bump RLIMIT_MEMLOCK"
+    // warning is suppressed when we have privilege. Non-root users cannot raise
+    // the soft limit above the hard limit (returns EPERM silently), but
+    // pre-existing high limits still work.
+    struct rlimit rl{};
+    if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
+        const rlim_t desired = 64UL * 1024 * 1024;
+        if (rl.rlim_cur < desired) {
+            rl.rlim_cur = (rl.rlim_max == RLIM_INFINITY || rl.rlim_max > desired) ? desired : rl.rlim_max;
+            (void)setrlimit(RLIMIT_MEMLOCK, &rl);
+        }
+    }
+
     m_skel = sensor_bpf__open_and_load();
-    if (!m_skel) return "Failed to open/load eBPF skeleton";
+    if (!m_skel) {
+        // Produce an actionable error. The three common root causes:
+        //   1. unprivileged_bpf_disabled=2 (kernel 5.8+ default) without CAP_BPF
+        //   2. Container without --cap-add=CAP_BPF,CAP_PERFMON or --privileged
+        //   3. RLIMIT_MEMLOCK < required (already addressed above; informational)
+        std::string err = "Failed to open/load eBPF skeleton — ";
+        if (getuid() != 0) {
+            FILE* f = std::fopen("/proc/sys/kernel/unprivileged_bpf_disabled", "r");
+            int unpriv = 0;
+            if (f) { (void)std::fscanf(f, "%d", &unpriv); std::fclose(f); }
+            if (unpriv >= 1) {
+                err += std::string("kernel has unprivileged_bpf_disabled=")
+                     + std::to_string(unpriv)
+                     + " and we are not root. Run as root, grant CAP_BPF+CAP_PERFMON, "
+                       "or use --privileged in Docker. Falling back to /proc/net/dev entropy.";
+            } else {
+                err += std::string("bpf() syscall returned EPERM. Run as root or with "
+                                   "--cap-add=CAP_BPF,CAP_PERFMON. "
+                                   "Falling back to /proc/net/dev entropy.");
+            }
+        } else {
+            err += std::string("bpf() syscall failed. Check dmesg for verifier errors. "
+                               "Falling back to /proc/net/dev entropy.");
+        }
+        return err;
+    }
 
     // Attach kprobes manually (tracepoints don't need an interface).
     // SEC("kprobe/...") programs attach via bpf_program__attach_kprobe.
