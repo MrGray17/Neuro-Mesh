@@ -350,7 +350,7 @@ void PrometheusExporter::metrics_loop() {
 
                 if (requests_this_second >= kMaxRequestsPerSecond) {
                     const char* resp = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n";
-                    write(client, resp, strlen(resp));
+                    { ssize_t _r = write(client, resp, strlen(resp)); (void)_r; }
                 } else {
                     ++requests_this_second;
                     std::string metrics = get_metrics();
@@ -358,7 +358,7 @@ void PrometheusExporter::metrics_loop() {
                     response += "Content-Length: " + std::to_string(metrics.size()) + "\r\n";
                     response += "Connection: close\r\n\r\n";
                     response += metrics;
-                    write(client, response.data(), response.size());
+                    { ssize_t _r = write(client, response.data(), response.size()); (void)_r; }
                 }
                 close(client);
             }
