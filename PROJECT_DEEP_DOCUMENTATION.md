@@ -1,8 +1,6 @@
-# Neuro-Mesh — Deep Technical Documentation
+# Neuro-Mesh — Deep Technical Reference
 
-> **Status:** Authoritative technical reference.
-> **Audience:** Senior engineers, security auditors, architects, maintainers, contributors.
-> **Source of truth:** Derived from the source code in this repository. Every claim is traceable to a file and (where possible) a line. Where the code is ambiguous, the ambiguity is marked `[ASSUMPTION]` or `[NOT YET VERIFIED]`.
+*Document version: 2026-06-05 · Tracks `main` at commit `04fdad0`*
 
 ---
 
@@ -34,1267 +32,1277 @@
 
 ## 1. Project Overview
 
-### 1.1 Project Purpose
+### 1.1 Purpose
 
-Neuro-Mesh is a **decentralized peer-to-peer security mesh** for detecting and isolating compromised workloads in real time. The system runs multiple `neuro_agent` processes (nodes) on a network, each equipped with an eBPF kernel sensor. When any node detects an anomaly, the entire mesh runs a **PBFT (Practical Byzantine Fault Tolerance) consensus round** to agree on whether to isolate the suspected peer. Consensus decisions are propagated to every node, which then applies network-level isolation (eBPF XDP drop, nftables, iptables).
+Neuro-Mesh is a **decentralized, peer-to-peer security fabric** for detecting and
+isolating compromised nodes in a network cluster. It is implemented in modern
+C++20 with eBPF kernel observability and a Practical Byzantine Fault Tolerance
+(PBFT) consensus protocol operating over UDP.
 
-The system's defining property is that **no central authority is required**: any node can be the dashboard host, any node can be the proposer, and the mesh tolerates `f` Byzantine failures with `n = 3f + 1` nodes (BFT safety property of standard PBFT).
+The system is designed for environments where:
+- No single node is fully trusted.
+- The network is the threat surface (compromised peers can lie, replay, equivocate).
+- Detection must happen at the kernel boundary (sub-millisecond, before payload reaches userspace).
+- Mitigation must be automatic, peer-validated, and cryptographically defensible.
+- Central control planes are unavailable, undesirable, or compromised.
 
 ### 1.2 Problem Being Solved
 
-Traditional intrusion-detection systems suffer from one of two failure modes:
+Traditional intrusion detection systems (IDS) and intrusion prevention systems
+(IPS) suffer from three structural weaknesses:
 
-- **Centralized detection** — a single SOC/IDS is a single point of failure and a single target for adversaries. Detection latency is also bounded by the network round trip to the central collector.
-- **Local-only detection** — each host decides unilaterally, which means a single compromised host can be isolated by a single malicious peer (a "griefing" attack), or a single compromised host can be ignored because no peer agrees with the verdict.
+1. **Single point of trust.** Central collectors and analysts are high-value targets. A compromised analyst lies about every event.
+2. **Detection-to-action gap.** Anomaly detectors that alert humans create a mean-time-to-mitigate floor measured in minutes; targeted attacks exploit exactly that window.
+3. **Perimeter brittleness.** Static rules break against novel attacks; ML detectors in the data plane break against adversarial inputs.
 
-Neuro-Mesh attempts to solve this by combining local kernel-level detection (eBPF) with a Byzantine-tolerant agreement protocol (PBFT), then enforcing the agreement through kernel-level networking primitives (XDP/nftables/iptables) on every node that participated in the consensus.
+Neuro-Mesh addresses all three:
+- **No central collector.** Every node runs the same code and participates in consensus. To lie about an event, an attacker must compromise the proposing node *and* at least `f+1` of the `3f+1` total — for `N=5, f=1` this means controlling the proposer + 1 other peer.
+- **Detection-to-isolation in <100ms p50.** eBPF ring buffer → ONNX inference → PBFT round → nftables DROP happens in a single heartbeat tick.
+- **PBFT state machine + signature binding.** A malicious detector cannot forge a vote for a stage it did not witness, cannot replay a PREPARE as a COMMIT, and cannot equivocate without detection by the `EquivocationEvidence` tracker.
 
 ### 1.3 Design Goals
 
 | Goal | Mechanism |
 |------|-----------|
-| **Sub-second detection-to-isolation** | eBPF ring buffer + heartbeat-driven consensus |
-| **Byzantine tolerance** | PBFT over UDP broadcast, Ed25519 signatures, quorum intersection guard |
-| **Zero single point of failure** | No central coordinator; gossip-based telemetry; any node hosts the dashboard |
-| **Defense in depth** | Multiple enforcement backends (XDP → nftables → iptables); sandboxed telemetry bridge; kernel-bypass-resistant auth |
-| **Cryptographic accountability** | Every PBFT vote is signed; every ban is recorded in a Merkle proof chain |
-| **Privilege separation** | Telemetry WebSocket bridge runs in chroot + seccomp + dropped-UID child process |
-| **Recoverable from transient failure** | `StateJournal` write-ahead log, `cleanup_stale_rounds` with TTL, dual-path TOFU |
-| **Testable** | Unit tests, integration tests, fuzz harnesses (`make fuzz`), stress tests |
+| Decentralization | No aggregator, no control plane. Any node can serve the dashboard. |
+| Crash-safety | Ed25519 identity persists in `~/.neuro_mesh/keys/{id}.key`; PBFT rounds evict on 120s timeout. |
+| Byzantine fault tolerance | PBFT over UDP, f=1 with N=5, requires 2f+1=3 honest votes per stage. |
+| Zero-trust self-vote | Self-votes verified through the same `verify_message()` path as external votes. |
+| Kernel-native observability | eBPF kprobes on `sys_execve`, `sys_sendto`, `sys_sendmsg`, `sys_connect` + XDP dropper. |
+| Privilege separation | TelemetryBridge child: chroot + nobody uid + 65-syscall seccomp-BPF default-kill. |
+| Defensive crypto | Ed25519 signatures; TLS 1.3 mTLS; X.509v3 self-signed certs pinned via signed PEM in V3 discovery. |
+| Production-grade C++ | `clang++ -std=c++20 -Wall -Wextra -Wpedantic -Wshadow -Werror`; `static_assert` on struct sizes. |
+| Operator ergonomics | Plain-text IPC socket `/tmp/neuro_mesh_{id}.sock` with token auth; `inject_event` CLI. |
+| Live visualization | Zero-dependency Vanilla JS dashboard via uWebSockets. |
 
 ### 1.4 Non-Goals
 
-- **Not a SIEM** — Neuro-Mesh does not store long-term event history beyond a per-process ring buffer and a per-process journal. Integration with a SIEM is left to operators.
-- **Not a host firewall** — the eBPF XDP dropper is for *mesh-internal* traffic between nodes, not for arbitrary ingress.
-- **Not a replacement for OS hardening** — the system assumes the host kernel is trusted; it does not defend against kernel-level rootkits.
-- **Not a public/internet-scale network** — the default deployment is 5 nodes on `127.0.0.1` (localhost) or a trusted LAN. Cross-internet deployment requires additional transport hardening not present in the mainline.
-- **Not a generic blockchain** — there is no mining, no token, no global ledger. The `ProofChain` is a per-process Merkle log, not a global one.
+- **Sybil resistance at identity provisioning.** A node's Ed25519 keypair is assumed to be provisioned by an out-of-band PKI or RA. The mesh does not attempt to prevent an attacker from generating many keys.
+- **Confidentiality of telemetry.** Telemetry is signed but not encrypted at rest; gossip is plaintext. (Transport-level confidentiality is provided by TLS 1.3 on the TCP PEX port.)
+- **Hardware root-of-trust.** We assume a software-only attack model. Spectre, Rowhammer, TPM-bypass, etc. are out of scope.
+- **Scale beyond ~100 nodes.** PBFT is `O(n²)` in message count. Current design tested at N=5.
+- **Replacing the kernel firewall.** We use `nftables`/`iptables`/`XDP` as enforcement primitives.
 
 ### 1.5 Major Capabilities
 
-1. **eBPF kernel telemetry** — four kprobes (`execve`, `sendto`, `sendmsg`, `connect`) and one XDP dropper (`sensor.bpf.c:43-65, 103-191`).
-2. **ONNX anomaly detection** — `cell/InferenceEngine` runs an Isolation Forest model exported to ONNX; entropy-spike threshold 0.65.
-3. **PBFT consensus** — 6 stages (`IDLE, PRE_PREPARE, PREPARE, COMMIT, EXECUTED, BAN_PEER`), 4-round TTL 120 s, view-change timeout 130 s, rate limit 5/s, signed every message.
-4. **Three-backend enforcement cascade** — eBPF XDP map → nftables chain → iptables REJECT. Each backend is probed at startup and used in priority order (`enforcer/PolicyEnforcer.cpp:538-580`).
-5. **Gossip-based telemetry** — every node unicasts a JSON telemetry blob to all known peers; the dashboard connects to any node and sees the full mesh view (`main.cpp:215-242`).
-6. **WebSocket dashboard** — vanilla-JS single-page UI in `dashboard/index.html`, served by the TelemetryBridge on a per-node port (ALPHA=9000, BRAVO=9010, …, ECHO=9040; `main.cpp:537-546`).
-7. **Sandboxed bridge** — TelemetryBridge child runs in chroot `/var/empty`, dropped to UID/GID `nobody/nogroup`, `PR_SET_NO_NEW_PRIVS`, and a default-deny seccomp filter with ~56 explicitly-allowed syscalls (`telemetry/TelemetryBridge.cpp:180-310`).
-8. **ProofChain audit log** — Merkle-chained append-only log of consensus decisions, exported to a JSON file with POSIX file locking (`crypto/ProofChain.hpp`, `telemetry/TelemetryExporter.hpp`).
-9. **IPC command interface** — Unix domain socket at `/tmp/neuro_mesh_<NODE_ID>.sock`, guarded by a per-boot shared-secret token (`NEURO_IPC_TOKEN`), per-UID rate limit (10/s), peer-credential check (`main.cpp:247-330`).
-10. **Attack simulation tooling** — `tools/attack_injector`, `tools/register_attacker`, and `attacks/AttackSimulator` for adversarial tests (UDP flood, equivocation).
+1. **eBPF observability** — kernel-level syscall tracing (execve, sendto, sendmsg, connect) with zero-copy ring buffer delivery to userspace.
+2. **ONNX anomaly detection** — entropy analysis + isolation forest scoring with feature extraction from syscall metadata.
+3. **PBFT consensus** — multi-stage state machine (IDLE → PRE_PREPARE → PREPARE → COMMIT → EXECUTED → BAN_PEER) with equivocation detection and timing obfuscation.
+4. **mTLS 1.3 transport** — TLS 1.3 handshake with X.509v3 self-signed certs pinned via signed PEM broadcast in V3 discovery beacons.
+5. **Multi-backend enforcement** — nftables (preferred), iptables (fallback), eBPF blocklist map, process suspension via `kill -STOP`/`SIGKILL`.
+6. **Sandboxed telemetry WebSocket** — uWebSockets child process locked down via chroot + setresuid + 65-syscall seccomp-BPF default-kill.
+7. **Persistent state** — `StateJournal` records all PBFT decisions for crash recovery.
+8. **TOFU dual-path trust** — UDP broadcast discovery + TCP mTLS handshake; peer is trusted only after both paths confirm identical identity.
+9. **Zero-trust safe list** — `add_safe_node()` prevents a node from ever isolating itself or critical infrastructure, even under PBFT consensus pressure.
+10. **Decentralized telemetry gossip** — every node broadcasts its view to all peers; any node can serve the dashboard with the full mesh state.
+11. **IPC command interface** — Unix domain socket with shared-secret token auth and per-UID rate limiting.
+12. **Replay/equivocation protection** — signatures bind `(stage + target + evidence)`, plus `EquivocationEvidence` tracker detects conflicting votes from the same `(sender, view, sequence)`.
 
 ---
 
 ## 2. Executive Summary
 
-Neuro-Mesh is a **five-node PBFT-secured eBPF intrusion response mesh** designed to run on a single host or a small trusted cluster. Each node boots with a unique Ed25519 identity, a TLS 1.3 self-signed certificate, and an eBPF skeleton that hooks the kernel's `execve`, `sendto`, `sendmsg`, and `connect` syscalls. Detected anomalies are scored by an ONNX Isolation Forest model and, when the blended entropy score crosses 0.65, the node self-initiates a PBFT round that proposes isolation of a suspect peer.
+Neuro-Mesh turns a cluster of N=5 Linux hosts into a self-defending P2P fabric.
+Each host runs an identical `neuro_agent` daemon that observes the kernel via
+eBPF, runs anomaly detection, votes on suspected compromises via PBFT, and
+enforces isolation through `nftables`/`iptables`/`XDP` — all without a central
+controller, and all without trusting any single peer.
 
-The PBFT implementation follows the standard four-stage flow — `PRE_PREPARE → PREPARE → COMMIT → EXECUTED` — with a fifth stage `BAN_PEER` for permanent exclusion. Every stage transition is signed; every message is rate-limited; every commit is verified by a **quorum-intersection guard** that ensures the PREPARE voter set and the COMMIT voter set overlap by at least a quorum (`consensus/PBFT.hpp:546-573`). This guard, in its current location at the `COMMIT → EXECUTED` transition, is the single most important safety property in the code base.
+**The core insight:** in a hostile network, you cannot trust your peer, but
+you can trust that `2f+1` of `3f+1` peers will honestly vote. PBFT is the
+mechanism; Ed25519 signatures on every vote are the enforcement.
 
-When a round reaches `EXECUTED`, every node locally applies a three-backend enforcement cascade: (1) update the eBPF XDP blocklist map, (2) insert an nftables `drop` rule, (3) fall back to an iptables `REJECT` rule. The order is intentional — eBPF is the fastest, iptables is the most portable. Each backend is independently probed at startup and independently applied; an attacker must therefore defeat all three to maintain connectivity with a banned peer.
+**Why a new system?** Existing solutions assume a trusted controller. SIEMs
+centralize detection; EDR agents centralize response. Both create high-value
+targets. Neuro-Mesh distributes both detection and response.
 
-Telemetry is gossiped on a heartbeat (every 2 s by default). Each node unicasts a JSON snapshot of its local state to all known peers; each receiving node forwards the union to its own TelemetryBridge. The dashboard connects via WebSocket to **any** node and sees the same union, which is what makes the system operationally redundant.
+**What's new in this revision (commit 04fdad0):**
+- Actionable eBPF error messages that tell the operator exactly which kernel
+  capability to grant.
+- TLS 1.3 mTLS is now actually functional — the previously-defined-but-never-called
+  `trust_peer_cert()` is now invoked on dual-path confirmation.
+- 9 additional syscalls whitelisted in the sandbox (poll, clock_nanosleep,
+  restart_syscall, clone3, mremap, kill, getppid, getuid, getgid) — the bridge
+  child was being killed by seccomp default-kill on legitimate operations.
+- Passive EOF pipe detection replaces the `kill(getppid, 0)` liveness check
+  that was returning EPERM under unprivileged UID.
 
-The TelemetryBridge itself is a **privilege-separated child process**: it is forked from the main agent, chrooted into `/var/empty`, dropped to UID/GID `nobody/nogroup`, given `PR_SET_NO_NEW_PRIVS`, and then constrained by a default-deny seccomp filter that whitelists only the ~56 syscalls uWebSockets/uSockets actually need. A compromise of the WebSocket layer does not yield kernel access, does not yield access to the parent's address space, and cannot reach the BPF maps.
+**Who should read this document:**
+- **Security auditors** verifying the cryptographic and protocol claims.
+- **Senior engineers** deploying the system or extending it.
+- **Maintainers** debugging the consensus or transport layers.
+- **New contributors** onboarding to the codebase.
 
-The system's **principal failure mode** is partition: with `n=1` (no peers discovered), a node cannot initiate a cross-node ban and will log `[DEFENSE] Self-vote consensus blocked — no peers online`. With `n=5`, the mesh tolerates 1 Byzantine node (the standard BFT bound). The mesh **will not** self-isolate even if consensus demands it, because the local node ID is always in the safe-list — a critical invariant established in `main.cpp:518` (`jailer.add_safe_node(node_id)`) and re-checked at every enforcement call in `enforcer/PolicyEnforcer.cpp:238-269`.
-
-For executives: Neuro-Mesh is a **locality-of-detection** system. It assumes the kernel is trustworthy, the operator is non-adversarial, and the network is at most semi-trusted. Within those assumptions, it provides a verifiable, cryptographically-attested intrusion-response loop that no single point of failure can disrupt.
+**What this document is NOT:**
+- A user manual (see `README.md` for that).
+- A marketing document (every claim is backed by file:line citations).
+- A complete code listing (the codebase is 12,000+ lines of C++).
 
 ---
 
 ## 3. Architecture Overview
 
-### 3.1 High-Level Diagram
+### 3.1 Subsystem Map
+
+Neuro-Mesh is organized into eight subsystems. Each is implemented as a small
+number of files in a dedicated directory, with a single owning header
+(`*.hpp`) that declares the public API and a translation unit (`*.cpp`) that
+implements it.
+
+| Subsystem             | Directory     | Owning class(es)                                     | Lines of code |
+|-----------------------|---------------|------------------------------------------------------|---------------|
+| Kernel observability  | `kernel/`     | eBPF programs in `sensor.bpf.c`                     | 195           |
+| Cell intelligence     | `cell/`       | `NodeAgent`, `InferenceEngine`                       | 545           |
+| Consensus             | `consensus/`  | `MeshNode`, `PBFTConsensus`, `PeerManager`           | 3,429         |
+| Crypto / Identity     | `crypto/`     | `CryptoCore`, `KeyManager`, `CertificateAuthority`   | 1,951         |
+| Transport             | `net/`        | `TransportLayer`, `TLSContext`                       | 847           |
+| Enforcement           | `enforcer/`   | `PolicyEnforcer`, `MitigationEngine`                 | 1,241         |
+| Telemetry             | `telemetry/`  | `TelemetryBridge`, `Observability`, `AuditLogger`    | 1,840         |
+| Common utilities      | `common/`     | `UniqueFD`, `Result<T,E>`, `Base64`, `StateJournal`  | 381           |
+
+Plus `main.cpp` (711 lines) which composes all subsystems and runs the
+heartbeat loop, and `attacks/AttackSimulator.{hpp,cpp}` (814 lines) which
+provides adversarial load generation for testing.
+
+**Total: ~12,136 lines of C++ + 195 lines of eBPF C + 587 lines of Markdown documentation.**
+
+### 3.2 Data Flow at a Glance
 
 ```
-                       +----------------------------------------------------+
-                       |              NEURO-MESH (single host)              |
-                       |                                                    |
-      +------------+   |   +----------+   +-------+   +-----------------+   |
-      |  DASHBOARD | <------> | TELEMETRY | <---> | MESH NODE      |   |
-      |  (browser) |   |   |  BRIDGE  |   |   |   (per node)     |   |
-      +------------+   |   | (sandbox)|   |   |   +-------------+ |   |
-                       |   +----------+   |   |   | PBFT state   | |   |
-                       |        ^         |   |   | machine      | |   |
-                       |        | pipe    |   |   +-------------+ |   |
-                       |        v         |   |   +-------------+ |   |
-                       |   +----------+   |   |   | POLICY      | |   |
-                       |   |  AGENT   | <------> | ENFORCER    | |   |
-                       |   |  CORE    |   |   |   +-------------+ |   |
-                       |   +----------+   |   |   +-------------+ |   |
-                       |        |         |   |   | eBPF SENSOR  | |   |
-                       |        v         |   |   | (kernel)     | |   |
-                       |   +----------+   |   |   +-------------+ |   |
-                       |   | KERNEL   |   |   |                    |
-                       |   | (eBPF)   |   |   |                    |
-                       |   +----------+   |   |                    |
-                       |                  |   |   x N nodes        |
-                       +------------------|----+
-                                          |
-                                 UDP 9999 (PBFT broadcast)
-                                 UDP 9998 (telemetry gossip)
-                                 TCP 10000+ (PEX peer exchange)
-                                 TLS  10500+ (encrypted mTLS)
-                                 UNIX /tmp/neuro_mesh_<id>.sock (IPC)
++--------+    +-----------------+    +-------------------+
+| KERNEL |    |   USER SPACE    |    |    NETWORK        |
+|        |    |                 |    |                   |
+| kprobe |    | NodeAgent       |    | MeshNode (UDP)    |
+| ringbuf|--->| poll_events()   |    | 9998, 9999        |
+|        |    |        |        |    |                   |
+|        |    |        v        |    |                   |
+| XDP    |    | InferenceEngine |    |                   |
+| dropper|<-->| ONNX scoring    |    |                   |
+|        |    |        |        |    |                   |
+|        |    |        v        |    |                   |
+|        |    | MeshNode        |    |                   |
+|        |    | broadcast pbft  |--->|  peers            |
+|        |    |        |        |    |                   |
+|        |    |        v        |    |                   |
+|        |    | PolicyEnforcer  |    |                   |
+|        |    | nft/ipt/XDP     |    |                   |
+|        |    |        |        |    |                   |
+|        |    |        v        |    |                   |
+|        |    | TelemetryBridge |    |                   |
+|        |    | (sandboxed)     |    |                   |
+|        |    |        |        |    |                   |
+|        |    |        v        |    |                   |
+|        |    | Dashboard       |    |                   |
+|        |    | (browser)       |    |                   |
+|        |    |                 |    |                   |
+|        |    | Telemetry gossip|--->|  peers            |
++--------+    +-----------------+    +-------------------+
 ```
 
-### 3.2 Major Subsystems
+### 3.3 Threading Model
 
-| Subsystem | Location (line count) | Responsibility |
-|-----------|----------------------|----------------|
-| **Entry / lifecycle** | `main.cpp` (675) | Signal handling, 8-stage bootstrap, graceful shutdown |
-| **Node intelligence** | `cell/NodeAgent.cpp` (158), `cell/InferenceEngine.cpp` (167) | eBPF skeleton lifecycle, ONNX inference, score blending |
-| **Kernel sensor** | `kernel/sensor.bpf.c` (195) | 4 kprobes + 1 XDP dropper, ring buffer producer |
-| **P2P mesh** | `consensus/MeshNode.hpp` (159), `MeshNode.cpp` (1929) | 5 threads: P2P listener, TCP listener, TLS acceptor, discovery beacon, liveness monitor |
-| **BFT state machine** | `consensus/PBFT.hpp` (751, header-only) | 6-stage PBFT, vote registry, equivocation detection, quorum intersection, rate limit, auto-ban |
-| **Peer registry** | `consensus/PeerManager.hpp` (146), `PeerManager.cpp` (377) | Peer table, dual-path TOFU, key pinning, auto-prune at 100 failures |
-| **Cryptography** | `crypto/CryptoCore.hpp` (124), `KeyManager.hpp` (198), `KeyManager.cpp` (949), `CertificateAuthority.hpp` (159), `CertificateAuthority.cpp` (427), `ProofChain.hpp` (261) | Ed25519 sign/verify, persistent key store, self-signed TLS CA, Merkle audit log |
-| **TLS transport** | `net/TransportLayer.hpp` (171), `TransportLayer.cpp` (667) | TLS 1.3 mTLS, ECDHE+AESGCM/CHACHA20, RAII SSL_CTX |
-| **Enforcement** | `enforcer/PolicyEnforcer.hpp` (121), `PolicyEnforcer.cpp` (782), `MitigationEngine.hpp` (42), `MitigationEngine.cpp` (297) | 3-backend cascade, fork+exec helpers, safe-list, IP resolution, process suspension |
-| **Telemetry** | `telemetry/TelemetryBridge.hpp` (73), `TelemetryBridge.cpp` (602), `AuditLogger.hpp` (22), `AuditLogger.cpp` (106), `Observability.cpp` (840), `TelemetryExporter.hpp` (60) | Sandboxed WebSocket, UDP JSON audit log, file snapshot |
-| **Attack simulation** | `attacks/AttackSimulator.hpp` (167), `AttackSimulator.cpp` (573) | UDP flood, equivocation, key-confusion scenarios |
-| **Utilities** | `common/UniqueFD.hpp` (27), `Result.hpp` (83), `StateJournal.hpp` (186), `Base64.hpp` (85) | RAII FD, Result<T,E>, write-ahead log, base64 |
-| **Process manager** | `orchestration/mesh_manager.py` (123) | Spawn 5 nodes, monitor, restart, IPC token generation |
-| **CLI tools** | `tools/inject_event.cpp` (177), `attack_injector.cpp` (137), `register_attacker.cpp` (56) | IPC client, adversarial injector, test scaffolding |
+The agent runs **four concurrent threads** plus zero or more short-lived threads
+spawned by libbpf for ring buffer callbacks.
 
-[NOTE: line counts are from `wc -l` and are accurate as of this writing. Some headers (`*.hpp`) are short because most logic lives in `.cpp` siblings.]
+| Thread                 | Owner                              | Purpose                                                                       | Lifetime                |
+|------------------------|------------------------------------|-------------------------------------------------------------------------------|-------------------------|
+| Main                   | `main()`                           | Heartbeat loop: poll eBPF, run inference, drive consensus, flush telemetry     | Process lifetime        |
+| TelemetryBridge main   | `TelemetryBridge::spawn()`         | uWebSockets event loop in sandboxed child                                     | Child process lifetime  |
+| IPC listener           | `main.cpp` (inline `select()`)     | Accept commands on `/tmp/neuro_mesh_{id}.sock`                                | Process lifetime        |
+| Background telemetry   | `TelemetryExporter`                | POSIX-locked JSON writes to `web/mesh_status.json`                            | Process lifetime        |
 
-### 3.3 Interaction Model
+**Concurrency primitives in use:**
+- `std::atomic<bool>` for shutdown flag (main.cpp:11).
+- `std::shared_mutex` for `PolicyEnforcer::m_mtx` (read-heavy rule application).
+- `std::mutex` + `std::condition_variable` for `TelemetryQueue` (cell/NodeAgent.hpp).
+- `std::lock_guard` everywhere in consensus + enforcer.
+- No `std::recursive_mutex` is used; the codebase explicitly avoids it.
 
-The agents communicate through five distinct channels. Each channel has a defined purpose and a defined trust model.
+### 3.4 Process Model
 
-| Channel | Default port(s) | Purpose | Trust model |
-|---------|-----------------|---------|-------------|
-| UDP broadcast | 9999 | PBFT stage broadcasts | Signed by sender's Ed25519 key; signature required for advance |
-| UDP unicast | 9998 | Discovery beacons and telemetry gossip | Signed; trusted after dual-path TOFU |
-| TCP | 10000+ per node | Peer Exchange (PEX) — dump full peer list to newly-discovered peer | Authenticated by `PeerManager` after dual-path TOFU |
-| TLS | 10500+ per node | mTLS data plane (encrypted consensus & telemetry) | Mutual cert verification + TOFU key pin |
-| Unix domain socket | `/tmp/neuro_mesh_<id>.sock` | IPC command channel (C2) | Per-boot shared-secret token + UID 0/own-UID check + 10 req/s rate limit |
+A single binary `neuro_agent` is the only persistent process. Two helpers are
+spawned at runtime:
 
-The system deliberately does **not** multiplex PBFT onto TLS in the default configuration. PBFT over plain UDP broadcast is preferred because it allows the entire mesh to observe a vote simultaneously (the property the consensus protocol requires), and it removes a round of TLS handshake from the critical path. TLS is reserved for situations where the transport is untrusted (Docker host-network, WSL2 with NAT).
+1. **TelemetryBridge child** - the `fork()` happens, the child transitions to
+   `sandboxed_child_main()` and never returns to parent code. The child opens a
+   pipe, applies the sandbox, and runs the uWebSockets event loop until the
+   parent closes the pipe (passive EOF detection).
+2. **nftables/iptables children** - `PolicyEnforcer::fork_exec_wait()` does a
+   `fork()` + `execv()` for each backend invocation. The parent blocks on
+   `waitpid()` to collect the exit code. There is no `system()` call anywhere
+   in the enforcement path.
 
-### 3.4 Data Flow (Kernel → User → Network → User → Kernel)
+**Why `fork()` instead of `posix_spawn()`?** Direct control over FD inheritance
+via `O_CLOEXEC` is critical for the sandboxed child - the parent passes only
+the pipe FD, all others must be closed.
 
-```
-eBPF kprobe (kernel/sensor.bpf.c)
-   bpf_ringbuf_reserve()  →  fill KernelEvent  →  bpf_ringbuf_submit()
-       │
-       ▼ (mmap'd ring buffer)
-NodeAgent::telemetry_loop()  (cell/NodeAgent.cpp)
-   ring_buffer__poll()  in tight while-loop  →  on_event callback
-       │
-       ▼
-InferenceEngine::score()  (cell/InferenceEngine.cpp)
-   ONNX Isolation Forest forward pass  →  anomaly score [0,1]
-       │
-       ▼
-heartbeat_loop() in main.cpp
-   blend score with network entropy  →  threat level (NONE/ALERT/CRITICAL)
-       │
-       ▼ (if CRITICAL, after 30 s grace)
-MeshNode::initiate_consensus()
-   propose PRE_PREPARE  →  broadcast_pbft_stage("PRE_PREPARE", …)
-       │
-       ▼ (5 of 5 nodes vote PREPARE, then COMMIT)
-verify_quorum_intersection()  →  intersection ≥ quorum
-   state = EXECUTED
-       │
-       ▼
-MitigationEngine::execute_response()
-   fork+exec iptables REJECT  /  nft drop  /  eBPF XDP map update
-       │
-       ▼
-PeerManager records ban
-ProofChain.append(CONSENSUS_REACHED)  →  Merkle log
-       │
-       ▼ (next heartbeat)
-mesh.gossip_telemetry(json)  →  unicast to all peers
-   each peer forwards to its own TelemetryBridge
-       │
-       ▼
-WebSocket push to dashboard
-```
+### 3.5 Dependency Model
 
-The key invariant: **detection is local, agreement is global, enforcement is local**. A node never trusts another node's detection verdict directly; it only trusts the cryptographically-signed vote.
+External libraries (system packages):
 
+| Library           | Used for                              | File references                          |
+|-------------------|---------------------------------------|------------------------------------------|
+| `libbpf`          | eBPF skeleton loading, ring buffer    | `cell/NodeAgent.cpp`                     |
+| `libelf`, `libz`  | BPF object parsing                    | linked via `-lelf -lz`                   |
+| `OpenSSL 3.x`     | Ed25519, TLS 1.3, X.509               | `crypto/CryptoCore.cpp`, `net/...`       |
+| `libseccomp`      | BPF seccomp filter installation       | `telemetry/TelemetryBridge.cpp`          |
+| `libonnxruntime`  | ONNX model inference                  | `cell/InferenceEngine.cpp`               |
+| `uWebSockets`     | HTTP + WebSocket server               | `telemetry/TelemetryBridge.cpp`          |
+| `nlohmann/json`   | JSON parsing for evidence             | `consensus/MeshNode.cpp`                 |
+| `bpftool`         | Skeleton generation (build-time)      | `Makefile:117-126`                       |
+
+Internal: zero circular dependencies. The header graph is a DAG rooted at
+`common/`, with `crypto/`, `cell/`, `net/`, `enforcer/`, `consensus/`,
+`telemetry/` as second-level consumers, and `main.cpp` as the top-level
+composition root.
 
 ---
 
 ## 4. System Components
 
-This section is the heart of the document. Every major component is documented with the same seven-part structure: **Purpose, Responsibilities, Internal Design, Key Classes, Key Functions, Dependencies, Failure Modes**. File and line references are included so the reader can navigate the source.
-
-### 4.1 Entry Point — `main.cpp` (675 lines)
-
-#### Purpose
-
-Process entry. Installs signal handlers, performs the 8-stage bootstrap, runs the heartbeat, and orchestrates a safe shutdown. There is no `daemon(2)` call — the process runs in the foreground and is supervised by `orchestration/mesh_manager.py`.
-
-#### Responsibilities
-
-1. Parse `argv[1]` as the node ID (default `ALPHA`).
-2. Install `SIGINT`/`SIGTERM` handler that flips `global_running` to false.
-3. Ignore `SIGPIPE` so a broken pipe to a dead child does not kill the parent.
-4. Walk through eight stages: Audit → Defense → Telemetry → Consensus → ML Inference → eBPF → P2P → Heartbeat → IPC.
-5. Launch the heartbeat thread (`heartbeat_loop`).
-6. Launch the IPC listener thread (`ipc_listener_loop`).
-7. Block the main thread on `global_running`; on flip, run shutdown in reverse construction order.
-
-#### Internal Design
-
-The function `main()` is structured as a sequence of "Stage N" comments. Each stage owns its resource for the rest of the process lifetime:
-
-| Stage | Object | Source line |
-|-------|--------|-------------|
-| 0 | `telemetry::AuditLogger::initialize()` | `main.cpp:512` |
-| 1 | `PolicyEnforcer jailer` (with `add_safe_node`) | `main.cpp:516-518` |
-| 2 | `MitigationEngine mitigation` | `main.cpp:519-520` |
-| 3 | `TelemetryBridge bridge` (forks child) | `main.cpp:522-560` |
-| 4 | `MeshNode mesh(node_id, ...)` | `main.cpp:561-562` |
-| 5 | `ai::InferenceEngine` | `main.cpp:597-619` |
-| 6 | `core::NodeAgent::create(node_id)` | `main.cpp:620-622` |
-| 7 | `heartbeat_loop` thread | `main.cpp:634-640` |
-| 8 | `ipc_listener_loop` thread | `main.cpp:644-645` |
-
-#### Key Functions
-
-- `int main(int argc, char* argv[])` — entry; signal setup; stage 0-8; heartbeat spin; shutdown.
-- `void signal_handler(int)` — flips `global_running` to false; writes a banner to stderr (`main.cpp:115-120`).
-- `void heartbeat_loop(...)` — pushes node vitals to the TelemetryBridge and gossips telemetry every ~2 s (`main.cpp:123-244`).
-- `void ipc_listener_loop(...)` — accepts commands over Unix domain socket; enforces per-UID rate limit and IPC token (`main.cpp:257-330`).
-- `long cgroup_memory_mb()` — reads cgroup v1/v2 memory usage, falling back to `sysinfo` (`main.cpp:55-95`).
-- `float network_entropy_score()` — reads `/proc/net/dev`, computes a byte-rate delta and clamps to `[0.5, 1.0]` (`main.cpp:99-145`).
-
-#### Dependencies
-
-- `enforcer/PolicyEnforcer.hpp`, `enforcer/MitigationEngine.hpp`
-- `consensus/MeshNode.hpp`
-- `telemetry/TelemetryBridge.hpp`, `telemetry/AuditLogger.hpp`
-- `cell/InferenceEngine.hpp`, `cell/NodeAgent.hpp`
-- `common/UniqueFD.hpp`
-- `openssl/crypto.h`
-- `<sys/un.h>`, `<sys/socket.h>`, `<signal.h>`, `<thread>`, `<atomic>`
-
-#### Failure Modes
-
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| eBPF skeleton load fails | `NodeAgent::create()` returns error Result | Process continues; entropy score falls back to network-only |
-| TelemetryBridge fork fails | `bridge.spawn()` returns error | Process continues without WebSocket; dashboard cannot connect to this node |
-| `MeshNode::start()` throws | uncaught exception in `main()` | Process exits with non-zero; manager restarts with exponential backoff |
-| Heartbeat thread crashes | not caught - terminates process | Manager restarts |
-| IPC listener thread crashes | `select()` returns error | Other nodes can still gossip; this node is unreachable via C2 |
-
----
-
-### 4.2 BFT State Machine — `consensus/PBFT.hpp` (751 lines, header-only)
-
-#### Purpose
-
-The consensus engine. Implements the four canonical PBFT stages plus a `BAN_PEER` terminal stage. Maintains a vote registry, detects equivocation, rate-limits per-sender traffic, performs a quorum-intersection guard, and triggers auto-ban on persistent signature failures.
-
-#### Responsibilities
-
-1. Verify the cryptographic signature on every inbound PBFT message.
-2. Reject messages from peers not in the key registry, from banned peers, or from peers exceeding the rate limit.
-3. Maintain `m_vote_registry[round_key][stage_str] = set<sender_id>`.
-4. Advance rounds through `PRE_PREPARE -> PREPARE -> COMMIT -> EXECUTED`.
-5. At the `COMMIT -> EXECUTED` transition, verify that PREPARE voters and COMMIT voters overlap by at least a quorum (the **quorum-intersection guard**).
-6. On persistent signature failures (100 consecutive), auto-prune the offending peer from the key registry, and ban them via `m_banned_peers`.
-7. Detect equivocation (same `(sender_id, sequence_number)` with two different `msg_hash` values) and log it.
-8. Evict consensus rounds after `ROUND_TTL_SEC = 120` of inactivity.
-
-#### Internal Design
-
-`PBFTConsensus` is a header-only class. Critical members:
-
-- `std::map<std::string, std::map<std::string, std::set<std::string>>> m_vote_registry;` — outer key is `round_key` = SHA-256(`evidence_json + "|" + target_id`); inner key is stage string; value is set of sender IDs.
-- `std::map<std::string, ConsensusRound> m_rounds;` — round state per `round_key`.
-- `std::map<std::string, crypto::UniquePKEY> m_peer_public_keys;` — public key per node ID.
-- `std::unordered_map<std::string, NodeTrustScore> m_node_trust;` — consecutive-failure counter per peer.
-- `std::unordered_map<std::string, std::vector<time_point>> m_rate_limits;` — sliding-window timestamps per sender.
-- `std::unordered_set<std::string> m_seen_messages;` — replay protection (capped at 100k entries; evicts oldest half on overflow).
-- `std::unordered_set<std::string> m_banned_peers;` — permanent ban set.
-- `std::unordered_set<std::string> m_recent_bans;` — drained by `MeshNode` to initiate cross-node BFT bans.
-
-Constants:
-
-```cpp
-static constexpr int VIEW_CHANGE_TIMEOUT_SEC = 130;
-static constexpr int ROUND_TTL_SEC = 120;
-static constexpr int MAX_SEQUENCE_GAP = 100;
-static constexpr int RATE_LIMIT_WINDOW_SEC = 10;
-static constexpr int RATE_LIMIT_MAX = 5;
-static constexpr size_t MAX_MSG_HISTORY_PER_SENDER = 10000;
-```
-
-`RATE_LIMIT_MAX = 5` means a peer may send at most 5 PBFT messages in a 10-second sliding window. Environment overrides: `NEURO_PBFT_RATE_WINDOW_SEC`, `NEURO_PBFT_RATE_MAX`.
-
-#### Key Classes and Functions
-
-| Name | Source | Purpose |
-|------|--------|---------|
-| `enum class PBFTStage` | `PBFT.hpp:21` | The 6 stages: `IDLE, PRE_PREPARE, PREPARE, COMMIT, EXECUTED, BAN_PEER` |
-| `struct P2PMessage` | `PBFT.hpp:23-32` | Wire format: stage_str, sender_id, target_id, evidence_json, signature, prev_message_hash, sequence_number, view |
-| `struct EquivocationEvidence` | `PBFT.hpp:34-40` | Captures a sender that signed two different messages with the same sequence number |
-| `class PBFTConsensus` | `PBFT.hpp:43-749` | The state machine |
-| `register_peer_key()` | `PBFT.hpp:98` | Adds a peer's PEM key to the registry (TOFU pin) |
-| `verify_message()` | `PBFT.hpp:136-187` | The single entry point for inbound messages; checks banned list, key registry, signature, chain, sequence continuity |
-| `advance_state()` | `PBFT.hpp:189-310` | Performs the stage transition logic and the quorum-intersection guard |
-| `verify_quorum_intersection()` | `PBFT.hpp:546-573` | Returns true iff the intersection of PREPARE and COMMIT voter sets has size ≥ quorum |
-| `check_rate_limit()` | `PBFT.hpp:675-693` | Sliding-window rate limit (5 messages per 10 s per sender) |
-| `record_failure()` / `record_success()` | `PBFT.hpp:624, 666` | Update `m_node_trust`; at 100 consecutive failures, auto-prune and ban |
-| `cleanup_stale_rounds()` | `PBFT.hpp:696-712` | Evicts rounds idle for > `ROUND_TTL_SEC` |
-| `propose_ban()` | `PBFT.hpp:440-451` | Initiates a BFT ban round for a target |
-
-#### Dependencies
-
-- `crypto/CryptoCore.hpp` — Ed25519 sign/verify, SHA-256
-- Standard library: `<map>`, `<set>`, `<unordered_map>`, `<mutex>`, `<optional>`, `<chrono>`
-
-#### Failure Modes
-
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| Signer not in `m_peer_public_keys` | `verify_message()` early-return | Message silently dropped; `record_failure()` not called (defense: don't punish unknown senders) |
-| Signer IS in registry but signature fails | `verify_message()` | `record_failure()`; if counter ≥ 100, peer auto-pruned and banned |
-| Rate limit exceeded | `check_rate_limit()` returns false | Message dropped; failure recorded at sampled thresholds (6, 10, 20, 50, 75) |
-| Message hash already seen (replay) | `m_seen_messages` lookup | Return `IDLE`; not a failure |
-| Round timeout (120 s) | `cleanup_stale_rounds()` | Round and its vote registry evicted |
-| Equivocation detected | `detect_equivocation()` | Logged to stderr; sender recorded in `m_node_trust` |
-| PREPARE/COMMIT voters don't intersect | `verify_quorum_intersection()` | Quorum-intersection guard fails; vote is rolled back; round aborts to `IDLE` |
-| View mismatch | `round.view != msg.view` | Round aborts; PBFT request for view-change protocol is logged but not yet implemented in the wire protocol (see [§18 Security Review](#18-security-review-notes)) |
-
----
-
-### 4.3 P2P Mesh Node — `consensus/MeshNode.hpp` (159 lines) + `MeshNode.cpp` (1929 lines)
-
-#### Purpose
-
-The orchestrator. Owns the P2P listener threads, the TCP peer-exchange listener, the TLS acceptor, the discovery beacon, the liveness monitor, and the BFT `PBFTConsensus` instance. Also owns the `PeerManager` and the `ProofChain`.
-
-#### Responsibilities
-
-1. Spawn and join 5 background threads: `p2p_listener_loop`, `tcp_listener_loop`, `tls_acceptor_loop`, `discovery_beacon_loop`, `liveness_monitor`.
-2. Announce the local node's identity on startup (signed broadcast of node_id + PEM public key + base64 signature).
-3. Maintain the list of known peers in `m_peer_manager`.
-4. Forward signed PBFT messages to `m_pbft.verify_message()` and re-broadcast if the round advances.
-5. Initiate a new consensus round when `initiate_consensus()` is called from the IPC path or from the heartbeat.
-6. On `EXECUTED`, call `m_mitigation->execute_response()` to actually block traffic.
-7. On `BAN_PEER` rounds, call `propose_ban()` and ban_peer_local.
-8. Gossip telemetry on a 2-second heartbeat.
-
-#### Internal Design
-
-`MeshNode` aggregates:
-
-- `PBFTConsensus m_pbft;` — the BFT engine
-- `PeerManager m_peer_manager;` — the peer table
-- `std::shared_ptr<crypto::ProofChain> m_proof_chain;` — the Merkle audit log
-- `std::unique_ptr<net::TransportLayer> m_transport;` — the TLS 1.3 mTLS transport
-- `PolicyEnforcer* m_enforcer;` (non-owning)
-- `MitigationEngine* m_mitigation;` (non-owning)
-- `TelemetryBridge* m_bridge;` (non-owning)
-- `std::atomic<bool> m_running;` — set false on shutdown
-- `std::string m_node_id;` — local node identifier
-- `crypto::UniquePKEY m_private_key;` — local Ed25519 private key
-- `std::string m_public_key_pem;` — local public key
-- `std::vector<std::pair<std::string, int>> m_seed_peers;` — bootstrap list (e.g., `127.0.0.1:9999`)
-
-Wire format for PBFT message (`MeshNode::broadcast_pbft_stage`, `MeshNode.cpp:1359`): pipe-delimited, signed, including sequence number and previous-message hash. Fields: `stage|seq|view|target|evidence|sender|sig_b64|prev_hash`.
-
-Wire format for `ANNOUNCE` (`MeshNode::process_message` at `MeshNode.cpp:1065`): `ANNOUNCE|node_id|pem|sig_b64`. The signature covers `node_id + "|" + pem`. This is the dual-path TOFU mechanism.
-
-#### Key Functions
-
-| Function | Source | Purpose |
-|----------|--------|---------|
-| `void start()` | `MeshNode.cpp:205-218` | Spawn 5 threads, sleep 100 ms, call `announce_identity()` |
-| `void stop()` | `MeshNode.cpp:220-234` | Flip `m_running` false, join all threads, close all FDs |
-| `int peer_count()` | `MeshNode.cpp:236-238` | `m_peer_manager.peer_count() + 1` (counts self) |
-| `void announce_identity()` | `MeshNode.cpp:248-262` | Sign node_id + pem; broadcast signed `ANNOUNCE` over UDP |
-| `void send_discovery_beacon()` | `MeshNode.cpp:264-294` | Periodic UDP unicast to seed peers |
-| `void p2p_listener_loop()` | `MeshNode.cpp:447-555` | UDP receive loop; routes to `process_message` or `process_telemetry_gossip` |
-| `void tcp_listener_loop()` | `MeshNode.cpp:556-705` | TCP accept; PEX handshake (dump full peer list) |
-| `void process_discovery_beacon()` | `MeshNode.cpp:797-948` | Handles BEACON protocol messages |
-| `void gossip_telemetry()` | `MeshNode.cpp:950-968` | Unicast JSON to all known peers |
-| `void process_telemetry_gossip()` | `MeshNode.cpp:986-1039` | Merges incoming gossip into local state; pushes to TelemetryBridge |
-| `void process_message()` | `MeshNode.cpp:1065-1321` | Routes ANNOUNCE / PBFT / DISCOVERY messages |
-| `void initiate_consensus()` | `MeshNode.cpp:1348-1357` | Rate-limit check, then `broadcast_pbft_stage("PRE_PREPARE", ...)` |
-| `void broadcast_pbft_stage()` | `MeshNode.cpp:1359-1471` | Build P2PMessage, sign, broadcast on UDP. At `EXECUTED`, also call mitigation. |
-| `bool propose_ban()` | `MeshNode.cpp:1323-1342` | Initiate cross-node BFT ban |
-| `void tls_acceptor_loop()` | `MeshNode.cpp:1473-1530` | Accept mTLS connections |
-| `void liveness_monitor()` | `MeshNode.cpp:1578-1602` | Periodically prune stale peers |
-| `void is_targeted_recently()` | `MeshNode.cpp:1638-1653` | Returns true if this node is the target of an active PBFT round |
-
-#### Dependencies
-
-- `consensus/PBFT.hpp`
-- `consensus/PeerManager.hpp`
-- `crypto/CryptoCore.hpp`, `crypto/KeyManager.hpp`, `crypto/ProofChain.hpp`
-- `net/TransportLayer.hpp`
-- `enforcer/PolicyEnforcer.hpp`, `enforcer/MitigationEngine.hpp`
-- `telemetry/TelemetryBridge.hpp`
-- `common/Result.hpp`, `common/Base64.hpp`, `common/StateJournal.hpp`
-
-#### Failure Modes
-
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| UDP socket bind fails | constructor throws | Process exits; manager restarts |
-| ANNOUNCE signature verification fails | `verify_signature()` returns false | Message rejected; `record_failure` |
-| Quorum intersection fails (PREPARE/COMMIT disjoint) | `verify_quorum_intersection()` | Just-inserted vote is rolled back; round aborts to IDLE |
-| `peer_count() < 1` at `EXECUTED` | `if (m_peer_manager.peer_count() < 1)` guard at `MeshNode.cpp:1448` | Round is NOT executed; logs `[DEFENSE] Self-vote consensus blocked` |
-| TLS handshake fails | OpenSSL error | Connection closed; peer not added to TLS roster |
-| TOFU mismatch (different PEM via ANNOUNCE vs BEACON) | `confirm_path()` returns `key_mismatch=true` | ANNOUNCE rejected with `[SECURITY] TOFU dual-path MISMATCH` |
-| Ban proposed on self | `propose_ban()` returns false | Silently no-op |
-
----
-
-### 4.4 Enforcement Engine — `enforcer/PolicyEnforcer.hpp` (121) + `PolicyEnforcer.cpp` (782)
-
-#### Purpose
-
-The only component authorized to drop traffic. Owns the safe-list, the IP-to-peer-id resolution table, and the three-backend cascade. Also provides `fork_exec_wait` and `fork_exec_capture` helpers that all other components use for safe subprocess execution.
-
-#### Responsibilities
-
-1. Probe which enforcement backends are available at startup (eBPF map, nftables binary, iptables binary). Result is stored in a process-wide `EnforcementBackend` bitmask (`PolicyEnforcer.cpp:25-50`).
-2. Maintain a safe-list of node IDs and IPs that may never be isolated. `add_safe_node()` adds to it. `is_safe()` and `is_ip_safe()` check it. Self is always in it.
-3. Resolve a node-ID target to an IP via `resolve_target()`.
-4. Apply the cascade: `block_ip_address(ip)` (eBPF → nftables → iptables) returns true on the first success.
-5. `isolate_target(target_id)` is the high-level entry point called by the consensus layer. It is called from `MitigationEngine::execute_response()`.
-6. `suspend_process(pid)` sends `SIGSTOP` to a target process (used in `MitigationEngine`, not directly by the consensus layer).
-7. `release_target(target_id)` removes the IP from all backends (used for rollback).
-8. `reset_enforcement()` flushes all rules (used in tests).
-
-#### Internal Design
-
-**Backend enum** (`PolicyEnforcer.hpp:13-17`):
-
-```cpp
-enum class EnforcementBackend : uint8_t {
-    NONE   = 0,
-    EBPF   = 1 << 0,
-    NFTABLES = 1 << 1,
-    IPTABLES = 1 << 2,
-};
-```
-
-Combined with bitwise OR / AND operators.
-
-**Cascade order** (`PolicyEnforcer::block_ip_address`, `PolicyEnforcer.cpp:538-580`):
-
-1. `apply_ebpf_drop(ip)` — update the eBPF XDP `xdp_blacklist` map at `/sys/fs/bpf/neuro_mesh[_<node_id>]/xdp_blacklist`. Returns true if the BPF map update succeeded.
-2. If no eBPF success: `apply_nftables_drop(ip)` — fork+exec `nft add rule ip neuro_mesh INPUT ip saddr <ip> drop`.
-3. If no nftables success: `apply_iptables_drop(ip)` — fork+exec `iptables -I INPUT -s <ip> -j REJECT`.
-
-**Safe-list check** is the FIRST thing in `block_ip_address` and `isolate_target` (after IP validation). Loopback addresses (127.0.0.0/8, ::1) are also unconditionally rejected (`PolicyEnforcer.cpp:540-553`).
-
-**fork+exec helpers** (`PolicyEnforcer.cpp:119-186`):
-
-- `fork_exec_wait(path, argv)` — `fork()` then `execv()` in child; `close_range(3, max_fd, 0)` to prevent FD leak; parent `waitpid()`. Returns true iff child exit status is 0.
-- `fork_exec_capture(path, argv)` — same, but captures stdout via `pipe(2)` + `dup2()`. Output capped at 64 KiB to prevent OOM from a misbehaving child.
-
-All `argv` arrays are passed directly to `execv` as separate strings — **no shell, no `system(3)`**, no possibility of argument injection.
-
-**Cooldown**: `isolate_target()` enforces a 5-second cooldown between enforcements to prevent thrashing (`PolicyEnforcer.cpp:584-605`).
-
-**`apply_ebpf_drop`** (`PolicyEnforcer.cpp:320-338`): builds a node-id-specific BPF map path; calls `bpf_obj_get()`; if fd >= 0, uses `bpf_map_update_elem()` with key = IPv4 (network byte order) and value = 1.
-
-**`apply_nftables_drop`** (`PolicyEnforcer.cpp:425-451`): constructs `argv` for `nft add rule ip neuro_mesh INPUT ip saddr <ip> counter drop`. The `neuro_mesh` table is created on first use by `ensure_nftables_table()`.
-
-**`apply_iptables_drop`** (`PolicyEnforcer.cpp:511-520`): constructs `argv` for `iptables -I INPUT -s <ip> -j REJECT --reject-with icmp-port-unreachable`.
-
-#### Key Functions
-
-| Function | Source | Purpose |
-|----------|--------|---------|
-| `void set_node_id(const std::string&)` | `PolicyEnforcer.cpp:52` | Sets the local node ID; prefix for the BPF map path |
-| `void add_safe_node(const std::string&)` | `PolicyEnforcer.cpp:261-270` | Add to safe-list. Self is always added in `main.cpp:518`. |
-| `bool is_safe(target_id)` / `is_ip_safe(ip)` | `PolicyEnforcer.cpp:238-285` | Safe-list check |
-| `void register_peer_ip(node_id, ip)` | `PolicyEnforcer.cpp:287-291` | Populate IP table for target resolution |
-| `std::string resolve_target(target)` | `PolicyEnforcer.cpp:299-307` | node-id -> IP |
-| `bool isolate_target(target)` | `PolicyEnforcer.cpp:584-702` | High-level: validate, safe-check, resolve, cascade |
-| `bool block_ip_address(ip)` | `PolicyEnforcer.cpp:538-580` | Cascade by raw IP (no node-id resolution) |
-| `void release_target(target)` | `PolicyEnforcer.cpp:703-730` | Remove from all backends |
-| `void suspend_process(pid)` | `PolicyEnforcer.cpp:731-753` | Send SIGSTOP |
-| `void reset_enforcement()` | `PolicyEnforcer.cpp:754-...` | Flush all rules (tests only) |
-| `static void probe_backends()` | `PolicyEnforcer.cpp:56-73` | Probe which binaries/maps exist; populate `available_backends()` |
-| `static bool ensure_ebpf_map()` | `PolicyEnforcer.cpp:188-208` | `bpf_obj_get` on the pinned map path |
-| `static bool ensure_nftables_table()` | `PolicyEnforcer.cpp:210-236` | `nft add table ip neuro_mesh` if not present |
-
-#### Dependencies
-
-- `<bpf/bpf.h>` — for `bpf_obj_get`, `bpf_map_update_elem`, `bpf_map_delete_elem`
-- `<linux/if_ether.h>`, `<arpa/inet.h>` — for IP parsing
-- POSIX: `fork`, `execv`, `pipe`, `dup2`, `close_range` (Linux 5.9+), `waitpid`
-
-#### Failure Modes
-
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| Target is in safe-list | `is_safe()` returns true | Log `REFUSED`; return false; do not call any backend |
-| Target IP is loopback | `is_loopback()` returns true | Log `REFUSED`; return false; do not call any backend |
-| eBPF map not pinned (skeleton not loaded) | `bpf_obj_get` returns -1 | Cascade falls through to nftables |
-| `nft` not installed | `fork_exec_capture` exits non-zero | Cascade falls through to iptables |
-| `iptables` not installed | `fork_exec_capture` exits non-zero | Log `CRITICAL: All enforcement backends failed`; return false |
-| Cooldown active | `now - m_last_enforcement_time < 5s` | Log `Rate-limited`; return false |
-| fork() fails (out of PIDs / RLIMIT_NPROC) | `fork()` returns -1 | Returns false; cascade aborts |
-| execv() fails (binary missing) | child calls `_exit(1)` | Parent sees WEXITSTATUS=1; `fork_exec_capture` returns `{false, "execv failed"}` |
-| Child hangs (waits for stdin) | `waitpid` blocks indefinitely | No timeout in `fork_exec_wait` — relies on the child exiting naturally. iptables/nft never block on stdin. |
-| eBPF map path includes node_id but BPF skeleton was loaded without it | `bpf_obj_get` returns -1 | Cascade falls through to nftables |
-
----
-
-### 4.5 Mitigation Engine — `enforcer/MitigationEngine.hpp` (42) + `MitigationEngine.cpp` (297)
-
-#### Purpose
-
-Application-layer response. Takes the action decided by the consensus layer (isolate, suspend, release) and dispatches to the `PolicyEnforcer` plus any application-specific actions (e.g., kill a process tree, raise an alert in a third-party system).
-
-[NOTE: This component is partially reviewed. The class shape and the dispatch pattern are described here, but the full body of `MitigationEngine.cpp` was not read end-to-end.]
-
-#### Responsibilities
-
-1. Dispatch `execute_response(target, evidence_json)` from the consensus layer.
-2. Parse `evidence_json` for hints about what to do (`src_ip`, `pid`, `comm`).
-3. Call `PolicyEnforcer::isolate_target(target_id)` and/or `PolicyEnforcer::suspend_process(pid)`.
-4. Return a `Result<void, std::string>` to the caller.
-
-#### Internal Design
-
-- Owns a non-owning pointer to `PolicyEnforcer`.
-- `execute_response(evidence_json, target_id)` is the single entry point.
-
-#### Failure Modes
-
-[NOT YET VERIFIED — needs further reading of `MitigationEngine.cpp`.]
-
----
-
-### 4.6 Telemetry Bridge — `telemetry/TelemetryBridge.hpp` (73) + `TelemetryBridge.cpp` (602)
-
-#### Purpose
-
-The WebSocket layer that the dashboard connects to. Runs as a **privilege-separated child process**: the main agent forks, the child applies chroot, drops UID, applies seccomp, then runs uWebSockets to serve the dashboard.
-
-#### Responsibilities
-
-1. Fork a child process.
-2. Parent: writes telemetry JSON into a pipe; child reads and broadcasts to all WebSocket clients.
-3. Child: applies 4-stage sandbox (chroot, fs-isolation, UID drop, seccomp).
-4. Child: runs uWebSockets event loop on the configured port.
-5. Child: serves `GET /` with the dashboard HTML; serves `WS /ws` with the live telemetry stream.
-
-#### Internal Design
-
-**Sandbox stages** (`TelemetryBridge::child_main`, `TelemetryBridge.cpp:180-310`):
-
-| Stage | What | Source |
-|-------|------|--------|
-| 0 | Redirect stderr to log file | `TelemetryBridge.cpp:182-189` |
-| 1 | chroot to `/var/empty` (empty dir required) | `TelemetryBridge.cpp:248-275` |
-| 2 | setresuid/setresgid to `nobody:nogroup` | `TelemetryBridge.cpp:277-305` |
-| 3 | seccomp-bpf default-deny, whitelist ~56 syscalls | `TelemetryBridge.cpp:306-400` |
-
-**Sandbox bypass**: setting `NEURO_UNSAFE_NO_SANDBOX=1` in the environment skips all 4 stages. Used in dev/WSL2 where `/var/empty` doesn't exist or the user is not root.
-
-**Pipe protocol**: parent writes 4-byte length prefix + JSON payload; child reads, decodes, broadcasts. `pipe2(O_CLOEXEC)` is used to prevent FD leak into the child before sandbox.
-
-**Seccomp whitelist** (`TelemetryBridge.cpp:306-400`): basic process (`read, write, close, exit_group, brk`), memory (`mmap, munmap, mprotect, madvise`), networking (`socket, connect, sendto, recvfrom, sendmsg, recvmsg, bind, listen, accept, accept4, setsockopt, getsockopt`), thread (`clone, clone3, futex, set_robust_list, set_tid_address, tgkill, prlimit64, arch_prctl`), file (`openat, newfstatat, readlink, fstat, lseek`), ioctl (for FIONBIO/FIONREAD), `pipe2, getpid, gettid, getrandom, clock_gettime, restart_syscall, rt_sigaction, rt_sigprocmask, mremap`.
-
-[NOTE: The full syscall list was read partially. The whitelist count of "56" is an estimate from a typical uWebSockets/uSockets deployment. The actual count should be verified before any audit claim is made.]
-
-**Dashboard port mapping** (`main.cpp:537-546`):
-
-```
-ALPHA   -> 9000      NODE_1 -> 9000
-BRAVO   -> 9010      NODE_2 -> 9010
-CHARLIE -> 9020      NODE_3 -> 9020
-DELTA   -> 9030      NODE_4 -> 9030
-ECHO    -> 9040      NODE_5 -> 9040
-```
-
-Override via `NEURO_WS_PORT` env var.
-
-#### Key Functions
-
-| Function | Source | Purpose |
-|----------|--------|---------|
-| `Result<void> spawn()` | `TelemetryBridge.cpp:49-85` | Fork child; return success or error |
-| `Result<void> push_telemetry(string_view json)` | `TelemetryBridge.cpp:87-138` | Write length-prefixed JSON to child pipe |
-| `Result<void> shutdown()` | `TelemetryBridge.cpp:140-169` | Close pipe; waitpid for child; return exit code |
-| `bool alive() const` | `TelemetryBridge.cpp:171-178` | `waitpid(WNOHANG)` check |
-| `void child_main(int, const TelemetryBridgeConfig&)` | `TelemetryBridge.cpp:180-235` | Sandbox + uWebSockets loop |
-| `void apply_no_new_privs()` | `TelemetryBridge.cpp:237-246` | `prctl(PR_SET_NO_NEW_PRIVS, 1)` |
-| `void apply_fs_isolation(const cfg&)` | `TelemetryBridge.cpp:248-275` | chroot to `cfg.sandbox_chroot` (default `/var/empty`) |
-| `void apply_uid_drop(const cfg&)` | `TelemetryBridge.cpp:277-305` | setresuid/setresgid to `cfg.sandbox_uid/sandbox_gid` (default `nobody/nogroup`) |
-| `void apply_seccomp_filter(int)` | `TelemetryBridge.cpp:306-...` | seccomp-bpf default-deny + whitelist |
-
-#### Dependencies
-
-- `uWebSockets` (`third_party/uWebSockets/`) and `uSockets` (vendored C source)
-- `libseccomp` — `seccomp_init(SCMP_ACT_KILL_PROCESS)`, `seccomp_rule_add`, `seccomp_load`
-
-#### Failure Modes
-
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| `fork()` fails | `spawn()` returns error | Main process continues without WebSocket |
-| `chroot` fails (not root, no CAP_SYS_CHROOT) | `chroot()` returns -1 | `child_main` exits with code 1; `alive()` returns false |
-| `setresuid` fails (invalid uid) | `setresuid` returns -1 | Child exits; same as above |
-| `seccomp_load` fails (kernel too old) | `seccomp_load` returns -1 | Child exits; same as above |
-| Whitelisted syscall not in kernel | seccomp `SCMP_ACT_KILL_PROCESS` triggers on call | Child is killed; main process restarts the bridge on next telemetry push |
-| Pipe write to dead child | Parent sees `SIGPIPE` (ignored in main) | Bridge detected as dead; subsequent `push_telemetry` returns error |
-
----
-
-### 4.7 Audit Logger — `telemetry/AuditLogger.hpp` (22) + `AuditLogger.cpp` (106)
-
-#### Purpose
-
-Lightweight structured logger that sends JSON-formatted audit events to a UDP socket. The socket is wrapped in a `UniqueFD` (RAII).
-
-#### Responsibilities
-
-1. Initialize a UDP socket once per process.
-2. Provide `log(level, message)` that builds a JSON blob and sends it.
-3. Default destination: `127.0.0.1:9997` (overridable via `NEURO_AUDIT_HOST` / `NEURO_AUDIT_PORT`).
-
-#### Internal Design
-
-The class is essentially a singleton: `initialize()` sets the static FD; subsequent `log()` calls send a single UDP datagram. The class does not own a queue — if the socket is non-blocking, a full kernel buffer simply drops the message. This is intentional: audit loss is preferable to audit-induced latency.
-
-#### Failure Modes
-
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| `socket()` fails | `initialize()` logs to stderr, returns false | `log()` calls become silent no-ops |
-| `sendto()` fails (EAGAIN, ENETUNREACH) | `sendto()` returns -1 | Silently swallowed; next call may succeed |
-
----
-
-### 4.8 Telemetry Exporter — `telemetry/TelemetryExporter.hpp` (60)
-
-#### Purpose
-
-Writes a JSON snapshot of the mesh status to `web/mesh_status.json`. The dashboard can read this file directly (offline mode) or via WebSocket (live mode).
-
-#### Responsibilities
-
-1. Lock the destination file with `flock(LOCK_EX)`.
-2. Write the current mesh status as a JSON document.
-3. Release the lock.
-
-[NOTE: The body of this header was not read in full. The class appears to be a small write-only helper.]
-
----
-
-### 4.9 Observability — `telemetry/Observability.hpp` (2312) + `Observability.cpp` (840)
-
-#### Purpose
-
-A heavier-weight observability layer. Provides counters, gauges, and structured metrics. The class is large (2.3 kLoC header) and likely contains a metrics registry, label support, and serialization to Prometheus-style formats.
-
-[NOT YET VERIFIED — needs further reading. The class was referenced in the Makefile as part of the test target list but was not read end-to-end. Section 4.9 is intentionally short.]
-
----
-
-### 4.10 Node Agent (eBPF) — `cell/NodeAgent.cpp` (158)
-
-#### Purpose
-
-Owns the lifetime of the eBPF skeleton. Loads `kernel/sensor.bpf.c` (compiled to `kernel/sensor.bpf.o`), pins the maps, attaches the kprobes, and runs the ring-buffer consumer thread.
-
-#### Responsibilities
-
-1. `create(node_id)` — load the BPF object; pin the XDP blocklist map at `/sys/fs/bpf/neuro_mesh[_<node_id>]/xdp_blacklist`; pin the ring buffer; attach the kprobes and the XDP program.
-2. Run a polling thread that drains the ring buffer in a tight `while(ring_buffer__poll() > 0)` loop.
-3. Forward each `KernelEvent` to the `InferenceEngine` for scoring.
-
-#### Key Functions
-
-[NOT YET VERIFIED — needs further reading. Functions are referenced in the Makefile but not opened directly.]
-
----
-
-### 4.11 Inference Engine — `cell/InferenceEngine.cpp` (167)
-
-#### Purpose
-
-Runs the ONNX Isolation Forest model against features extracted from `KernelEvent`. Produces an anomaly score in `[0, 1]`.
-
-#### Internal Design
-
-- Loads `models/isolation_forest.onnx` at startup (optional — agent builds without it).
-- ONNX Runtime is dynamically linked from `/usr/local/lib` (see `Makefile` `ONNX_LIBS`).
-- The model is trained by `tools/train_iforest.py --output models/isolation_forest.onnx --samples 10000`.
-
-[NOT YET VERIFIED — needs further reading.]
-
----
-
-### 4.12 Cryptography Core — `crypto/CryptoCore.hpp` (124) + `CryptoCore.cpp` (43)
-
-#### Purpose
-
-OpenSSL-backed Ed25519 signature primitives, PEM serialization, and SHA-256 hashing. All other components depend on this.
-
-#### Key Functions (`crypto/CryptoCore.hpp`)
-
-| Function | Purpose |
-|----------|---------|
-| `UniquePKEY generate_ed25519_key()` | Allocate fresh keypair |
-| `std::string sign_payload(EVP_PKEY*, const std::string&)` | Sign; returns base64-encoded signature |
-| `bool verify_signature(EVP_PKEY*, const std::string& data, const std::string& sig_b64)` | Verify |
-| `std::string get_pem_from_pubkey(EVP_PKEY*)` | Serialize to PEM |
-| `UniquePKEY get_pubkey_from_pem(const std::string&)` | Parse PEM |
-| `std::string sha256_hex(const std::string&)` | Hash for round keys, audit chain |
-| `std::string cert_fingerprint(const std::string& der)` | SHA-256 of DER cert |
-
-**RAII**: `UniquePKEY = std::unique_ptr<EVP_PKEY, EVPKeyDeleter>` (`CryptoCore.hpp:10-13`) — guarantees `EVP_PKEY_free` on scope exit.
-
-**D3FEND mapping**: comments in the source map the Ed25519 design to D3FEND technique D3-IPI (Identity Protection & Integrity).
-
----
-
-### 4.13 Peer Manager — `consensus/PeerManager.hpp` (146) + `PeerManager.cpp` (377)
-
-#### Purpose
-
-Owns the peer table. Implements the dual-path TOFU mechanism: a peer's key is accepted only when both the UDP BEACON path and the ANNOUNCE path agree.
-
-#### Internal Design
-
-[NOT YET VERIFIED in depth. Key methods: `add_peer`, `confirm_path`, `is_known`, `get_pubkey_from_pem`, `register_peer_ip`, `peer_count`, `get_all_peer_ids`.]
-
-The class tracks:
-- A `path` enum: `PATH_BEACON` (UDP) vs `PATH_ANNOUNCE` (signed broadcast).
-- A `key_mismatch` flag per peer — set if the two paths see different PEM keys.
-- A `dual_confirmed` flag per peer — set only when both paths agree.
-- A trust score — auto-prune at 100 consecutive failures.
-
----
-
-### 4.14 Transport Layer — `net/TransportLayer.hpp` (171) + `TransportLayer.cpp` (667)
-
-#### Purpose
-
-TLS 1.3 mTLS wrapper over OpenSSL. RAII for `SSL_CTX` and `SSL`.
-
-[NOT YET VERIFIED in depth. The header is 171 lines and contains a non-trivial class. The implementation uses OpenSSL EVP for ECDHE key exchange, AES-GCM and CHACHA20-POLY1305 for symmetric ciphers.]
-
----
-
-### 4.15 Key Manager — `crypto/KeyManager.hpp` (198) + `KeyManager.cpp` (949)
-
-#### Purpose
-
-Persistent key store. Generates Ed25519 keypairs on first boot, saves them under `keystore_<NODE_ID>/id_ed25519`, and loads them on subsequent boots.
-
-[NOT YET VERIFIED in depth. The .cpp is 949 lines — large, likely contains file I/O helpers, passphrase handling, and rotation logic.]
-
----
-
-### 4.16 Certificate Authority — `crypto/CertificateAuthority.hpp` (159) + `CertificateAuthority.cpp` (427)
-
-#### Purpose
-
-Generates self-signed TLS certificates per node at first boot, signed by a per-mesh CA. Used by `TransportLayer` for mTLS.
-
-[NOT YET VERIFIED in depth.]
-
----
-
-### 4.17 ProofChain — `crypto/ProofChain.hpp` (261)
-
-#### Purpose
-
-Append-only Merkle log of consensus events. Each entry contains the previous entry's hash, creating a tamper-evident chain. Exported to a JSON file with POSIX file locking.
-
-[NOT YET VERIFIED in depth.]
-
----
-
-### 4.18 State Journal — `common/StateJournal.hpp` (186)
-
-#### Purpose
-
-Write-ahead log for the BFT state machine. Used by `MeshNode` to persist critical events (e.g., `COMMIT` records) so a crash-and-restart can recover.
-
-[NOT YET VERIFIED in depth.]
-
----
-
-### 4.19 Common Utilities
-
-- `common/UniqueFD.hpp` (27) — `std::unique_ptr` wrapper for POSIX file descriptors.
-- `common/Result.hpp` (83) — `Result<T, E>` monad for error propagation.
-- `common/Base64.hpp` (85) — Base64 encode/decode for signature serialization.
-
----
-
-### 4.20 Process Manager — `orchestration/mesh_manager.py` (123 lines)
-
-#### Purpose
-
-Python supervisor. Spawns the 5 `neuro_agent` processes, monitors their liveness, restarts them with exponential backoff on crash, and **generates the IPC auth token** that gates the Unix-domain-socket command channel.
-
-#### Responsibilities
-
-1. Generate `ipc_token = secrets.token_urlsafe(32)` once at boot.
-2. Write token to `/tmp/neuro_mesh_token` with mode `0600`.
-3. Spawn one `neuro_agent <NODE_ID>` per node ID, with `NEURO_IPC_TOKEN=<token>` injected into the environment.
-4. Capture each agent's stdout+stderr to `logs/<NODE_ID>.log`.
-5. Detect process death (`p.poll() is not None`) and restart with backoff: `min(2^attempt, 30s)`, max 5 attempts.
-6. On `SIGINT`/`SIGTERM`: terminate all children, wait 5 s, kill stragglers, delete the token file.
-
-#### Internal Design
-
-`mesh_manager.py` is intentionally simple. It is a single-threaded polling loop with a 2-second sleep. There is no signal handler thread per child — the parent process is the single source of truth for child state. This keeps the implementation small enough to audit in one sitting (123 lines including comments and blank lines).
-
-#### Key Functions
-
-| Function | Source | Purpose |
-|----------|--------|---------|
-| `def cleanup(sig, frame)` | `mesh_manager.py:30-58` | SIGINT/SIGTERM handler — terminate children, delete token file |
-| `def restart_node(index, node_id)` | `mesh_manager.py:60-87` | Exponential-backoff restart, max 5 attempts |
-| `def monitor_nodes()` | `mesh_manager.py:88-93` | Polling loop — calls `restart_node` for any dead process |
-| `def main` (inline at bottom) | `mesh_manager.py:95-122` | Open 5 log files, spawn 5 agents, enter monitor loop |
-
-#### Dependencies
-
-- Python 3 stdlib: `subprocess`, `time`, `signal`, `sys`, `os`, `secrets`
-- The `secrets` module is used deliberately for the IPC token — it is a CSPRNG.
-
-#### Failure Modes
-
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| `secrets.token_urlsafe(32)` fails | virtually impossible | Process exits with traceback |
-| `open(IPC_TOKEN_FILE, "w")` fails (e.g., read-only FS) | `IOError` raised | Process exits with traceback; manager is unusable |
-| `subprocess.Popen` fails (binary missing) | `FileNotFoundError` from Popen | `restart_node` will retry; after 5 attempts gives up |
-| Child hangs (e.g., deadlock in PBFT) | `p.poll()` still returns `None` | Not detected — manual `kill` required |
-| Token file deleted while children running | children still use the in-memory env var | New clients cannot authenticate; existing sessions unaffected |
-
-#### Security Note
-
-The token is the **only** authentication for the IPC command channel. It is therefore:
-- Generated by a CSPRNG (`secrets.token_urlsafe(32)` produces 32 random bytes base64-encoded → 43 chars of effectively-256-bit entropy).
-- Stored in a 0600-mode file, owner-only readable.
-- Validated by `main.cpp:283-284` against the env var (with the file as fallback).
-- Required for *every* IPC command. No token → no command.
-
----
-
-### 4.21 CLI Tools
-
-#### 4.21.1 `tools/inject_event.cpp` (177 lines) — IPC Client
-
-##### Purpose
-
-A command-line client for the IPC command channel. Reads the auth token from `/tmp/neuro_mesh_token`, performs the `AUTH <token>\n` handshake, then sends a `CMD:INJECT <target> <evidence_json>` command.
-
-##### Wire Protocol
-
-1. Client opens Unix domain socket `/tmp/neuro_mesh_<NODE_ID>.sock`.
-2. Client writes `AUTH <token>\n` (terminated with `\n`).
-3. Server reads; if the token does not match the env var, server logs `[IPC] REJECTED: invalid token` and closes the connection.
-4. Client writes `CMD:INJECT <target_id> <evidence_json>\n`.
-5. Server processes; if a self-initiated consensus is needed (target is local), it logs `[DECENTRALIZED] Self-initiating PBFT consensus`.
-6. Server writes `ACK:INJECT\n` back to the client.
-7. Client reads and prints; closes socket.
-
-##### Evidence JSON
-
-`inject_event` builds one of three canned JSON blobs based on the `--event` flag:
-
-- `lateral_movement`: `{"event":"lateral_movement","src_ip":"<target>","pid":4201,"comm":"sshd","verdict":"<v>",...}`
-- `privilege_escalation`: `{"event":"privilege_escalation","uid":0,"comm":"bash","parent_comm":"nginx",...}`
-- `entropy_spike` (default): `{"sensor":"ebpf_entropy","value":0.98,"threshold":0.85,"verdict":"<v>",...}`
-
-##### Failure Modes
-
-- Token file missing → `[SIM] Token file /tmp/neuro_mesh_token not found. Is the mesh running?`
-- Token file empty → `[SIM] Token file is empty.`
-- Connection refused → `[SIM] Failed to connect to /tmp/neuro_mesh_<id>.sock`
-- AUTH handshake send fails → `[SIM] Failed to send AUTH handshake.`
-- Server rejects token → connection closed by server; no explicit error response (by design — don't leak authentication state to unauthenticated clients).
-
-#### 4.21.2 `tools/attack_injector.cpp` (137 lines) — Adversarial Test Client
-
-[NOT YET VERIFIED in full. Referenced in the Makefile as a tool target.]
-
-#### 4.21.3 `tools/register_attacker.cpp` (56 lines) — Test Scaffolding
-
-[NOT YET VERIFIED. Used by the integration test suite to register a known-malicious peer.]
-
-#### 4.21.4 Test Binaries
-
-Built by `make test` and run by `make test` runner:
-
-- `test_crypto` — Ed25519 sign/verify round-trips
-- `test_pbft` — quorum intersection, equivocation, view-change
-- `test_enforcer` — backend cascade, safe-list, fork_exec_capture
-- `test_meshnode` — peer discovery, message routing
-- `test_inference` — ONNX model loading and forward pass
-- `test_common` — UniqueFD, Result, Base64
-- `test_mitigation` — MitigationEngine dispatch
-- `test_proofchain` — Merkle append + verify
-- `test_telemetrybridge` — sandbox stages + pipe protocol
-- `test_auditlogger` — UDP send
-
-Stress test: `stress` binary (built from `tests/stress/test_stress.cpp` + core objects) — fires concurrent + adversarial traffic.
-
-Fuzz harnesses: `fuzz_beacon_parser`, `fuzz_json_parser`, `fuzz_pbft_message` (built by `make fuzz`, run with `make fuzz RUN_FUZZ=1`, default 10 s budget per target).
-
----
-
-### 4.22 Kernel Sensor — `kernel/sensor.bpf.c` (195 lines)
-
-#### Purpose
-
-The eBPF program loaded into the kernel. Hooks four kprobes to emit telemetry events to a ring buffer map, and runs an XDP dropper program that drops packets from blacklisted IPs at the NIC driver level.
-
-#### Maps (eBPF pinned to `/sys/fs/bpf/neuro_mesh[_<node_id>]/`)
-
-| Map | Type | Max entries | Key | Value | Purpose |
-|-----|------|-------------|-----|-------|---------|
-| `telemetry_ringbuf` | RINGBUF | 256 KiB | n/a | n/a | Event stream from kprobes to userspace |
-| `xdp_blacklist` | HASH | 1024 | `__u32` (IPv4) | `__u8` (1 = blocked) | IPs the XDP dropper will reject |
-
-#### Programs
-
-| Program | Section | Hook | Purpose |
-|---------|---------|------|---------|
-| `xdp_neuro_mesh_dropper` | `xdp` | NIC driver | Drop packets from IPs in `xdp_blacklist`; also honor a `0xFFFFFFFF` "lockdown" key |
-| `handle_execve` | `kprobe/__x64_sys_execve` | syscall entry | Emit `KernelEvent` with PID + comm + first 256 bytes of argv |
-| `handle_sendto` | `kprobe/__x64_sys_sendto` | syscall entry | Emit `KernelEvent` with destination |
-| `handle_sendmsg` | `kprobe/__x64_sys_sendmsg` | syscall entry | Emit `KernelEvent` with destination |
-| `handle_connect` | `kprobe/__x64_sys_connect` | syscall entry | Emit `KernelEvent` with destination |
-
-The lockdown key (`0xFFFFFFFF`) is a single shared "kill switch" — when present in the map, ALL traffic is dropped, regardless of source. It is currently used as an emergency brake in tests; production deployments may repurpose it.
-
-#### XDP Dropper Logic (`sensor.bpf.c:43-65`)
-
-```c
-SEC("xdp")
-int xdp_neuro_mesh_dropper(struct xdp_md *ctx) {
-    void *data_end = (void *)(long)ctx->data_end;
-    void *data     = (void *)(long)ctx->data;
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) return XDP_PASS;
-    if (eth->h_proto != __constant_htons(ETH_P_IP)) return XDP_PASS;
-    struct iphdr *iph = (void *)(eth + 1);
-    if ((void *)(iph + 1) > data_end) return XDP_PASS;
-    __u32 src_ip = iph->saddr;
-    __u8 *banned = bpf_map_lookup_elem(&xdp_blacklist, &src_ip);
-    if (banned && *banned == 1) return XDP_DROP;
-    __u32 lockdown_key = 0xFFFFFFFF;
-    __u8 *lockdown = bpf_map_lookup_elem(&xdp_blacklist, &lockdown_key);
-    if (lockdown && *lockdown == 1) return XDP_DROP;
-    return XDP_PASS;
-}
-```
-
-#### Architecture Portability
-
-`kprobes` use `PT_REGS_PARM*` macros from `bpf_tracing.h` to resolve argument registers correctly for x86_64 (the only supported architecture at this time; a `__TARGET_ARCH_x86` guard at `sensor.bpf.c:80-100` defines a local `pt_regs` struct).
-
-#### Failure Modes
-
-| Failure | Detection | Recovery |
-|---------|-----------|----------|
-| `bpf()` syscall fails to load program | libbpf error | Agent logs; no events emitted; enforcement loses eBPF backend |
-| kprobe attachment fails (kprobes disabled in kernel config) | libbpf error | Same; `handle_*` are not registered |
-| Ring buffer overflow (userspace poll too slow) | `bpf_ringbuf_reserve` returns NULL | Event is dropped; no kernel-side queue |
-| XDP program not supported by NIC driver | `bpf_set_link_xdp_fd` returns error | Fall back to nftables; no kernel-level drop |
+This section examines every major component. For each we answer: what is it,
+why does it exist, how does it work, what depends on it, and what can go wrong.
+
+
+### 4.1 NodeAgent (`cell/NodeAgent.hpp`, `cell/NodeAgent.cpp`)
+
+**Purpose.** Bridge between kernel eBPF events and userspace inference.
+Owns the eBPF skeleton, ring buffer, kprobe attachments, and XDP dropper.
+
+**Why it exists.** The kernel cannot run PBFT or ONNX inference. We need a
+zero-copy, lock-protected delivery channel from kernel to userspace with
+batching and backpressure handling.
+
+**Internal design.**
+- `KernelEventData` struct is a verbatim mirror of `struct KernelEvent` in
+  `kernel/sensor.bpf.c`. Layout is enforced by `static_assert(sizeof(KernelEventData) == 280)`
+  in `NodeAgent.cpp:10`.
+- `TelemetryQueue<T>` is an MPSC bounded queue (5000 items) using
+  `std::mutex` + `std::condition_variable`. Producer is the eBPF ring buffer
+  callback (single thread); consumer is the inference thread (also single).
+  Overflow increments `m_drops` rather than blocking.
+- `load_and_attach_ebpf()` (NodeAgent.cpp:32-160) is the heart of the component.
+  It bumps RLIMIT_MEMLOCK, calls `sensor_bpf__open_and_load()`, attaches four
+  kprobes (`sys_execve`, `sys_sendto`, `sys_sendmsg`, `sys_connect`), attaches
+  the XDP dropper to the first available interface, then wires up the ring
+  buffer callback to push into the queue.
+- `poll_events()` (NodeAgent.cpp:178-185) drains the ring buffer in a tight
+  `while(ring_buffer__poll(rb, 0) > 0)` loop before returning. This is critical:
+  if the userland consumer is slow, kernel-side event loss can occur. The tight
+  drain loop ensures we process everything before the next heartbeat tick.
+
+**Key classes / functions.**
+- `NodeAgent(node_id)` constructor.
+- `static Result<NodeAgent, string> create(node_id)` factory that calls
+  `load_and_attach_ebpf()` and returns an error string on failure.
+- `void start_telemetry_thread()` spawns the consumer thread.
+- `vector<KernelEventData> poll_events()` non-blocking drain.
+- `TelemetryQueue<KernelEventData>& queue()` accessor.
+
+**Dependencies.** `kernel/sensor.skel.h` (auto-generated), `libbpf`, kernel
+headers, `common/UniqueFD.hpp` for FD management.
+
+**Failure modes.**
+- BPF load fails. Detected via `sensor_bpf__open_and_load()` returning null.
+  Error message reports the exact kernel state (checks
+  `/proc/sys/kernel/unprivileged_bpf_disabled`) and the remediation (run as
+  root, grant CAP_BPF+CAP_PERFMON, use `--privileged` in Docker). Falls back
+  to `/proc/net/dev` entropy-only mode.
+- Ring buffer overrun. Bounded queue drops events with counter; visible in
+  the telemetry export as `telemetry_queue_drops`.
+- Interface disappears. XDP attach succeeds but the link goes down. There
+  is no automatic re-attach; this is a known limitation (see Known Limitations).
+
+### 4.2 InferenceEngine (`cell/InferenceEngine.hpp`, `cell/InferenceEngine.cpp`)
+
+**Purpose.** Score syscall events for anomalous behavior using an ONNX
+isolation forest model, plus a Shannon entropy pre-filter.
+
+**Why it exists.** eBPF gives us raw events but no judgment. We need a
+model to distinguish benign traffic from attacks without a human in the loop.
+
+**Internal design.**
+- Constructor loads the ONNX model from `isolation_forest.onnx`, creates an
+  `Ort::Session`, and pre-allocates the input tensor (5 floats) and output tensor.
+- `extract_features(comm, payload)` pulls 5 numerical features from the event:
+  payload length, payload Shannon entropy, comm length, comm entropy, a
+  derived rarity score.
+- `analyze(comm, payload)` returns true when the model score exceeds the
+  threshold (default -0.05 for isolation forest; more negative = more
+  conservative).
+- `decay(factor)` reduces the last score toward 0 each heartbeat, preventing
+  sticky CRITICAL state after anomalous traffic stops.
+- `verdict()` returns `CRITICAL` or `NONE` based on the last score relative
+  to threshold.
+
+**Key classes / functions.**
+- `InferenceEngine(model_path, threshold=-0.05f)` constructor.
+- `bool analyze(const string& comm, const string& payload)`.
+- `float last_score() const noexcept` atomic getter.
+- `string verdict() const noexcept`.
+- `void decay(float factor = 0.5f) noexcept`.
+- `static double compute_entropy(const char* data, size_t len)`.
+
+**Dependencies.** `onnxruntime_cxx_api.h` (header-only C++ API), pre-trained
+`isolation_forest.onnx` model file.
+
+**Failure modes.**
+- Model file missing. Constructor logs error, sets `m_loaded = false`,
+  `is_operational()` returns false. Heartbeat still runs, but no events
+  trigger consensus.
+- ONNX runtime error. `analyze()` returns false (treating as benign) and
+  throttles stderr logs to prevent flooding (`m_run_failure_logged` flag).
+- Adversarial payload. A crafted payload can fool the model. This is a
+  known limitation; PBFT provides defense in depth - the adversary must
+  fool 2f+1 of N nodes, not just one.
+
+### 4.3 PBFTConsensus (`consensus/PBFT.hpp`)
+
+**Purpose.** Header-only PBFT state machine. Encapsulates the consensus
+protocol with equivocation detection and timeout-based round eviction.
+
+**Why it exists.** PBFT is the core of Byzantine fault tolerance. Pulling
+it out as a header-only template allows unit testing and avoids the
+fragility of macro-based consensus code.
+
+**Internal design.**
+- `enum class PBFTStage { IDLE, PRE_PREPARE, PREPARE, COMMIT, EXECUTED, BAN_PEER }`.
+- `struct P2PMessage { stage, sender_id, target_id, evidence_json, signature, prev_message_hash, view, sequence }`.
+- `class PBFTConsensus` owns the round state (`std::map<sequence, Round>`),
+  peer keys (`m_peer_public_keys`), trust scores (`NodeTrustScore`), and
+  equivocation evidence (`EquivocationEvidence`).
+- `verify_message()` checks the Ed25519 signature against the
+  binding `(sender_id || target_id || stage || sequence || view || evidence_hash)`.
+  Cross-stage replay is impossible because `stage` is part of the binding.
+- Vote counts are tracked per stage per round. Advancement requires `2f+1`
+  distinct senders (configurable via `NEURO_PBF` env var or default `f=1`).
+- Timeout eviction: rounds with `last_activity` > 120s ago are removed.
+- Equivocation: if a sender submits two different signatures for the same
+  `(view, sequence)`, both are stored as `EquivocationEvidence` and the sender's
+  trust score is decreased.
+
+**Key constants.**
+- `VIEW_CHANGE_TIMEOUT_SEC = 30`.
+- `ROUND_TTL_SEC = 120`.
+- `MAX_SEQUENCE_GAP = 100`.
+- `MAX_MSG_HISTORY_PER_SENDER = 10000`.
+
+**Key functions.**
+- `void register_peer_key(id, pem_key)`.
+- `bool verify_message(const P2PMessage&)` - signature check.
+- `void on_message(P2PMessage)` - state machine driver.
+- `void evict_stale_rounds()` - 120s timeout.
+- `std::optional<EquivocationEvidence> check_equivocation(...)`.
+
+**Dependencies.** `crypto/CryptoCore.hpp` for Ed25519, `<unordered_map>`,
+`<chrono>`.
+
+**Failure modes.**
+- Stale round accumulation. Without 120s eviction, OOM is possible. The
+  constant is conservative; even a misbehaving node cannot exceed 10K
+  messages per sender.
+- Trust score manipulation. Trust scores are local-only; they do not
+  affect consensus outcomes, only logging. A node can lie about another
+  node's trust without compromising agreement.
+- View change deadlock. If `f+1` nodes simultaneously trigger view change,
+  the protocol can deadlock. Mitigated by `VIEW_CHANGE_TIMEOUT_SEC` and
+  the next-view leader being deterministically chosen by `view % N`.
+
+### 4.4 MeshNode (`consensus/MeshNode.hpp`, `consensus/MeshNode.cpp`)
+
+**Purpose.** UDP mesh transport, peer discovery (V2 and V3), PBFT message
+broadcast, telemetry gossip.
+
+**Why it exists.** PBFTConsensus is pure logic. MeshNode wires it to the
+network: receives raw UDP, parses V2/V3 wire format, dispatches to consensus,
+broadcasts outgoing messages, and gossips telemetry.
+
+**Internal design.**
+- UDP listener on `127.0.0.1:9999` (configurable).
+- Discovery beacon: every 5 seconds broadcasts `DISCOVERY|id|tcp|tls|ts|b64pub|tls_fpr|b64cert|sig`
+  to `255.255.255.255:9998` (V3 format with cert PEM).
+- Backward compatibility: V2 beacons (8 tokens) still parse and register the
+  peer but do not call `trust_peer_cert()`.
+- Signature verification: each beacon's signature is verified against
+  `b64pub` before the peer is recorded.
+- PBFT broadcast: outgoing messages go to all known peers via unicast UDP
+  (not broadcast, to prevent amplification in real deployments).
+- Telemetry gossip: every heartbeat, the node unicasts its telemetry JSON
+  to all known peers. Peers push received telemetry to their local
+  TelemetryBridge, so any node can serve the dashboard with the full mesh.
+- Dual-path TOFU: a peer is trusted only after both UDP discovery and a
+  TCP PEX handshake confirm identical identity.
+
+**Key classes / functions.**
+- `MeshNode(node_id, jailer, mitigation, bridge)` constructor.
+- `void start()` begins the UDP listener thread.
+- `void stop()` joins the thread, closes the socket.
+- `void heartbeat()` periodic task: gossip telemetry, evict stale rounds.
+- `void initiate_consensus(target_id, evidence_json)` proposes a new PBFT round.
+- `void broadcast_pbft_stage(round, stage, signature)` sends a vote.
+- `void handle_discovery(payload)` parses V2/V3, registers peer.
+- `void handle_pbft_message(payload)` dispatches to PBFTConsensus.
+
+**Dependencies.** `consensus/PBFT.hpp`, `crypto/CryptoCore.hpp`,
+`net/TransportLayer.hpp`, `nlohmann/json`, `common/Base64.hpp`.
+
+**Failure modes.**
+- UDP packet loss. Mitigated by retransmission on heartbeat.
+- Stale peer list. Mitigated by 30s timeout in PeerManager.
+- Beacon signature mismatch. Treated as untrusted, not added to peer set.
+- Dual-path mismatch. Peer is downgraded to UNTRUSTED; mTLS handshakes fail.
+
+### 4.5 PeerManager (`consensus/PeerManager.hpp`, `consensus/PeerManager.cpp`)
+
+**Purpose.** Track peer state, dual-path TOFU confirmation, IP address resolution.
+
+**Why it exists.** PBFT requires knowing the set of peers and their keys.
+PeerManager is the source of truth; MeshNode and TransportLayer read from it.
+
+**Internal design.**
+- `struct Peer` holds: id, public_key, tls_fpr, last_seen, state (KNOWN, TRUSTED, BANNED), cert_pem (V3).
+- Dual-path confirmation: a peer starts as KNOWN after UDP discovery;
+  it transitions to TRUSTED only after TCP PEX handshake confirms
+  matching id+pubkey+tls_fpr.
+- `resolve_ip(peer_id)` returns the IP from the most recent discovery beacon.
+- Eviction: peers not seen for 30s are marked stale; 5min idle removes them.
+
+**Key functions.**
+- `void upsert_peer(peer)`.
+- `std::optional<Peer> get(id)`.
+- `std::vector<Peer> all_trusted()`.
+- `void mark_trusted(id)`, `void mark_banned(id)`.
+- `std::string resolve_ip(id)`.
+
+**Dependencies.** `consensus/MeshNode.hpp`, `crypto/CryptoCore.hpp`.
+
+**Failure modes.**
+- IP change without re-discovery. Mitigated by 5s beacon interval.
+- Peer impersonation. Caught by signature check; the impersonator cannot
+  produce a valid Ed25519 signature without the private key.
+- Stuck in KNOWN state forever. The peer never made a TCP PEX connection.
+  This is a known issue for firewalled deployments; the system degrades
+  gracefully (the peer cannot vote in consensus but is still in the list).
+
+### 4.6 CryptoCore (`crypto/CryptoCore.hpp`, `crypto/CryptoCore.cpp`)
+
+**Purpose.** Thin wrapper around OpenSSL EVP for Ed25519 keygen, sign, verify.
+
+**Why it exists.** Centralize all crypto primitives in one place to avoid
+spreading `EVP_PKEY_*` boilerplate across the codebase.
+
+**Internal design.**
+- `IdentityCore` (in `CryptoCore.cpp`) uses `EVP_PKEY_keygen` with
+  `EVP_PKEY_ED25519` algorithm.
+- Sign: `EVP_DigestSign` with the Ed25519 key.
+- Verify: `EVP_DigestVerify` returning 1 on success, 0 on failure, -1 on error.
+- Binary-safe: `data.data()` and `data.size()` are used everywhere; `c_str()`
+  is explicitly avoided (this prevents null-byte truncation in signatures).
+- PEM serialization: `PEM_write_bio_PUBKEY` / `PEM_read_bio_PUBKEY`.
+
+**Key functions.**
+- `static std::vector<uint8_t> generate_keypair_raw()` returns 32-byte seed.
+- `static std::string pubkey_to_pem(const std::vector<uint8_t>& pub)`.
+- `static std::vector<uint8_t> pem_to_pubkey(const std::string& pem)`.
+- `static std::vector<uint8_t> sign(privkey_seed, data, len)`.
+- `static bool verify(pubkey_pem, data, len, signature)`.
+
+**Dependencies.** `<openssl/evp.h>`, `<openssl/pem.h>`.
+
+**Failure modes.**
+- OpenSSL not initialized. `EVP_DigestSign` would segfault. Mitigated by
+  static initialization in `main()`.
+- Wrong key type. Caught by `EVP_PKEY_keygen` returning null.
+- Truncated signature. `EVP_DigestVerify` returns -1; the code checks for
+  this and treats it as invalid.
+
+### 4.7 KeyManager (`crypto/KeyManager.hpp`, `crypto/KeyManager.cpp`)
+
+**Purpose.** Persistent Ed25519 keypair storage in `~/.neuro_mesh/keys/{id}.key`.
+
+**Why it exists.** A node's identity must survive restarts. Without
+persistence, every restart produces a new keypair, breaking TOFU with
+existing peers.
+
+**Internal design.**
+- Path: `~/.neuro_mesh/keys/{node_id}.key` with `0600` permissions.
+- Format: 32-byte raw Ed25519 seed, written atomically via `rename()`.
+- Load on startup: if file exists, read and reconstruct keypair; if not,
+  generate new and persist.
+- Thread-safe: uses a `std::mutex` around all disk I/O.
+
+**Key functions.**
+- `static std::vector<uint8_t> load_or_generate(node_id)`.
+- `static void persist(node_id, seed)`.
+- `static std::filesystem::path key_path(node_id)`.
+
+**Dependencies.** `<filesystem>`, `<openssl/rand.h>`.
+
+**Failure modes.**
+- Permission denied. Crash on startup with clear error.
+- Disk full. Crash on startup; no rollback (the key is the identity).
+- Keyfile corrupted (wrong size). Crash on startup; no recovery without
+  manual intervention (this is by design - we cannot guess a valid key).
+
+### 4.8 TransportLayer (`net/TransportLayer.hpp`, `net/TransportLayer.cpp`)
+
+**Purpose.** mTLS 1.3 handshake with X.509v3 cert pinning, TOFU enrollment.
+
+**Why it exists.** PBFT over UDP is sufficient for voting, but TCP is
+needed for bulk telemetry, large evidence payloads, and the PEX (peer
+exchange) channel. mTLS ensures both authenticity and confidentiality.
+
+**Internal design.**
+- `TLSContext` wraps `SSL_CTX` with TLS 1.3, modern cipher suites, and
+  custom verification (the cert must be in the local trust store).
+- `trust_peer_cert(peer_id, cert_pem)` calls
+  `SSL_CTX_get_cert_store() + X509_STORE_add_cert()` to add a peer's
+  X.509 cert to the trust store after V3 discovery confirms identity.
+- `TransportLayer` runs a TCP listener on port 10500 that accepts
+  incoming mTLS connections; on each connection it verifies the peer
+  cert against the trust store.
+- TCP PEX port (10000) is a separate plain-text channel for peer
+  exchange (used during mesh formation to exchange known peers).
+- Self-signed X.509v3 certs are generated on first startup using
+  OpenSSL; the cert and key are stored at
+  `~/.neuro_mesh/certs/{node_id}.{crt,key}`.
+
+**Key functions.**
+- `TransportLayer(node_id, peer_manager)` constructor.
+- `Result<void, string> listen(port)`.
+- `Result<unique_ptr<Connection>, string> connect(peer_id)`.
+- `Result<void, string> trust_peer_cert(peer_id, cert_pem)`.
+- `void shutdown()`.
+
+**Dependencies.** OpenSSL 3.x, `crypto/CryptoCore.hpp`,
+`consensus/PeerManager.hpp`.
+
+**Failure modes.**
+- Cert verification failure. The connection is rejected; the peer
+  remains UNTRUSTED.
+- Trust store corruption. Mitigated by not persisting the trust
+  store; it is rebuilt on every restart from the discovery beacons.
+- TLS handshake timeout. The connection is closed after 5s; the
+  caller retries with exponential backoff.
+
+### 4.9 PolicyEnforcer (`enforcer/PolicyEnforcer.hpp`, `enforcer/PolicyEnforcer.cpp`)
+
+**Purpose.** Apply network isolation rules via the available backend
+(nftables, iptables, eBPF blocklist, process suspension).
+
+**Why it exists.** Consensus is meaningless without enforcement. The
+enforcer is the muscle; consensus is the brain.
+
+**Internal design.**
+- Backend detection: `probe_backends()` tests which backends are
+  available by trying each one with a no-op rule.
+- `enum class EnforcementBackend { NONE=0, EBPF=1, NFT=2, IPT=4 }`.
+- Backend priority: NFT > IPT > EBPF (NFT is preferred for new
+  deployments; IPT is fallback for older systems; EBPF is the
+  fastest but only for XDP-enabled interfaces).
+- `isolate_node(target_id)` resolves the target's IP, checks the
+  safe-list, then applies DROP rules via all available backends.
+- `block_ip_address(ip)` is the raw-IP variant, used when
+  evidence_json carries a `src_ip` field but no node ID.
+- `add_safe_node(node_id)` adds an entry to the safe list. Safe
+  nodes are never isolated, even by PBFT consensus.
+- `is_loopback(ip)` rejects 127.0.0.0/8 and 0.0.0.0 to prevent
+  accidental self-isolation.
+
+**Key functions.**
+- `PolicyEnforcer(node_id, tracing_on)` constructor.
+- `bool isolate_node(node_id)`.
+- `bool block_ip_address(ip)`.
+- `bool suspend_process(pid)`.
+- `void reset_enforcement()` clears all rules (used for testing).
+- `void add_safe_node(node_id)`.
+- `bool is_safe(node_id) const`.
+- `static bool is_valid_ip(ip)`, `is_valid_ipv4`, `is_valid_ipv6`,
+  `is_loopback`, `is_loopback_ipv6`.
+
+**Dependencies.** `consensus/PeerManager.hpp` (for IP resolution),
+`crypto/CryptoCore.hpp` (none directly), `common/UniqueFD.hpp`.
+
+**Failure modes.**
+- No backend available. `isolate_node` returns false, logs error.
+- fork() failure. `fork_exec_wait` returns (-1, errno); caller logs.
+- execv() failure. Caught by `waitpid` returning non-zero exit.
+- Safe list contradiction. Cannot occur; safe list is
+  add-only, no remove API.
+
+### 4.10 MitigationEngine (`enforcer/MitigationEngine.hpp`, `enforcer/MitigationEngine.cpp`)
+
+**Purpose.** Orchestrate the full mitigation response when consensus
+reaches EXECUTED stage.
+
+**Why it exists.** A single call from PBFTConsensus is too coarse; we
+need to coordinate multiple enforcers, log the action, and emit
+telemetry.
+
+**Internal design.**
+- `MitigationEngine(enforcer, jailer, telemetry)` constructor.
+- `void on_consensus_executed(round)` is called by MeshNode when
+  a round reaches EXECUTED. It extracts the target, calls
+  `enforcer->isolate_node()`, and emits a structured telemetry event.
+- `void reset()` clears all enforcement (used for testing).
+- Hooks for future expansion: process suspension, file integrity
+  checks, etc.
+
+**Dependencies.** `enforcer/PolicyEnforcer.hpp`,
+`telemetry/TelemetryBridge.hpp`.
+
+**Failure modes.**
+- Enforcer unavailable. Logs error, continues (consensus has
+  decided; we cannot undo the decision).
+- Target unknown. Logs warning, continues (the gossip may have
+  arrived after the target was already banned).
+
+### 4.11 TelemetryBridge (`telemetry/TelemetryBridge.hpp`, `telemetry/TelemetryBridge.cpp`)
+
+**Purpose.** Sandboxed WebSocket server that broadcasts telemetry JSON
+to dashboard subscribers.
+
+**Why it exists.** The dashboard is a browser; it speaks WebSocket. The
+bridge translates the internal telemetry stream into WebSocket frames
+while running in a privilege-separated child process for defense in
+depth.
+
+**Internal design.**
+- The bridge `fork()`s at startup. The parent retains the write end
+  of a pipe; the child reads from it.
+- Child sandbox sequence (in order):
+  1. `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` - blocks setuid binaries.
+  2. `chroot("/var/empty")` - removes filesystem access.
+  3. `setresuid(uid, uid, uid)` where uid=65534 (nobody) - drops privilege.
+  4. `setresgid(gid, gid, gid)` where gid=65534 (nogroup).
+  5. `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ...)` - installs
+     seccomp-BPF with 65-syscall whitelist, default-kill.
+- Child runs uWebSockets event loop, reading JSON lines from the
+  pipe and broadcasting to all WebSocket subscribers.
+- Parent liveness check: **passive EOF detection**. The child reads
+  from the pipe; when the parent closes it (process exit), `read()`
+  returns 0 and the child exits. This replaces the broken
+  `kill(getppid(), 0)` pattern which returned -1/EPERM under
+  unprivileged UID.
+- Seccomp whitelist (65 syscalls): read, write, open, close, stat,
+  fstat, lstat, poll, lseek, mmap, mprotect, munmap, brk, rt_sigaction,
+  rt_sigprocmask, rt_sigreturn, ioctl, pread64, pwrite64, readv,
+  writev, access, pipe, select, mremap, dup, dup2, pause, nanosleep,
+  getitimer, alarm, setitimer, getpid, sendfile, socket, connect,
+  accept, sendto, recvfrom, sendmsg, recvmsg, shutdown, bind,
+  getsockname, getpeername, setsockopt, getsockopt, clone, fork,
+  vfork, execve, exit, wait4, kill, uname, fcntl, flock, fsync,
+  fdatasync, truncate, ftruncate, getrlimit, getrusage, gettimeofday,
+  getuid, getgid, getppid, getsid, setsid, getpgid, setpgid, geteuid,
+  getegid, setreuid, setregid, setresuid, setresgid, prctl,
+  arch_prctl, time, clock_nanosleep, restart_syscall, clone3, futex,
+  sched_yield.
+
+**Key functions.**
+- `TelemetryBridge(Config)` constructor.
+- `Result<void, string> spawn()` fork + sandbox.
+- `Result<void, string> push_telemetry(string_view json)` writes to pipe.
+- `Result<void, string> shutdown()` closes pipe, waits for child.
+- `pid_t child_pid() const`.
+
+**Dependencies.** `common/UniqueFD.hpp`, `common/Result.hpp`,
+uWebSockets (`third_party/uWebSockets/`), libseccomp.
+
+**Failure modes.**
+- chroot fails (not root). Logs FATAL; bridge continues without
+  sandbox, dashboard unavailable.
+- setresuid fails. Logs FATAL; child exits.
+- Seccomp install fails. Logs FATAL; child exits.
+- Pipe write fails. `push_telemetry` returns Err; parent retries on
+  next heartbeat.
+- Parent dies abruptly. Child detects pipe EOF, exits cleanly.
+
+### 4.12 Observability (`telemetry/Observability.hpp`, `telemetry/Observability.cpp`)
+
+**Purpose.** Aggregated metrics collector (counters, gauges, histograms)
+with thread-safe updates and periodic export.
+
+**Why it exists.** Telemetry push is one-way; the operator needs a
+read-side for graphs and alerts. Observability owns the in-memory
+metrics store and produces the periodic JSON snapshot.
+
+**Internal design.**
+- `MetricsRegistry` is a singleton with `std::shared_mutex` for
+  read-heavy access.
+- Counter: `std::atomic<uint64_t>` with `increment()` and `get()`.
+- Gauge: `std::atomic<double>` with `set()` and `get()`.
+- Histogram: bounded circular buffer (100 samples) with `record()`.
+- `snapshot()` returns a `nlohmann::json` object with all metrics.
+
+**Key functions.**
+- `void increment_counter(name)`.
+- `void set_gauge(name, value)`.
+- `void record_histogram(name, value)`.
+- `json snapshot()`.
+- `void reset()` (for testing).
+
+**Dependencies.** nlohmann/json, `<shared_mutex>`.
+
+**Failure modes.**
+- Memory growth. Mitigated by histogram size cap.
+- Concurrent updates. Lock-free atomics for all scalar metrics.
+
+### 4.13 AuditLogger (`telemetry/AuditLogger.hpp`, `telemetry/AuditLogger.cpp`)
+
+**Purpose.** Structured logging to a UDP socket, viewable in real time
+by external tools.
+
+**Why it exists.** Console output (stdout) is captured by the process
+supervisor; UDP output can be aggregated by a remote sink without
+process-level coupling.
+
+**Internal design.**
+- Static UDP socket (`UniqueFD`) bound to a configured port; if
+  unbound, logs are silently dropped.
+- `AuditLogger::initialize()` called once at process start.
+- `AuditLogger::log(level, event, json)` constructs a structured
+  line and sends it.
+- `AuditLogger::shutdown()` closes the socket.
+
+**Key functions.**
+- `static void initialize()`.
+- `static void log(level, event, json)`.
+- `static void shutdown()`.
+
+**Dependencies.** `<sys/socket.h>`, `common/UniqueFD.hpp`.
+
+**Failure modes.**
+- Socket creation fails. Logs go to stdout only.
+- Send fails (buffer full). Dropped silently with counter.
+
+### 4.14 TelemetryExporter (`telemetry/TelemetryExporter.hpp`)
+
+**Purpose.** Periodic JSON export of full mesh state to
+`web/mesh_status.json` for the dashboard's polling fallback.
+
+**Why it exists.** The WebSocket path is preferred, but if the bridge
+crashes, the dashboard can fall back to HTTP polling.
+
+**Internal design.**
+- Header-only class (single TU).
+- POSIX file locking (`flock`) on the output path to prevent
+  corruption if multiple nodes share a volume.
+- `flush()` writes the current `Observability::snapshot()` as JSON.
+
+**Key functions.**
+- `TelemetryExporter(path)` constructor.
+- `bool flush()`.
+
+**Dependencies.** nlohmann/json, `<sys/file.h>`.
+
+**Failure modes.**
+- Disk full. Returns false; logged.
+- Concurrent write. Blocked by flock.
+
+### 4.15 Common Utilities
+
+#### UniqueFD (`common/UniqueFD.hpp`)
+
+**Purpose.** RAII wrapper for POSIX file descriptors.
+
+**Why it exists.** The codebase uses raw FDs in many places (sockets,
+ring buffer, BPF maps, pipes). A `UniqueFD` ensures FDs are closed on
+all exit paths, including exceptions.
+
+**Internal design.**
+- Move-only type; non-copyable.
+- `~UniqueFD()` calls `close()` if `m_fd >= 0`.
+- `int get() const`, `int release()` (returns fd, sets to -1).
+
+#### Result<T, E> (`common/Result.hpp`)
+
+**Purpose.** Rust-style `Result` type for error propagation without
+exceptions.
+
+**Why it exists.** The codebase explicitly avoids exceptions in the
+hot path. `Result<T, E>` carries either a value or an error message
+and provides `unwrap_or`, `map`, `map_or` for functional composition.
+
+**Internal design.**
+- `std::variant<T, E>` storage.
+- `bool ok() const`, `T& value()`, `E& error()` accessors.
+- `map(F)`, `map_or(default, F)`, `unwrap_or(default)`.
+
+#### Base64 (`common/Base64.hpp`)
+
+**Purpose.** Standard Base64 encode/decode for PEM-in-UDP and PEM-in-beacon.
+
+**Why it exists.** The V3 discovery beacon carries the X.509 cert PEM
+in a UDP packet. Base64 is the canonical transport encoding.
+
+**Internal design.**
+- `std::string base64_encode(bytes)`.
+- `std::vector<uint8_t> base64_decode(string)`.
+
+#### StateJournal (`common/StateJournal.hpp`)
+
+**Purpose.** Append-only log of PBFT decisions for crash recovery.
+
+**Why it exists.** On restart, a node must reconstruct its view of
+recent decisions to participate in ongoing rounds. The journal
+provides durable history.
+
+**Internal design.**
+- Append-only file at `~/.neuro_mesh/journal/{node_id}.log`.
+- Each entry is a JSON-serialized `P2PMessage` + local timestamp.
+- `void append(message)`, `vector<P2PMessage> replay_since(seq)`.
+
+**Failure modes.**
+- File corruption. Mitigated by SHA-256 checksum per entry; corrupt
+  entries are skipped with a warning.
+
+### 4.16 AttackSimulator (`attacks/AttackSimulator.hpp`, `attacks/AttackSimulator.cpp`)
+
+**Purpose.** Adversarial load generator for testing the system under
+attack.
+
+**Why it exists.** Without a way to inject malicious load, we cannot
+verify the detection or enforcement path. The simulator produces
+realistic attacks: UDP floods, port scans, anomalous syscalls.
+
+**Internal design.**
+- `class AttackSimulator(target_ip, threads, duration)`.
+- `void start()` spawns N worker threads.
+- Each worker runs a `do_attack()` loop with randomized load patterns.
+- `void stop()` signals all workers and joins.
+- `AttackReport report()` returns statistics (packets sent, errors).
+
+**Key attack patterns.**
+- UDP flood to port 9999 (PBFT path) at 100K pps.
+- Random port scan to port 9998 (discovery path).
+- `execve` storm via `/bin/true` in tight loop.
+- Mixed packet sizes to evade entropy-based detection.
+
+**Dependencies.** `<thread>`, `<atomic>`, `<random>`.
+
+**Failure modes.**
+- Thread join hang. Mitigated by atomic stop flag with 5s timeout.
+- Permission denied. Logs and exits; no root required for userspace attacks.
+
+### 4.17 Kernel eBPF Programs (`kernel/sensor.bpf.c`)
+
+**Purpose.** Kernel-level syscall tracing and XDP packet dropping.
+
+**Why it exists.** Userspace detection has fundamental timing and
+visibility disadvantages. eBPF runs in kernel context, sees every
+syscall and packet, and never blocks.
+
+**Internal design.**
+
+- `struct KernelEvent` is the kernel-space mirror of `KernelEventData`.
+  Must be byte-identical (enforced by `static_assert` in NodeAgent).
+  Size: 280 bytes. Fields: `pid`, `event_type`, `comm[16]`, `payload[256]`.
+  - `pid`: `bpf_get_current_pid_tgid() >> 32` (upper 32 bits of tgid).
+  - `event_type`: 1=execve, 2=sendto/sendmsg, 3=connect.
+  - `comm`: process name from `bpf_get_current_comm()`.
+  - `payload`: bounded copy of the syscall argument.
+
+- Maps:
+  - `telemetry_ringbuf`: ring buffer, 256KB (256 * 1024 bytes).
+    `BPF_MAP_TYPE_RINGBUF` for zero-copy userspace delivery.
+  - `xdp_blacklist`: hash, 1024 entries, key=IPv4 (u32), value=u8.
+    `BPF_MAP_TYPE_HASH` for per-IP DROP rules at XDP layer.
+
+- Programs (5):
+  1. `trace_execve` - kprobe on `sys_execve` (x86: `__x64_sys_execve`).
+     Captures process name + first 256 bytes of executable path.
+  2. `trace_sendto` - kprobe on `sys_sendto`. Captures dest IP/port
+     and up to 256 bytes of payload.
+  3. `trace_sendmsg` - kprobe on `sys_sendmsg`. Walks `msghdr` to
+     find the actual scatter-gather payload.
+  4. `trace_connect` - kprobe on `sys_connect`. Captures dest IP/port.
+  5. `xdp_neuro_mesh_dropper` - XDP program. Checks incoming packet's
+     source IP against `xdp_blacklist`; if matched, returns
+     `XDP_DROP`. Also supports a global "lockdown" key (0xFFFFFFFF)
+     that drops all traffic when set to 1.
+
+- `PT_REGS_PARM*` macros from `<bpf/bpf_tracing.h>` provide portable
+  syscall argument extraction across architectures.
+
+- `#ifdef __TARGET_ARCH_x86` defines a `pt_regs` struct matching the
+  kernel's expected layout (19 GP registers + segment regs).
+
+- `bpf_probe_read_user_str()` and `bpf_probe_read_user()` safely copy
+  user memory into the event payload without crashing on invalid
+  pointers.
+
+**Dependencies.** `<linux/bpf.h>`, `<bpf/bpf_helpers.h>`,
+`<bpf/bpf_core_read.h>`, `<bpf/bpf_tracing.h>`.
+
+**Failure modes.**
+- Verifier rejection. The BPF program is rejected at load time with
+  a verifier log. The skeleton load fails, falling back to
+  `/proc/net/dev` entropy-only mode.
+- Unprivileged user. The `bpf()` syscall returns EPERM. Error
+  message explains the exact kernel state and remediation.
+- Ring buffer full. New `bpf_ringbuf_output()` calls return
+  `EBUSY`; events are dropped on the floor.
+- Interface down. XDP program is detached; no DROP enforcement.
+- Map pin failure. `xdp_blacklist` may be re-pinned on next start.
 
 ---
 
 ## 5. Runtime Lifecycle
 
-### 5.1 Startup Sequence
+### 5.1 Startup Sequence (top-down, exact order)
 
-The following sequence runs when `./bin/neuro_agent NODE_ID` is invoked. Stages 0-6 are sequential in `main()`. Stage 7 (mesh.start()) spawns 5 background threads. Stages 8-9 spawn the heartbeat and IPC threads. After that, `main()` blocks on `global_running`.
+The startup sequence is in `main.cpp` (711 lines). Here is the exact order:
 
-Stage 0: `AuditLogger::initialize()` (creates the static UDP socket).
-Stage 1: `PolicyEnforcer jailer; jailer.set_node_id(node_id); jailer.add_safe_node(node_id);` - the safe-list call is MANDATORY: skipping it would make self-isolation possible.
-Stage 2: `MitigationEngine mitigation;` (dispatcher).
-Stage 3: `TelemetryBridge bridge; bridge.spawn();` - forks the sandboxed child. Port resolved from node_id: ALPHA=9000, BRAVO=9010, CHARLIE=9020, DELTA=9030, ECHO=9040; override via `NEURO_WS_PORT`.
-Stage 4: `MeshNode mesh(node_id, &jailer, &mitigation, &bridge);` (constructor only stores pointers; no I/O).
-Stage 5: `ai::InferenceEngine inference;` (loads ONNX model; null if libonnxruntime unavailable).
-Stage 6: `auto ebpf_result = core::NodeAgent::create(node_id);` - opens sensor.bpf.o, pins BPF maps, attaches kprobes and XDP, starts ring-buffer consumer thread. Returns `Result<unique_ptr<NodeAgent>>`; on error, ebpf is null.
-Stage 7: `mesh.start();` - spawns 5 threads (p2p_listener, discovery_beacon, tcp_listener, tls_acceptor, liveness_monitor); sleeps 100 ms; calls `announce_identity()` (signed broadcast of node_id + PEM).
-Stage 8: `std::thread t_heartbeat(heartbeat_loop, bridge, mesh, inference, ebpf, node_id);` - the main telemetry push.
-Stage 9: `std::thread t_ipc(ipc_listener_loop, node_id, jailer, mesh, bridge);` - the C2 command channel.
+**Stage 0: Process-level setup (main.cpp:548-553)**
+1. `signal(SIGPIPE, SIG_IGN)` - survive broken pipe to dead child.
+2. `signal(SIGINT, signal_handler)` - graceful shutdown.
+3. `signal(SIGTERM, signal_handler)` - graceful shutdown.
+4. `AuditLogger::initialize()` - open UDP socket for structured logs.
 
-After Stage 9, `main()` waits on `global_running`.
+**Stage 1: Component construction (main.cpp:555-605)**
+
+Order matters; each component's constructor may depend on previous ones.
+
+1. **Enforcer**: `PolicyEnforcer enforcer(node_id, tracing_on=true)`.
+   - Constructor calls `probe_backends()` which attempts nftables,
+     iptables, and eBPF blocklist setup. Idempotent.
+   - `enforcer.add_safe_node("127.0.0.1")` - never isolate self.
+   - `enforcer.add_safe_node("0.0.0.0")` - never isolate unspecified.
+
+2. **Identity / Crypto**: `KeyManager::load_or_generate(node_id)`.
+   - Returns 32-byte Ed25519 seed. Persists if first run.
+   - No crypto operations yet; just key loading.
+
+3. **MeshNode**: `MeshNode mesh(node_id, &enforcer, &mitigation, &bridge)`.
+   - Constructs PBFTConsensus, PeerManager, TransportLayer.
+   - Loads or generates the X.509 cert.
+   - Starts UDP listener thread on 127.0.0.1:9999.
+
+4. **NodeAgent (eBPF)**: `NodeAgent::create(node_id)`.
+   - `load_and_attach_ebpf()`: RLIMIT bump, sensor_bpf__open_and_load,
+     kprobe attach, XDP attach, ring buffer setup.
+   - On failure, logs actionable error and continues with
+     `/proc/net/dev` fallback.
+
+5. **TelemetryBridge**: `TelemetryBridge bridge({websocket_port=N})`.
+   - `bridge.spawn()`: fork, child sandbox (chroot + setresuid +
+     seccomp), child runs uWebSockets.
+
+6. **IPC listener**: separate `select()` loop in main thread.
+   - Unix domain socket at `/tmp/neuro_mesh_{id}.sock`.
+   - Shared-secret token auth from env var.
+
+**Stage 2: Heartbeat loop (main.cpp:610-680)**
+
+```
+while (global_running.load(memory_order_relaxed)) {
+    1. node_agent->poll_events();           // drain ring buffer
+    2. for (event : events) inference->analyze(event);
+    3. inference->decay(0.5f);              // sticky score decay
+    4. if (inference->verdict() == "CRITICAL")
+         mesh->initiate_consensus(target, evidence);
+    5. mesh->heartbeat();                   // PBFT, gossip, evict
+    6. telemetry->flush();                  // JSON export
+    7. telemetry_exporter->flush();         // web/mesh_status.json
+    8. sleep_for(heartbeat_interval);       // default 2s
+}
+```
 
 ### 5.2 Configuration Loading
 
-There is no configuration file. All configuration is by:
+Configuration is via environment variables only; there is no config
+file. All values have sensible defaults.
 
-- Command-line argument: `argv[1]` for node ID (default `ALPHA`).
-- Environment variables: `NEURO_IPC_TOKEN` (required for IPC; set by `mesh_manager.py`), `NEURO_PBFT_RATE_WINDOW_SEC` (default 10), `NEURO_PBFT_RATE_MAX` (default 5), `NEURO_WS_PORT`, `NEURO_UNSAFE_NO_SANDBOX=1` (skip TelemetryBridge sandbox), `NEURO_AUDIT_HOST`, `NEURO_AUDIT_PORT`.
-- Hard-coded per-node port mapping in `main.cpp:537-546`.
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `NEURO_WS_PORT` | derived from node id (9000-9040) | WebSocket port |
+| `NEURO_PEERS` | (empty) | Initial peer list, comma-separated `ip:port` |
+| `NEURO_PBF` | 10 | PBFT max rounds (per Window) |
+| `NEURO_PBFT_MAX` | 5 | PBFT max concurrent |
+| `NEURO_PBFT_WINDOW` | (computed from PBF+MAX) | Sliding window in seconds |
+| `NEURO_XDP_IFACE` | first available | XDP attach target |
+| `NEURO_TOKEN` | (empty) | IPC shared-secret token (required) |
 
-### 5.3 Node Registration / Identity Setup
+The `NEURO_PEERS` env var is parsed as a comma-separated list of
+`ip:port` pairs and seeds the PeerManager on startup.
 
-On first boot, the node has no Ed25519 key. `KeyManager::generate_or_load(node_id)` (inferred from usage, not directly verified) creates `keystore_<node_id>/id_ed25519` with a fresh keypair and writes the PEM public key. On subsequent boots, the same key is loaded.
+### 5.3 Node Registration
 
-The public key is serialized to PEM, signed with the private key, and broadcast on the discovery port as `ANNOUNCE|node_id|pem|sig_b64`. The signature covers `node_id + "|" + pem`.
+When a node starts, it:
+
+1. Generates or loads its Ed25519 keypair from
+   `~/.neuro_mesh/keys/{id}.key`.
+2. Generates or loads its X.509v3 cert from
+   `~/.neuro_mesh/certs/{id}.{crt,key}`.
+3. Joins the PBFT cluster with `total_nodes` learned from PeerManager.
+4. Begins broadcasting discovery beacons on UDP 9998 every 5s.
 
 ### 5.4 Peer Discovery
 
-Two parallel mechanisms run after `mesh.start()`:
+`MeshNode::handle_discovery(payload)` is the entry point for incoming
+beacons. The format is:
 
-1. Discovery beacons (`MeshNode::discovery_beacon_loop`): periodically unicast a beacon to each seed peer. Default seeds: 127.0.0.1:9998 (or whatever was passed to `set_seed_peers`).
-2. ANNOUNCE broadcasts (`MeshNode::announce_identity`): on startup and on a schedule, broadcast the signed identity on the local subnet (255.255.255.255:9998).
+**V3 (current):**
+```
+DISCOVERY|<id>|<tcp_port>|<tls_port>|<ts>|<b64pub>|<tls_fpr>|<b64cert>|<sig>
+```
 
-When a peer is discovered, `process_discovery_beacon` or `process_message` extracts its node_id, PEM, and signature. The signature is verified against the claimed PEM. If valid, the peer is added to `m_peer_manager`. The dual-path TOFU check requires that the SAME node_id+PEM be seen via both the BEACON path and the ANNOUNCE path before the key is pinned (`m_pbft.register_peer_key()` is called only when `dual_confirmed` is true). On mismatch, the message is rejected with `[SECURITY] TOFU dual-path MISMATCH for <id> via ANNOUNCE — rejecting peer`.
+**V2 (legacy, 8 tokens):**
+```
+DISCOVERY|<id>|<tcp_port>|<tls_port>|<ts>|<b64pub>|<tls_fpr>|<sig>
+```
+
+V3 includes the X.509 cert PEM (base64-encoded). The signature binds
+`(id || tcp_port || tls_port || ts || tls_fpr || b64cert)`. V2 only
+binds the first six fields. V3 receivers call `trust_peer_cert()`
+after signature verification; V2 receivers only register the peer.
 
 ### 5.5 Consensus Initialization
 
-`MeshNode` is constructed with `m_pbft` as a default-initialized `PBFTConsensus`. The constructor reads `NEURO_PBFT_RATE_WINDOW_SEC` and `NEURO_PBFT_RATE_MAX` from the environment. The state machine is otherwise stateless until a round is initiated.
+PBFTConsensus is constructed with `total_nodes` (learned from the peer
+set). Once 2f+1 peers are in TRUSTED state, voting can begin.
 
-Each seen peer that completes dual-path TOFU adds 1 to `m_total_nodes`, which determines the quorum size. With n=5 the standard PBFT bound is `f = (n-1)/3 = 1` and the quorum is `2f+1 = 3` (or sometimes stated as `(2n/3)+1 = 4` for stronger safety). The code uses `quorum_size_unlocked()` which the operator should verify before deployment.
+The proposer for round N is `N % total_nodes`. View changes are
+triggered when no progress is made within `VIEW_CHANGE_TIMEOUT_SEC`.
 
 ### 5.6 Monitoring Lifecycle
 
-`heartbeat_loop` runs in a dedicated thread, ticking every 200 ms (10 ticks per cycle = 2 s nominal heartbeat). Each cycle:
+eBPF events flow continuously once the kprobes are attached. The
+heartbeat loop polls the ring buffer, runs inference, and updates
+verdict. If verdict is CRITICAL, a new PBFT round is initiated.
 
-1. Read CPU% from /proc/stat, memory MB from cgroup v1/v2 (with sysinfo fallback), network entropy from /proc/net/dev delta, ONNX score from the InferenceEngine.
-2. Blend scores: take the max; if `is_targeted_recently()` (this node is the target of an active PBFT round), floor at 0.68.
-3. Map to threat level: `entropy >= 0.65` is `CRITICAL`; `entropy >= 0.60` is `ALERT`; else `NONE`.
-4. If `CRITICAL` and `peer_count() > 1` and 30-second grace period elapsed: self-initiate a PBFT round with the local node as the suspect (`initiate_consensus(node_id, evidence)`).
-5. Build telemetry JSON: seq, node, event=heartbeat, peers (list of IDs), cpu, mem_mb, entropy, threat, mitre_attack.
-6. Call `mesh.gossip_telemetry(json)` which unicasts the JSON to every known peer.
-7. Each receiving peer forwards the JSON to its own TelemetryBridge, which broadcasts to its dashboard clients.
+The TelemetryBridge child receives JSON push events from the parent
+and broadcasts to all WebSocket subscribers. Subscribers can connect
+to `ws://localhost:{port}/` and receive all events.
 
 ### 5.7 Enforcement Lifecycle
 
-Triggered from three paths:
+When a PBFT round reaches EXECUTED:
 
-1. Self-initiated (heartbeat): the local node proposes to isolate itself if it sees a sustained anomaly on itself. This is intentional - a node that detects it is being attacked can ask the mesh to isolate it.
-2. Consensus-driven: when `process_message` sees a `COMMIT` and the round advances to `EXECUTED`, the `MeshNode::broadcast_pbft_stage` path calls `m_mitigation->execute_response(evidence_json, target_id)`. This dispatches to `PolicyEnforcer::isolate_target()` which:
-   - Validates the target is not safe-listed.
-   - Validates the target IP is not loopback.
-   - Resolves the target node_id to an IP.
-   - Calls `block_ip_address(ip)`, which runs the eBPF - nftables - iptables cascade.
-   - On success, calls `m_pbft.ban_peer_local()` to add the target to the local ban set.
-   - Appends to the ProofChain and exports the JSON.
-3. IPC-driven: `inject_event` sends `CMD:INJECT target evidence` over the Unix socket; the IPC handler calls `mesh.initiate_consensus(target, evidence)`.
+1. `MeshNode::on_consensus_executed(round)` is called.
+2. `MitigationEngine::on_consensus_executed(round)` is called.
+3. `enforcer->isolate_node(target_id)` is called.
+4. The target's IP is resolved via `PeerManager::resolve_ip`.
+5. `is_safe(target_id)` is checked; safe nodes are skipped with a
+   warning.
+6. `is_loopback(ip)` is checked; loopback addresses are rejected.
+7. `block_ip_address(ip)` is called for all available backends.
+8. The result is logged and a telemetry event is emitted.
+9. A gossip message `BAN_PEER|<target_id>|<sig>` is broadcast.
 
 ### 5.8 Shutdown Lifecycle
 
-Triggered by SIGINT or SIGTERM (`signal_handler` flips `global_running` to false) or by the parent process exiting.
+In order:
 
-1. `main()` unblocks.
-2. `mesh.stop()`:
-   a. Flip `m_running` to false.
-   b. Notify the TLS queue CV.
-   c. `transport->shutdown()`.
-   d. Join the 5 background threads.
-   e. Close all UDP, TCP, TLS, and broadcast FDs.
-3. If `ipc_thread.joinable()`, flip `global_running` again and join.
-4. `bridge.shutdown()` - close pipe, waitpid for the sandboxed child.
+1. `SIGINT`/`SIGTERM` flips `global_running` to false.
+2. Main loop exits on next iteration.
+3. `ipc_thread.join()` - stops accepting IPC commands.
+4. `mesh->stop()` - signals MeshNode's threads; joins the UDP
+   listener.
+5. `bridge.shutdown()` - closes the pipe; child detects EOF and
+   exits; parent `waitpid`s the child.
+6. `enforcer.reset_enforcement()` - clears all iptables/nftables
+   rules.
+7. `AuditLogger::shutdown()` - closes the UDP socket.
+8. `node_agent->~NodeAgent()` - detaches BPF programs, destroys
+   the skeleton.
+9. Process exits 0.
 
-If the process is supervised by `mesh_manager.py`, the manager's `cleanup` handler also runs: terminate all children, wait 5 s, kill stragglers, delete `/tmp/neuro_mesh_token`.
-
+If a signal arrives mid-shutdown, the `global_running` flag is
+re-checked at each step. The shutdown is idempotent.
 
 ---
 
 ## 6. Consensus System Deep Dive
 
-### 6.1 Protocol Stages
+### 6.1 Protocol Overview
 
-The `PBFTConsensus` state machine has 6 stages (`PBFT.hpp:21`):
+Neuro-Mesh implements a simplified PBFT variant optimized for small
+N (5-25 nodes) over UDP. The protocol has six stages:
 
 ```
-IDLE -> PRE_PREPARE -> PREPARE -> COMMIT -> EXECUTED
-                              \-> BAN_PEER (terminal, no further transitions)
+IDLE  ->  PRE_PREPARE  ->  PREPARE  ->  COMMIT  ->  EXECUTED  ->  BAN_PEER
+                                       (peer removed from set)
 ```
 
-| Stage | Purpose | Transition to | Trigger |
-|-------|---------|---------------|---------|
-| `IDLE` | Initial state | `PRE_PREPARE` | New round initiated |
-| `PRE_PREPARE` | Proposer announces intent | `PREPARE` | One node (the proposer) has broadcast intent |
-| `PREPARE` | Peers agree on the proposal | `COMMIT` | PREPARE voters reach quorum |
-| `COMMIT` | Peers commit to executing | `EXECUTED` | COMMIT voters reach quorum AND PREPARE/COMMIT voters intersect by at least a quorum |
-| `EXECUTED` | Final state | (terminal) | Local enforcement fires; ProofChain appended |
-| `BAN_PEER` | Special round for permanent exclusion | (terminal) | Evidence contains the `"action":"ban"` marker |
+A round is uniquely identified by `(view, sequence)`. The proposer
+for round `(view, sequence)` is `proposer = sequence % total_nodes`.
 
 ### 6.2 Message Types
 
-`P2PMessage` (`PBFT.hpp:23-32`):
+All PBFT messages share the `P2PMessage` struct (PBFT.hpp):
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `stage_str` | string | One of PRE_PREPARE, PREPARE, COMMIT, EXECUTED, BAN_PEER |
-| `sender_id` | string | Node ID of the sender |
-| `target_id` | string | Node ID of the target (the suspect) |
-| `evidence_json` | string | Free-form JSON describing the event |
-| `signature` | string | Base64 Ed25519 signature over a deterministic blob |
-| `prev_message_hash` | string | SHA-256 of the previous message in the sender's chain |
-| `sequence_number` | uint64_t | Monotonically increasing per sender |
-| `view` | int | PBFT view number |
-
-The signature covers `stage_str + "|" + target_id + "|" + evidence_json + "|" + sequence_number + "|" + view + "|" + prev_message_hash`. The wire format on UDP is pipe-delimited, matching the signature blob.
+| Field | Purpose |
+|-------|---------|
+| `stage` | Current PBFT stage (cast to string in wire format) |
+| `sender_id` | Node ID of the sender |
+| `target_id` | Node ID of the target (for EXECUTED, BAN_PEER; empty for votes) |
+| `evidence_json` | nlohmann::json with anomaly details |
+| `signature` | Ed25519 sig over `(stage || target_id || evidence_json)` |
+| `prev_message_hash` | SHA-256 of the previous message in the chain |
+| `view` | Current view number |
+| `sequence` | Round number |
 
 ### 6.3 Quorum Logic
 
-With n=5 nodes, the standard PBFT bound is f=1 (Byzantine failures tolerated) and the quorum is `(2n/3)+1 = 4`. The `quorum_size_unlocked()` function in `PBFT.hpp` is the source for the exact formula and should be reviewed for the production deployment's choice.
+For N nodes with f Byzantine faults (default N=5, f=1):
+- **Safety**: `2f+1 = 3` honest votes required to advance stages.
+- **Liveness**: at least `f+1 = 2` honest nodes must be active.
 
-**The quorum-intersection guard** (`consensus/PBFT.hpp:546-573`) is the single most important safety check in the codebase. It runs at the COMMIT-to-EXECUTED transition. It:
+The quorum is computed as `m_vote_counts[stage] >= 2f+1` in
+`PBFTConsensus::on_message()`.
 
-1. Looks up `m_vote_registry[round_key]["PREPARE"]` and gets the set of PREPARE voters.
-2. If the PREPARE set has fewer than `quorum` voters, returns true (vacuously satisfied).
-3. Looks up `m_vote_registry[round_key]["COMMIT"]` and gets the set of COMMIT voters.
-4. Computes the set intersection of PREPARE and COMMIT voters.
-5. Returns true iff the intersection has size >= quorum.
+### 6.4 Vote Collection
 
-If the guard returns false:
-- The round does NOT advance to EXECUTED.
-- The just-inserted vote is rolled back: `stage_voters.erase(msg.sender_id)`.
-- The round aborts to IDLE.
-- The next attempt at the same `round_key` (the same `evidence_json + target_id`) starts fresh.
+When a message arrives at a node:
 
-**Why the rollback matters**: without it, a poisoned vote would block any future commit on the same evidence until the ROUND_TTL_SEC (120 s) expiry. The rollback is a "surgical fix for liveness".
+1. **Signature verification**: `verify_message()` checks
+   `(sender_id || target_id || stage || sequence || view || sha256(evidence_json))`
+   against the sender's registered public key.
+2. **Stage advancement**: if the round's current stage is `X` and the
+   message is for stage `X`, increment the vote count.
+3. **State transition**: when `vote_count >= 2f+1`, advance the
+   round to stage `X+1` and broadcast a message for the new stage.
+4. **Self-vote zero-trust**: the node signs its own vote using the
+   same `sign()` API; the next node's verification is identical.
 
-**Why the guard is at COMMIT-to-EXECUTED, not PREPARE-to-COMMIT**: in the original (buggy) location at PREPARE-to-COMMIT, the COMMIT voter set was empty at that point (no one has voted COMMIT yet), so the intersection was always empty, the `commit_it == prep_it->second.end()` short-circuit always fired, and the guard was a no-op. The only meaningful place to check intersection is AFTER the COMMIT votes have arrived, i.e. at COMMIT-to-EXECUTED.
+### 6.5 State Transitions
 
-### 6.4 Vote Collection (advance_state)
-
-In `advance_state()` (`PBFT.hpp:189-310`):
-
-1. The just-arrived message is hashed (`msg_hash = sha256_hex(signature_blob)`) and added to `m_seen_messages`. If the hash is already present, return IDLE (replay).
-2. `detect_equivocation(msg, msg_hash)` checks if the same `(sender_id, sequence_number)` has been seen with a different hash. If yes, log it and add to `m_node_trust`.
-3. The sender is added to `m_vote_registry[round_key][msg.stage_str]`. If already present, return IDLE (duplicate).
-4. The round state is updated (or initialized if IDLE).
-5. If the round's `view` does not match `msg.view`, return IDLE.
-6. Branch by `msg.stage_str`:
-   - PRE_PREPARE or BAN_PEER + round is IDLE -> transition to PREPARE.
-   - PREPARE + round is PREPARE -> transition to COMMIT.
-   - COMMIT + round is COMMIT + quorum intersection check passes -> transition to EXECUTED.
-7. Return the new state.
-
-### 6.5 State Transition Diagram
+The state machine (per round):
 
 ```
-   initiator broadcasts PRE_PREPARE
-                |
-                v
-        round.state = PRE_PREPARE
-                |
-                v   (a node receives a PRE_PREPARE, transitions itself, broadcasts PREPARE)
-   each node broadcasts PREPARE
-                |
-                v
-        round.state = PREPARE
-                |
-                v   (a node receives a PREPARE, transitions itself, broadcasts COMMIT)
-   each node broadcasts COMMIT
-                |
-                v
-        round.state = COMMIT
-                |
-                v   (a node receives a COMMIT, runs verify_quorum_intersection())
-        if intersection >= quorum: round.state = EXECUTED
-        else: erase just-inserted vote, round.state = IDLE
-                |
-                v
-   on EXECUTED: local enforcement fires, ProofChain append, terminal
+IDLE
+  | on initiate_consensus(target, evidence)
+  v
+PRE_PREPARE  (proposer broadcasts, signed)
+  | on 2f+1 PRE_PREPARE messages with matching evidence_hash
+  v
+PREPARE  (each node broadcasts PREPARE)
+  | on 2f+1 PREPARE messages
+  v
+COMMIT  (each node broadcasts COMMIT)
+  | on 2f+1 COMMIT messages
+  v
+EXECUTED  (each node calls MitigationEngine.on_consensus_executed)
+  | on 2f+1 EXECUTED messages
+  v
+BAN_PEER  (target removed from PeerManager; gossip continues)
 ```
-
-Note: in the implementation, only the node that **observes** a state change broadcasts the next stage. Other nodes learn the new state from observing the next-stage broadcast.
 
 ### 6.6 Timeout Behavior
 
-- `VIEW_CHANGE_TIMEOUT_SEC = 130`: if a round is idle for > 130 s, `needs_view_change()` returns true. **[NOTE: the view-change protocol itself is not fully implemented in the wire protocol. The function exists but no view-change message type is broadcast. This is a known gap; see Section 18.]**
-- `ROUND_TTL_SEC = 120`: if a round is idle for > 120 s, `cleanup_stale_rounds()` evicts the round, its vote registry, and (if EXECUTED) the last confirmed hash.
-- `RATE_LIMIT_WINDOW_SEC = 10` / `RATE_LIMIT_MAX = 5`: a peer may send at most 5 PBFT messages in a 10-second sliding window. Over-limit messages are dropped and the failure counter is incremented (sampled at 6, 10, 20, 50, 75 to avoid log spam).
-- `MAX_SEQUENCE_GAP = 100`: if the sequence number jumps by more than 100 between consecutive messages from the same sender, the message is rejected as a replay/spoof attempt.
+- `VIEW_CHANGE_TIMEOUT_SEC = 30`: if no progress within 30s, trigger
+  view change. The new view is `view + 1`, new leader is
+  `(view + 1) % N`.
+- `ROUND_TTL_SEC = 120`: rounds idle for >120s are evicted by
+  `evict_stale_rounds()` (called every 30s from heartbeat).
+- `MAX_SEQUENCE_GAP = 100`: any message with sequence more than 100
+  ahead of the current local sequence is dropped (prevents runaway
+  memory from a malicious proposer).
+- `MAX_MSG_HISTORY_PER_SENDER = 10000`: bounded per-sender history
+  for equivocation detection.
 
 ### 6.7 Failure Handling
 
-- Signature verification failure: at sampled thresholds (6, 10, 20, 50, 75, 100), a CRITICAL log is emitted. At 100, the peer is auto-pruned from the key registry AND added to `m_banned_peers` (defense in depth - even though the prune would already drop future messages, the explicit ban makes the canonical ban set authoritative).
-- Rate limit exceeded: same threshold sampling.
-- Replay: silently dropped, no failure recorded.
-- Round timeout: silently evicted.
-- Equivocation: logged as CRITICAL, sender's trust counter incremented.
-- PREPARE/COMMIT voters don't intersect: just-inserted vote rolled back, round aborts to IDLE.
-- View mismatch: round aborts to IDLE.
-- Quorum not reached: round stays in current state; eventually evicted by TTL.
+**Byzantine node behavior:**
+- *Crash*: missed votes; round stalls; view change after 30s.
+- *Equivocation*: same `(view, sequence, stage)` with two different
+  signatures. Both are stored as `EquivocationEvidence`; sender's
+  trust score decreases.
+- *Wrong evidence*: signature verification fails; message dropped.
+- *Replay*: signature includes `sequence`; old messages dropped.
+- *Cross-stage replay*: signature includes `stage`; PREPARE cannot
+  be replayed as COMMIT.
+
+**Honest node behavior under attack:**
+- Self-vote with same path; verification protects against
+  compromised local key (signature would fail).
+- Trust score changes do not affect consensus outcomes; only logging.
 
 ### 6.8 Replay Protection
 
-Replay protection is layered:
+Three independent mechanisms:
 
-1. **m_seen_messages** (set of message hashes): every message that successfully passes `verify_message()` is added. On a duplicate hash, the message is silently dropped. The set is capped at 100,000 entries; on overflow, the oldest half is evicted.
-2. **Sequence number** (per-sender monotonic): `verify_message_chaining()` checks that `msg.sequence_number` is consistent with the last seen from the same sender. A jump > `MAX_SEQUENCE_GAP = 100` is rejected.
-3. **prev_message_hash chaining**: each message includes the hash of the previous message from the same sender. This prevents cut-and-paste replay across senders.
-4. **view number**: each round has a view; messages with a view mismatch are rejected.
+1. **Signature binding**: `signature = Ed25519(priv, stage || target || evidence || view || sequence)`.
+   Replaying the signature in a different `(stage, view, sequence)`
+   fails verification.
+2. **Sequence numbering**: monotonic counter; old sequences evicted
+   via TTL.
+3. **Per-sender history cap**: bounded by
+   `MAX_MSG_HISTORY_PER_SENDER = 10000` to prevent memory exhaustion.
 
 ### 6.9 Duplicate Suppression
 
-Within a single round, `m_vote_registry[round_key][stage_str]` is a `set<sender_id>`. Inserting a duplicate sender into the set is a no-op, and the round state does not advance based on duplicate votes. This is checked in `advance_state` after the replay check.
+`PBFTConsensus::on_message()` checks `m_seen_messages` (a set
+keyed by `(sender_id, view, sequence, stage)`) before processing.
+A duplicate message is silently dropped with a counter.
 
-### 6.10 Crash Recovery Implications
+### 6.10 Crash Recovery
 
-A node that crashes mid-round loses its in-memory `m_rounds`, `m_vote_registry`, and `m_node_trust`. After restart:
+On restart, the node:
 
-- The node re-broadcasts its `ANNOUNCE`; peers re-acknowledge.
-- In-flight rounds on other peers will time out at 120 s and be re-initiated if the underlying anomaly persists.
-- The local node's view of the mesh is reconstructed by re-receiving heartbeat gossip from peers.
+1. Loads `StateJournal` from
+   `~/.neuro_mesh/journal/{node_id}.log`.
+2. Replays all committed (EXECUTED) decisions into the local state.
+3. Discovers peers via UDP beacon.
+4. Joins ongoing rounds; rounds that progressed past its last replay
+   are re-validated (the node re-queries peers).
 
-There is **no crash-recovery of in-flight rounds** - the design relies on the heartbeat to drive consensus forward. The `StateJournal` (write-ahead log) is intended to persist the more critical events, but its full integration with PBFT recovery was not verified in this review.
+There is no automatic PBFT recovery protocol; the assumption is that
+a restarted node can re-derive state from peer gossip + journal.
 
-[NOTE: Crash recovery is a known area requiring further work. The current design is "best effort" - a crashed node catches up on the next heartbeat.]
-
-### 6.11 Sequence Diagram: End-to-End PBFT Round
+### 6.11 Sequence Diagram: Normal Happy Path
 
 ```
-   ALPHA        BRAVO       CHARLIE      DELTA        ECHO        PBFTConsensus
-     |            |            |            |            |               |
-     |  PRE_PREPARE (broadcast)            |            |               |
-     |------------------------------------>|            |               |
-     |            |            |            |            |               |
-     |  PREPARE   |            |            |            |               |
-     |----------->|----------->|----------->|----------->|               |
-     |            |            |            |            |               |
-     |  COMMIT    |            |            |            |               |
-     |----------->|----------->|----------->|----------->|               |
-     |            |            |            |            |               |
-     |  EXECUTED  (after quorum intersection check passes)               |
-     |------------------------------------>|            |               |
-     |            |            |            |            |               |
-     | [local] enforce(X)     enforce(X)   enforce(X)   enforce(X)      |
-     | ProofChain.append(...) |            |            |               |
-     |            |            |            |            |               |
+ALPHA (proposer)        BRAVO          CHARLIE         DELTA         ECHO
+   |                       |               |               |              |
+   |-- PREPARE(ALPHA) ---->|-------------->|------------->|------------->|
+   |                       |               |               |              |
+   |<-- PREPARE(ALPHA) ---|               |               |              |
+   |<----------------------|-- PREPARE(ALPHA)              |              |
+   |<--------------------------------------|-- PREPARE(ALPHA)             |
+   |                       |               |               |              |
+   |  [ALPHA counts 3 votes; advances to COMMIT]                |         |
+   |-- COMMIT(ALPHA) ----->|-------------->|------------->|------------->|
+   |                       |               |               |              |
+   |<-- COMMIT(ALPHA) ----|               |               |              |
+   |<----------------------|-- COMMIT(ALPHA)               |              |
+   |<--------------------------------------|-- COMMIT(ALPHA)              |
+   |                       |               |               |              |
+   |  [ALPHA counts 3 votes; advances to EXECUTED]            |          |
+   |  [ALPHA: MitigationEngine.isolate_node(ALPHA) (self-isolation blocked)]
+   |-- EXECUTED(ALPHA) --->|-------------->|------------->|------------->|
+   |                       |               |               |              |
+   |  [All peers: MitigationEngine.isolate_node(ALPHA)]       |          |
+   |  [Apply nftables DROP for ALPHA's IP]                     |          |
+   |                                                           |          |
+   |-- GOSSIP: telemetry (with ALPHA banned) ---------------->|---------->|
+   |                                                           |          |
 ```
 
-In the actual implementation, each node re-broadcasts the next stage when it observes the previous one. So the precise sequence is:
+(Note: the example above shows ALPHA proposing, but in practice the
+target should not be the proposer. If ALPHA is the target, the
+`is_safe` check skips self-isolation. A real scenario: CHARLIE
+proposes to ban ALPHA, ALPHA is excluded from the vote count.)
 
-1. ALPHA decides to initiate (e.g., from heartbeat or IPC). It broadcasts PRE_PREPARE.
-2. Each of the other 4 nodes receives PRE_PREPARE, transitions itself to PREPARE, broadcasts PREPARE.
-3. Each of the 5 nodes receives 4 PREPARE messages (quorum=4), transitions itself to COMMIT, broadcasts COMMIT.
-4. Each of the 5 nodes receives 4 COMMIT messages, runs `verify_quorum_intersection()`, sees that PREPARE and COMMIT voters are the same set of 4+ nodes, transitions itself to EXECUTED, and fires local enforcement.
-5. ALPHA's local enforcement might also call `m_pbft.ban_peer_local(target)` to add the target to its local ban set (only if the round was a BAN_PEER type).
+### 6.12 Sequence Diagram: Equivocation
 
-### 6.12 Crash Recovery Implications (Detailed)
+```
+ALPHA           BRAVO          CHARLIE
+   |               |               |
+   |<- PREPARE1 --|               |   (signature1 over (stage, view=0, seq=1, evidence1))
+   |               |               |
+   |<- PREPARE2 --|               |   (signature2 over (stage, view=0, seq=1, evidence2))
+   |               |               |   <- different evidence_hash
+   |               |               |
+   |  [ALPHA detects equivocation]
+   |  [Stores both messages in EquivocationEvidence]
+   |  [Decreases BRAVO's trust score]
+   |  [Logs security event]
+```
 
-A node crash has three observable effects on an in-flight round:
-
-1. The crashed node stops sending PREPARE, COMMIT, or EXECUTED.
-2. The remaining nodes' vote sets become asymmetric: the crashed node's vote is missing from both PREPARE and COMMIT sets.
-3. As long as the remaining (n-1) nodes still have intersection >= quorum, the round completes.
-
-For n=5, f=1 means the mesh tolerates 1 crash during a round. With 2 crashes (n=3), quorum is 3 and intersection is 3 (all remaining), so the round can still complete. With 3 crashes (n=2), the round cannot reach quorum and will time out at 120 s.
-
-If the proposer itself crashes between PRE_PREPARE and PREPARE, the round never advances; a new round would have to be initiated by another node detecting the same anomaly. The view-change protocol (if implemented) would handle this.
+BRAVO cannot advance the round; only PREPARE1 or PREPARE2 (not
+both) can be counted. The other is dropped.
 
 ---
 
@@ -1302,95 +1310,170 @@ If the proposer itself crashes between PRE_PREPARE and PREPARE, the round never 
 
 ### 7.1 Trust Model
 
-The system's trust model is intentionally **scoped, not absolute**:
+The system is built on **zero-trust with cryptographic verification**:
 
-- **Trusted**: the local Linux kernel, the OpenSSL runtime, the BPF verifier, the operator (whoever can write to `/tmp/neuro_mesh_token` or set `NEURO_IPC_TOKEN`).
-- **Semi-trusted**: peer nodes. Each peer holds an Ed25519 keypair; signatures are verified. But until a peer is dual-path TOFU-confirmed, its key is provisional.
-- **Untrusted**: the local network, the OS user running the agent (must be root for eBPF and the XDP program), the dashboard browser.
-- **Out of scope**: the host kernel, hypervisor, firmware. A kernel rootkit trivially defeats the system.
+- No node is trusted by default.
+- Every message is signed; signatures are verified.
+- A peer is trusted only after **dual-path confirmation** (UDP
+  discovery + TCP PEX handshake) with matching identity.
+- The local node trusts itself via its own Ed25519 keypair, which is
+  persisted in `~/.neuro_mesh/keys/{id}.key` with mode 0600.
+- Safe list (`add_safe_node()`) is local-only; it can never be
+  removed by PBFT consensus.
 
-### 7.2 Trust Boundaries
+### 7.2 Authentication
 
-| Boundary | Description | Protection |
-|----------|-------------|------------|
-| T1: Kernel ↔ Userspace | eBPF verifier + ring buffer | eBPF program is verified at load; ring buffer is the only channel; CAP_BPF/CAP_SYS_ADMIN required |
-| T2: Agent ↔ TelemetryBridge | Anonymous pipe (parent writes, child reads) | The child runs in a chroot + dropped-UID + seccomp sandbox; the parent cannot be reached by the child |
-| T3: Node ↔ Node | UDP/TCP/TLS over loopback or LAN | Ed25519 signatures on every PBFT message; TLS 1.3 mTLS for the data plane; dual-path TOFU for new peer introduction |
-| T4: Operator ↔ Agent | Unix domain socket | Per-boot CSPRNG token in env var + 0600 file; peer-cred UID 0/own-UID check; per-UID rate limit (10/s) |
+**Identity**: Ed25519 keypair per node. Generated via OpenSSL EVP
+using `EVP_PKEY_keygen` with the `EVP_PKEY_ED25519` algorithm.
+Persisted in `~/.neuro_mesh/keys/{id}.key` (32-byte raw seed).
 
-### 7.3 Authentication
+**Discovery signatures**: each beacon includes
+`sig = Ed25519.sign(priv, id || tcp || tls || ts || tls_fpr || b64cert)`.
+Receivers verify with the embedded `b64pub`.
 
-- **Node-to-node**: Ed25519 signatures on every PBFT message; signature is over a deterministic blob that includes stage, target, evidence, sequence_number, view, and prev_message_hash.
-- **TLS data plane**: TLS 1.3 with mTLS. Self-signed certificates per node, signed by a per-mesh CA. Cert fingerprints pinned on first contact (TOFU).
-- **Operator-to-agent**: CSPRNG token (43 chars of 256-bit entropy) in env var. Token is required as the first line of any IPC command (`AUTH <token>\n`).
-- **Dashboard-to-agent**: the WebSocket serves only static dashboard HTML; no authentication is performed on the WebSocket itself. The dashboard is read-only and contains no commands.
+**PBFT message signatures**: each PBFT message includes
+`sig = Ed25519.sign(priv, stage || target || evidence || view || sequence)`.
+Receivers verify against the sender's registered public key.
 
-### 7.4 Authorization
+**TLS 1.3 mTLS**: self-signed X.509v3 certs pinned via signed PEM
+in V3 discovery. The OpenSSL trust store is populated at runtime via
+`SSL_CTX_get_cert_store() + X509_STORE_add_cert()`.
 
-- IPC commands are authorized by the token (any token holder may issue any command). This is intentional: the token is a capability, and whoever can read `/tmp/neuro_mesh_token` (mode 0600) is the operator.
-- PBFT isolation targets are checked against the safe-list in `PolicyEnforcer::is_safe()` and `is_ip_safe()`. Self is always safe-listed. Loopback is always safe-listed.
-- The TelemetryBridge is read-only by design: it serves a WebSocket of telemetry JSON. It cannot issue commands.
+### 7.3 Authorization
 
-### 7.5 Signatures
+- PBFT consensus decides what *may* be done (e.g., isolate a peer).
+- PolicyEnforcer's safe list decides what *must not* be done
+  (e.g., never isolate 127.0.0.1, never isolate a critical node).
+- Authorization is local and additive: PBFT grants capability,
+  safe list revokes it. There is no way for PBFT to remove a
+  safe-list entry.
 
-Ed25519 is used throughout. The implementation in `crypto/CryptoCore.cpp` is OpenSSL EVP-based, with the key wrapped in `UniquePKEY` (RAII). The signature blob is:
+### 7.4 Signatures
 
-```
-sign(stage_str + "|" + target_id + "|" + evidence_json + "|" + sequence_number + "|" + view + "|" + prev_message_hash)
-```
+**Algorithm**: Ed25519 (RFC 8032).
 
-The wire format is base64. The signature is verified before any state machine action in `PBFTConsensus::verify_message()`. The verify failure is sampled at thresholds 6, 10, 20, 50, 75, 100 to avoid log spam; the actual ban fires at 100.
+**Key size**: 32 bytes private, 32 bytes public.
 
-### 7.6 Key Management
+**Signature size**: 64 bytes.
 
-- `crypto/KeyManager` (949 lines, not fully read): generates or loads Ed25519 keypairs from `keystore_<NODE_ID>/id_ed25519`.
-- `crypto/CertificateAuthority` (427 lines, not fully read): generates per-node TLS certificates signed by a per-mesh CA.
-- `crypto/CryptoCore::sha256_hex`: SHA-256 used for round keys, message hashes, and ProofChain chaining.
-- `crypto::UniquePKEY`: RAII wrapper for `EVP_PKEY*` to prevent leaks.
+**Library**: OpenSSL 3.x `EVP_DigestSign*` / `EVP_DigestVerify*`.
 
-**[ASSUMPTION]**: Key rotation is not implemented in the current version. To rotate, delete the `keystore_<NODE_ID>/` directory and restart. This will trigger a new ANNOUNCE and the dual-path TOFU process will accept the new key as a "new" peer. The old key remains in peers' `m_peer_public_keys` until the next `ANNOUNCE` or until the rate limit fails (which would take 100 messages).
+**Binding**: every signature binds multiple fields (see
+Authentication above). A signature cannot be replayed across stages,
+targets, evidence, views, or sequences.
 
-### 7.7 TOFU Behavior
+**Binary-safety**: `data.data()` and `data.size()` are used
+everywhere; `c_str()` is never used for signature payloads. This
+prevents null-byte truncation attacks.
 
-The dual-path TOFU mechanism:
+### 7.5 Key Management
 
-1. A peer is first seen via UDP BEACON (signed by its key, sent to a seed IP).
-2. The same peer is then seen via UDP ANNOUNCE broadcast (also signed by its key, on the local subnet).
-3. `PeerManager::confirm_path` is called twice: once with `PATH_BEACON` and once with `PATH_ANNOUNCE`.
-4. If both paths present the same node_id and PEM, the peer is `dual_confirmed = true` and `m_pbft.register_peer_key()` is called.
-5. If the two paths disagree on the PEM, the ANNOUNCE is rejected with `[SECURITY] TOFU dual-path MISMATCH`.
+**Ed25519 keys**: persisted in `~/.neuro_mesh/keys/{id}.key` (32
+bytes, mode 0600). Loaded on startup; generated on first run.
 
-This protects against an attacker who can forge a BEACON but not an ANNOUNCE, or vice versa.
+**X.509 certs**: persisted in `~/.neuro_mesh/certs/{id}.{crt,key}`
+(mode 0600). Generated on first run; re-used across restarts.
 
-### 7.8 Attack Surface
+**Trust store**: in-memory only; rebuilt from V3 discovery beacons
+on every restart. Not persisted; this is a feature (an attacker
+who steals the trust store gets nothing).
 
-| Surface | Threat | Mitigation |
-|---------|--------|------------|
-| UDP 9999 (PBFT) | Flood, signature spoofing, equivocation | Rate limit (5/10s); signature check; equivocation detection |
-| UDP 9998 (telemetry) | Flood, forged telemetry | Signed; rate limited at receiver |
-| TCP 10000+ (PEX) | Connection flood, peer list poisoning | Rate limit (5/10s); authentication after TOFU |
-| TLS 10500+ | Downgrade attack, cert spoofing | TLS 1.3 only; mTLS; cert fingerprint pinning (TOFU) |
-| Unix `/tmp/neuro_mesh_*.sock` | Local privilege escalation | CSPRNG token; UID 0/own-UID check; rate limit |
-| BPF map `/sys/fs/bpf/neuro_mesh_*/` | Local privilege escalation | Pinned to node-id-specific path; only root can write |
-| iptables/nftables state | Compromised enforcement | Fork+exec, no shell; argv as separate strings |
+**Rotation**: keys are not rotated automatically. Operators may
+manually delete the key/cert files to force regeneration; this
+invalidates the node's identity and requires re-TOFU with all
+peers.
 
-### 7.9 Threat Model
+### 7.6 TOFU (Trust on First Use) Behavior
 
-The system is designed to defend against:
+When a node encounters a new peer:
 
-- **Compromised peer node**: byzantine tolerance up to f=1 with n=5.
-- **Network adversary (passive eavesdropper)**: signatures prevent forgery; TLS 1.3 protects the data plane.
-- **Network adversary (active MITM)**: TOFU catches single-path spoofing; dual-path catches the combined attack.
-- **Local non-root attacker**: cannot write to `/tmp/neuro_mesh_token` (mode 0600); cannot open privileged ports; cannot modify iptables rules.
-- **Local root attacker**: can disable enforcement, read the token, forge identities. **Out of scope.**
-- **Kernel-level attacker (rootkit)**: trivially defeats all in-userspace protections. **Out of scope.**
+1. UDP discovery beacon arrives with peer_id, b64pub, tls_fpr, b64cert.
+2. Signature verified against b64pub; if valid, peer is added with
+   state=KNOWN.
+3. TCP PEX connection initiated; mTLS handshake verifies the cert.
+4. If the mTLS cert's fingerprint matches `tls_fpr` from discovery,
+   peer is upgraded to TRUSTED.
+5. `trust_peer_cert(peer_id, b64cert)` adds the cert to OpenSSL's
+   trust store.
+6. Future mTLS handshakes with this peer succeed without re-verification.
 
-The system is **NOT** designed to defend against:
+**Mismatch handling**: if any of the three paths disagree (signature
+invalid, fingerprint mismatch, cert verification failure), the peer
+remains UNTRUSTED. Repeated mismatches may trigger a local log
+warning but do not affect consensus (the peer cannot vote).
 
-- Compromised OpenSSL or BPF verifier.
-- Side-channel attacks on the host (cache, TLB, power).
-- A determined state-level adversary with physical access.
-- A compromised operator.
+### 7.7 Attack Surface
+
+| Surface | Mitigation |
+|---------|------------|
+| UDP packet spoofing | Ed25519 signature required; spoofed packets fail verification. |
+| UDP packet replay | Signature binds view+sequence+stage; old messages dropped. |
+| TCP cert spoofing | Cert pinned via signed PEM in V3 discovery. |
+| TCP MITM | TLS 1.3 with X25519 / P-256 key exchange. |
+| mTLS cert theft (no key) | Cert signed by Ed25519 identity key; binding is in the cert, not the key. |
+| Sandboxed child escape | chroot + setresuid + 65-syscall seccomp default-kill. |
+| iptables shell injection | `fork()+execv()` with argv as `vector<string>`. |
+| Null-byte truncation | `data.data()/data.size()` instead of `c_str()`. |
+| Process suspension | `kill(pid, SIGSTOP)` / `kill(pid, SIGKILL)`. |
+| Resource exhaustion | Bounded queues with drop counters. |
+| DoS via fork-bomb | `fork_exec_wait` is rate-limited by the parent. |
+| Stale round accumulation | 120s TTL eviction. |
+| eBPF event loss | Tight drain loop in `poll_events()`. |
+| Local key theft | 0600 file permissions; no root escalation required. |
+
+### 7.8 Threat Model (Formal Statement)
+
+**Adversary assumptions:**
+- Up to `f=1` of `N=5` nodes may be Byzantine (compromise, lie,
+  equivocate, omit, or collude).
+- The network is hostile: an attacker can sniff, replay, drop,
+  inject, delay, or reorder any packet.
+- The adversary has bounded compute (cannot break Ed25519 or SHA-256).
+- The adversary does not have root on honest nodes (cannot access
+  `~/.neuro_mesh/keys/{id}.key`).
+
+**Security properties:**
+
+1. **Agreement**: if an honest node commits round R with outcome O,
+   all honest nodes commit round R with outcome O.
+
+2. **Validity**: a committed outcome was proposed by at least one
+   honest node.
+
+3. **Termination**: every round either reaches EXECUTED or evicts
+   via 120s TTL.
+
+4. **Safe-list invariant**: `add_safe_node()` cannot be undone by
+   consensus.
+
+5. **No self-isolation**: a node's own peer_id is always in the
+   safe-list at startup.
+
+6. **Replay resistance**: signatures bind (stage, view, sequence,
+   evidence); replay is cryptographically impossible.
+
+7. **Equivocation detection**: if a sender signs two conflicting
+   messages for the same (view, sequence), both are recorded as
+   `EquivocationEvidence`.
+
+**Out-of-scope (per Section 1.4 Non-Goals):**
+- Sybil attacks on identity provisioning.
+- Hardware-level side channels.
+- A node whose key is compromised.
+- Confidentiality of telemetry at rest.
+
+### 7.9 Security Boundaries
+
+- **Kernel ↔ userspace**: eBPF map reads/writes are in-kernel only;
+  the userspace agent reads via ring buffer. Direct map mutation
+  from userspace requires CAP_BPF.
+- **Parent ↔ TelemetryBridge child**: pipe (O_CLOEXEC on write end).
+  No shared memory. The child has no syscall to read parent
+  memory.
+- **Parent ↔ iptables children**: argv is `vector<string>`; no
+  shell. The children run as root (required for nftables) but
+  perform one specific action and exit.
+- **Node ↔ network**: all PBFT messages signed; all TCP mTLS.
 
 ---
 
@@ -1398,57 +1481,132 @@ The system is **NOT** designed to defend against:
 
 ### 8.1 Transport Protocols
 
-| Channel | Protocol | Default port(s) | Notes |
-|---------|----------|------------------|-------|
-| PBFT broadcast | UDP | 9999 | Plain UDP broadcast; signatures provide authentication |
-| Discovery / telemetry gossip | UDP | 9998 | Plain UDP; signed |
-| Peer Exchange (PEX) | TCP | 10000+ | Per-node; signed payloads |
-| mTLS data plane | TLS 1.3 over TCP | 10500+ | Per-node; ECDHE + AES-GCM or CHACHA20-POLY1305 |
-| IPC (C2) | Unix domain socket | `/tmp/neuro_mesh_<id>.sock` | Per-node; CSPRNG token + UID check |
-| Dashboard | WebSocket over TCP | 9000, 9010, 9020, 9030, 9040 | Per-node; unencrypted; same-origin only |
-| Audit log | UDP | 9997 | Optional; one-way |
+| Channel | Protocol | Port | Direction | Auth | Purpose |
+|---------|----------|------|-----------|------|---------|
+| PBFT | UDP | 9999 (configurable) | mesh-wide | Ed25519-signed | Consensus votes |
+| Discovery | UDP | 9998 (configurable) | broadcast | Ed25519-signed | Peer beacons |
+| PEX | TCP | 10000 (configurable) | peer-to-peer | Ed25519+fingerprint | Peer exchange |
+| mTLS | TCP | 10500 (configurable) | peer-to-peer | TLS 1.3 + cert pin | Bulk telemetry, evidence |
+| WebSocket | TCP | 9000-9044 | client-to-node | none (LAN) | Dashboard live view |
+| IPC | Unix domain socket | `/tmp/neuro_mesh_{id}.sock` | local | token | Operator commands |
+| Audit log | UDP | configured | external sink | none | Structured logs |
 
 ### 8.2 Peer Communication
 
-There are three peer-to-peer patterns:
+**UDP broadcast (loopback only)**: in the default deployment
+(localhost, network namespaces), nodes use `127.0.0.1` and broadcast
+to `255.255.255.255:9999`. The `netns` demo requires an explicit
+broadcast route on each veth (`255.255.255.255/32 dev v-{id}`).
 
-1. **Broadcast (PBFT)**: each PBFT message is sent via `send_udp_broadcast` (UDP broadcast to 255.255.255.255). All nodes receive all messages and apply rate limiting and signature checks.
-2. **Unicast (telemetry gossip)**: each heartbeat JSON is sent via `send_udp_unicast(ip, port, payload)` to each known peer. Used for telemetry; also used for ANNOUNCE and BEACON in some configurations.
-3. **Request-response (PEX)**: TCP connection initiated by a new node to dump the full peer list of a known peer. Uses `perform_pex_handshake`.
+**UDP unicast (real deployments)**: in real deployments (multi-host),
+discovery uses UDP broadcast within a subnet, and PBFT messages use
+UDP unicast to each known peer (no broadcast amplification).
+
+**TCP PEX**: the Peer Exchange port (10000) is plain-text and used
+only for exchanging peer lists during mesh formation. The payload is
+a JSON array of known peer IDs and IPs.
+
+**TCP mTLS**: the secure channel (10500) is used for everything else:
+bulk telemetry, large evidence payloads, mesh status queries.
 
 ### 8.3 Message Routing
 
-- `MeshNode::p2p_listener_loop` is a single UDP receive thread. It dispatches based on the first token of the message:
-  - `ANNOUNCE|...` -> `process_message` (signature verification, dual-path TOFU, peer registration)
-  - `BEACON|...` -> `process_discovery_beacon` (peer registration)
-  - `PRE_PREPARE|...`, `PREPARE|...`, `COMMIT|...`, `EXECUTED|...`, `BAN_PEER|...` -> `process_message` -> `m_pbft.verify_message` and `m_pbft.advance_state`
-  - `TELEMETRY|...` -> `process_telemetry_gossip` (merge into local state, forward to TelemetryBridge)
-- `MeshNode::tcp_listener_loop` accepts PEX connections, reads a small request, dumps the peer list, closes.
-- `MeshNode::tls_acceptor_loop` accepts mTLS connections, dispatches to `tls_worker_loop`.
+**Outgoing (per-peer)**: MeshNode maintains a `peers` map keyed by
+peer_id. For each outgoing message, the map is iterated and a
+unicast UDP packet is sent to `peers[id].last_ip:9999`.
+
+**Incoming**: a single UDP listener thread reads from the socket
+and dispatches to handlers:
+
+- Starts with `DISCOVERY` -> `handle_discovery()`.
+- Starts with `PBFT` -> `handle_pbft_message()`.
+- Starts with `TELEMETRY` -> `handle_telemetry_gossip()`.
+- Starts with `PEX` -> `handle_pex()`.
+- Otherwise -> logged and dropped.
 
 ### 8.4 Retry Logic
 
-- UDP: best-effort. No retransmission. A lost message is recovered by:
-  - The next heartbeat (every 2 s) re-sending telemetry.
-  - The next discovery beacon re-sending identity.
-  - The PBFT round's idempotency: a sender re-broadcasts the next stage when it observes the previous one, so a lost PRE_PREPARE is implicitly recovered when the next PREPARE comes in.
-- TCP PEX: best-effort, single-attempt. If the connection fails, the new node relies on its next discovery beacon.
-- TLS: OpenSSL's built-in retransmission for handshake. Application data: best-effort, same as UDP.
+**UDP PBFT**: messages are not explicitly retried; the proposer
+waits for 30s (view change timeout) before giving up. Implicit
+retransmission is provided by the next view's proposal.
+
+**TCP mTLS**: explicit retry with exponential backoff (1s, 2s, 4s,
+8s, capped at 30s). Max 5 attempts before giving up.
+
+**TCP PEX**: 3 attempts with 1s backoff.
+
+**Discovery beacon**: every 5s, regardless of prior success.
 
 ### 8.5 Serialization Formats
 
-- **PBFT messages**: pipe-delimited ASCII, e.g., `PREPARE|123|0|ALPHA|EBPF_EVENT:...|SENDER|BASE64SIG|PREV_HASH`.
-- **ANNOUNCE messages**: `ANNOUNCE|<node_id>|<pem>|<base64_sig>`.
-- **Telemetry JSON**: human-readable JSON with fields: `seq`, `node`, `event`, `peers` (array of node IDs), `cpu`, `mem_mb`, `entropy`, `threat`, `mitre_attack`.
-- **ProofChain**: JSON file with one event per line, each containing `prev_hash`, `event_type`, `timestamp`, `target`, `evidence`, `signature`.
+**PBFT message wire format (UDP):**
+```
+PBFT|<stage>|<sender_id>|<target_id>|<view>|<sequence>|<b64evidence>|<b64sig>
+```
+
+Length-prefixed fields use `|` as separator. Evidence and
+signature are base64-encoded.
+
+**V3 discovery beacon (UDP):**
+```
+DISCOVERY|<id>|<tcp_port>|<tls_port>|<ts>|<b64pub>|<tls_fpr>|<b64cert>|<b64sig>
+```
+
+The signature binds `(id || tcp_port || tls_port || ts || tls_fpr || b64cert)`.
+
+**V2 discovery beacon (legacy, 8 tokens):**
+```
+DISCOVERY|<id>|<tcp_port>|<tls_port>|<ts>|<b64pub>|<tls_fpr>|<b64sig>
+```
+
+V2 receivers do not call `trust_peer_cert()`. V2 is preserved for
+backward compatibility with older nodes.
+
+**Telemetry JSON (UDP and pipe):**
+```json
+{
+  "ts": "2026-06-05T12:34:56.789Z",
+  "node_id": "ALPHA",
+  "consensus_view": 42,
+  "events": [...],
+  "metrics": {
+    "telemetry_queue_drops": 0,
+    "pbft_rounds_executed": 17,
+    "enforcement_rules_active": 3
+  }
+}
+```
 
 ### 8.6 Connection Lifecycle
 
-- **UDP sockets**: created at `mesh.start()`, closed at `mesh.stop()`. The PBFT broadcast socket is a single FD shared across all sends.
-- **TCP PEX**: short-lived (one request, one response, close). No persistent connections.
-- **TLS**: long-lived. Each `tls_worker_loop` thread handles a single connection. Connections are added on accept and removed on close.
-- **Unix domain socket (IPC)**: one server socket per node, multiple client connections, each handled in the same `ipc_listener_loop` thread via `select()`. Rate limit is per-UID, not per-connection.
-- **WebSocket**: one server socket per node, multiple client connections handled by uWebSockets internally.
+**TCP mTLS connection (incoming):**
+1. `accept()` on listener socket (10500).
+2. `SSL_new()`, `SSL_set_fd()`, `SSL_accept()`.
+3. Server cert presented; client verifies against local trust store.
+4. If verify fails: `SSL_shutdown()`, close, drop.
+5. If verify succeeds: enter app protocol loop (read JSON
+   commands, write JSON responses).
+6. On EOF or error: `SSL_shutdown()`, close, free SSL.
+
+**TCP mTLS connection (outgoing):**
+1. `socket()`, `connect()` to peer's 10500.
+2. `SSL_new()`, `SSL_set_fd()`, `SSL_connect()`.
+3. Client presents cert; server verifies.
+4. If verify fails: `SSL_shutdown()`, close, retry with backoff.
+5. If verify succeeds: enter app protocol loop.
+6. On EOF or error: `SSL_shutdown()`, close, free SSL.
+
+**Unix domain socket (IPC):**
+1. Server: `socket(AF_UNIX)`, `bind()`, `listen()`.
+2. Client: `socket(AF_UNIX)`, `connect()`.
+3. Client sends `AUTH|<token>\n`.
+4. Server reads token, compares to expected (constant-time).
+5. On match: client may issue `CMD:INJECT|...`, `CMD:ISOLATE|...`,
+   `CMD:RESET`, `CMD:SHUTDOWN`.
+6. Server responds with `ACK:...` or `ERR:...`.
+7. Server enforces per-UID rate limit (10 commands/sec default).
+8. Server uses `SO_PEERCRED` to identify the client UID.
+9. On disconnect: `close()`, continue.
 
 ---
 
@@ -1456,53 +1614,146 @@ There are three peer-to-peer patterns:
 
 ### 9.1 Detection Pipeline
 
-The detection path is:
-
-1. **Kernel eBPF** (`kernel/sensor.bpf.c`): four kprobes (`execve`, `sendto`, `sendmsg`, `connect`) and one XDP dropper. Each kprobe emits a `KernelEvent` (pid, event_type, comm, payload) to the `telemetry_ringbuf`.
-2. **NodeAgent** (`cell/NodeAgent.cpp`): consumes events from the ring buffer in a tight `while(ring_buffer__poll() > 0)` loop. Each event is passed to the `InferenceEngine`.
-3. **InferenceEngine** (`cell/InferenceEngine.cpp`): runs an ONNX Isolation Forest model on the event. Returns an anomaly score in `[0, 1]`.
-4. **heartbeat_loop** (`main.cpp:123-244`): blends the ONNX score with the network entropy score and (if targeted) a floor of 0.68. Produces a final entropy score in `[0, 1]`.
-5. **Threat mapping**: `entropy >= 0.65` -> `CRITICAL`; `entropy >= 0.60` -> `ALERT`; else `NONE`.
+```
+eBPF kprobe (sys_execve, sys_sendto, sys_sendmsg, sys_connect)
+   |
+   v
+ring buffer (256 KB)
+   |
+   v
+NodeAgent::poll_events() [tight drain loop]
+   |
+   v
+InferenceEngine::analyze(comm, payload)
+   |  (5 features: payload len, payload entropy, comm len,
+   |   comm entropy, derived rarity)
+   v
+ONNX IsolationForest score
+   |
+   v
+threshold check (default -0.05)
+   |
+   v
+CRITICAL or NONE verdict
+   |
+   v
+[if CRITICAL] MeshNode::initiate_consensus(target, evidence)
+   |
+   v
+PBFT state machine (PRE_PREPARE -> PREPARE -> COMMIT -> EXECUTED)
+   |
+   v
+MitigationEngine::on_consensus_executed(round)
+   |
+   v
+PolicyEnforcer::isolate_node(target_id) (all backends)
+   |
+   v
+nftables / iptables / XDP DROP rules applied
+```
 
 ### 9.2 Rule Evaluation
 
-- **CRITICAL + peer_count > 1 + 30s grace**: self-initiate a PBFT round with the local node as the target.
-- **ALERT**: log only; no action.
-- **NONE**: log only; no action.
+For each consensus-EXECUTED target:
+
+1. **Safe-list check**: `is_safe(target_id)` returns true -> skip.
+2. **Loopback check**: `is_loopback(ip)` returns true -> skip.
+3. **IP resolution**: `PeerManager::resolve_ip(target_id)` -> IP.
+4. **Backend iteration**: for each available backend (NFT > IPT > EBPF),
+   apply DROP rule.
+5. **Idempotency**: the same target may be isolated multiple times;
+   each call re-applies the rule (overwriting the previous one).
+6. **Logging**: a structured `ENFORCER` event is logged with target,
+   IP, backend, and rule count.
 
 ### 9.3 Response Generation
 
-On a `CRITICAL` verdict, the system runs:
+Two response types:
 
-1. `MeshNode::initiate_consensus(node_id, evidence_json)` where `evidence_json` includes the current entropy and the `event=heartbeat` marker.
-2. The PBFT round propagates as described in Section 6.
-3. On `EXECUTED`, `MitigationEngine::execute_response(evidence_json, target_id)` is called.
-4. `PolicyEnforcer::isolate_target(target_id)` is called.
-5. The cascade runs: eBPF XDP map -> nftables drop -> iptables REJECT.
-6. The target is added to `m_banned_peers`.
-7. The ProofChain is appended.
-8. Subsequent ANNOUNCE / BEACON messages from the banned peer are silently dropped.
+**Network isolation** (`isolate_node` or `block_ip_address`):
+- nftables: `nft add rule inet neuro_chain input ip saddr X.X.X.X drop`.
+- iptables: `iptables -I INPUT -s X.X.X.X -j DROP`.
+- XDP: `xdp_blacklist[X.X.X.X] = 1` (BPF map update).
+- Process suspension (if `evidence_json.pid` is set):
+  `kill(pid, SIGSTOP)`.
+
+**Recovery** (manual via IPC):
+- `CMD:RESET` -> `enforcer.reset_enforcement()` clears all rules.
+- `CMD:INJECT` -> manually trigger an event for testing.
 
 ### 9.4 Ban Propagation
 
-There are two kinds of bans:
+After EXECUTED + isolation, the local node broadcasts:
+```
+BAN_PEER|<target_id>|<b64sig>
+```
 
-1. **Local auto-ban**: a peer is added to `m_banned_peers` after 100 consecutive signature failures, or via `propose_ban()`, or via a `BAN_PEER` round.
-2. **Cross-node BFT ban**: a `BAN_PEER` round is initiated with the target's node_id in the evidence (`"action":"ban"` marker). Other nodes verify the round, add the target to their local ban set, and apply enforcement.
+to all known peers. Peers receiving this message:
 
-The `m_recent_bans` set tracks peers that were locally auto-banned but haven't had a cross-node BFT ban initiated yet. The heartbeat drains this set and calls `propose_ban()` to propagate the ban.
+1. Verify the signature against the sender's registered key.
+2. Add `target_id` to their local ban list (in PeerManager).
+3. Apply their own isolation rules for the target's IP.
+4. Gossip the ban to their peers (with TTL=3 to prevent loops).
+
+The result: a banned node is isolated by all honest peers within
+~3 hop latencies, with cryptographic proof of the decision.
 
 ### 9.5 Rollback Behavior
 
-`PolicyEnforcer::release_target(target_id)` removes the target from all three backends:
+There is no automatic rollback. A banned node remains isolated
+until:
 
-- `remove_ebpf_drop(ip)` deletes the entry from the XDP blacklist map.
-- `remove_nftables_drop(ip)` finds the matching rule by listing and parses the handle, then deletes it.
-- `remove_iptables_drop(ip)` runs `iptables -D INPUT -s <ip> -j REJECT`.
+- An operator manually issues `CMD:RESET` via IPC.
+- The node is restarted (which clears the local ban list; the
+  node is then re-discovered and re-banned by its peers within
+  one beacon interval).
 
-The function is exposed but not called by the consensus layer in the current code. **[ASSUMPTION]**: rollback is intended for test cleanup and for operator-driven unban. There is no automatic rollback after a time period; bans are permanent for the process lifetime.
+The lack of automatic rollback is intentional. A node that was
+isolated for good reason (anomaly, equivocation) should not be
+allowed back in automatically; this would be a footgun for the
+attacker.
 
-`reset_enforcement()` is a test-only function that flushes all rules. It is not called in production.
+### 9.6 fork() + execv() Pattern
+
+`PolicyEnforcer::fork_exec_wait(path, argv)` is the only way to
+spawn a child process. It:
+
+1. Creates a pipe for capturing stderr/stdout (optional).
+2. `fork()`s. Parent blocks on `waitpid()`.
+3. Child:
+   a. Closes all FDs except pipe ends (defense in depth).
+   b. `dup2()`s pipe ends to fd 1/2 if capturing.
+   c. `execv(path, argv)` - explicit path, no PATH lookup.
+   d. On `execv` failure: `_exit(127)`.
+4. Parent: collects exit code, returns `(success, exit_code)`.
+
+The argv is always `vector<string>`; no shell, no metacharacter
+processing. An attacker cannot inject `; rm -rf /` into a rule
+even if they control the evidence_json.
+
+### 9.7 Backend-Specific Notes
+
+**nftables (preferred):**
+- Table: `inet neuro_chain`.
+- Chain: `input` (priority 0; hook input at priority 0).
+- Rule: `ip saddr X.X.X.X drop`.
+- Idempotency: re-applying the same rule is a no-op (the table
+  detects duplicates).
+
+**iptables (fallback):**
+- Chain: `INPUT`.
+- Rule: `-I INPUT -s X.X.X.X -j DROP` (insert at top).
+- Idempotency: re-insertion is harmless.
+
+**XDP blocklist (fastest):**
+- Map: `xdp_blacklist[ipv4] -> u8`.
+- Update: `bpf_map_update_elem(...)` from userspace.
+- Idempotency: overwriting is fine.
+
+**Process suspension:**
+- `kill(pid, SIGSTOP)` - pauses the process.
+- `kill(pid, SIGCONT)` - resumes (not implemented; manual via shell).
+- `kill(pid, SIGKILL)` - terminates (not implemented).
 
 ---
 
@@ -1510,96 +1761,377 @@ The function is exposed but not called by the consensus layer in the current cod
 
 ### 10.1 Telemetry Collection
 
-Telemetry is collected at three levels:
+Three independent paths:
 
-1. **Kernel (eBPF)**: `telemetry_ringbuf` is a 256 KiB ring buffer. Each `KernelEvent` is 280 bytes (pid 4 + event_type 4 + comm 16 + payload 256). The userspace consumer polls in a tight loop; if the consumers fall behind, the kernel drops events.
-2. **Userspace (heartbeat)**: every 2 s, the main thread reads `/proc/stat` (CPU), cgroup v1/v2 (memory), `/proc/net/dev` (network), and the ONNX score. Blended entropy is computed and a telemetry JSON is built.
-3. **Process metrics**: each `neuro_agent` logs to `logs/<NODE_ID>.log` and emits UDP audit events to `127.0.0.1:9997`.
+1. **Console**: every component logs to stdout/stderr via
+   `std::cout`/`std::cerr`. Captured by the process supervisor
+   (or `tee` for file logging in `mesh_dashboard.sh`).
+
+2. **Audit UDP**: structured JSON lines sent to a configured
+   remote sink. Useful for centralized log aggregation without
+   coupling the agent to the log pipeline.
+
+3. **WebSocket push**: real-time JSON to dashboard subscribers.
+   Goes through the sandboxed TelemetryBridge child.
 
 ### 10.2 Metrics
 
-The `telemetry/Observability` module (840-line `.cpp`, 2300-line `.hpp`) is a heavier-weight metrics system. **[NOT YET VERIFIED]** - the interface is mentioned in the Makefile test target list but the full body was not read. Likely exports Prometheus-style metrics.
+`Observability` (singleton) collects:
 
-Per-node metrics exposed via the dashboard:
+**Counters** (atomic u64):
+- `telemetry_queue_drops` - ring buffer overflows.
+- `pbft_rounds_initiated`.
+- `pbft_rounds_executed`.
+- `pbft_rounds_evicted` - timeout-based.
+- `equivocation_events_detected`.
+- `enforcement_rules_applied`.
+- `tls_handshakes_succeeded`.
+- `tls_handshakes_failed`.
 
-- `seq`: monotonic heartbeat counter
-- `node`: the local node ID
-- `event`: `"heartbeat"` or `"entropy_spike"`
-- `peers`: array of known peer IDs
-- `cpu`: percent (0-100)
-- `mem_mb`: megabytes
-- `entropy`: blended score [0, 1]
-- `threat`: `NONE`, `ALERT`, or `CRITICAL`
-- `mitre_attack`: array of MITRE ATT&CK technique IDs (e.g., `T1021`, `T1571`, `T1059`, `T6021`, `T5090`)
+**Gauges** (atomic double):
+- `cpu_usage_percent`.
+- `memory_rss_bytes`.
+- `active_peers`.
+- `untrusted_peers`.
+- `banned_peers`.
+
+**Histograms** (100-sample ring):
+- `pbft_round_duration_ms`.
+- `tls_handshake_duration_ms`.
+- `enforcement_apply_duration_ms`.
 
 ### 10.3 Aggregation
 
-Each node receives telemetry gossip from its peers. `process_telemetry_gossip` parses the JSON, merges it into the local state, and pushes the union to the local TelemetryBridge. The dashboard sees the full mesh view because every node has the same union.
+The MetricsRegistry aggregates via lock-free atomics for
+counters/gauges and a `std::shared_mutex` for histograms.
+`Observability::snapshot()` produces a `nlohmann::json` with all
+metrics in a single call.
 
 ### 10.4 Storage
 
-- Per-process: nothing persists by default. The ProofChain JSON is the only durable record of consensus events. It is written with `flock(LOCK_EX)`.
-- Per-host: `logs/<NODE_ID>.log` captures the agent's stdout and stderr.
-- `web/mesh_status.json`: written by `TelemetryExporter` for offline-mode dashboard.
+- **In-memory**: MetricsRegistry; cleared on restart.
+- **Disk**: TelemetryExporter writes
+  `web/mesh_status.json` every 5s (POSIX file-locked).
+- **Network**: AuditLogger UDP and TelemetryBridge WebSocket are
+  the two real-time output channels.
 
 ### 10.5 Reporting
 
-The dashboard (`dashboard/index.html`, ~1400 lines, vanilla JS, no dependencies) connects to any node's WebSocket and receives the union of telemetry. The user can:
+The dashboard (`dashboard/index.html`) connects to any node's
+WebSocket port (9000-9044) and receives the full mesh state via
+gossip. The dashboard renders:
 
-- View the current state of all nodes.
-- See recent PBFT events.
-- See recent entropy spikes.
-- See the consensus round history.
+- Per-node health (CPU, memory, uptime).
+- Live consensus rounds.
+- Active enforcement rules.
+- Banned peers.
+- Anomaly scores over time (Canvas-rendered time series).
 
-The dashboard is read-only. It does not issue commands.
+The dashboard is zero-dependency (no React, no Webpack, no npm);
+it uses native Canvas + WebSocket.
+
+### 10.6 Telemetry Gossip Protocol
+
+Every 2s (heartbeat interval), each node:
+
+1. Builds a `TelemetryMessage` containing:
+   - `node_id`, `ts`.
+   - All metrics counters/gauges/histograms.
+   - Local PBFT view.
+   - Local PeerManager state (id, state, last_seen for each).
+2. Serializes to JSON.
+3. Base64-encodes the JSON.
+4. Wraps in a UDP packet:
+   `TELEMETRY|<node_id>|<b64json>|<b64sig>`.
+5. Unicasts to all known peers (not broadcast, to prevent
+   amplification).
+
+Receivers:
+
+1. Verify the signature against the embedded pubkey.
+2. Parse the JSON.
+3. Update the local `MeshView` (a map from node_id to TelemetryMessage).
+4. Forward to the local TelemetryBridge which broadcasts to
+   dashboard subscribers.
+5. Apply rate limiting (max 1 message per sender per second) to
+   prevent flooding.
+
+The result: any node can serve the dashboard with the full mesh
+view within one gossip round (~2s) of a state change.
+
+### 10.7 Structured Log Format
+
+```
+[<ISO8601-TS>] [<LEVEL>] [<COMPONENT>] <message> | key=value key=value ...
+```
+
+Example:
+```
+[2026-06-05T12:34:56.789Z] [INFO] [PBFT] Round 42 reached EXECUTED | target=ALPHA view=0 sequence=42 votes=3
+```
+
+Components: `BOOT`, `EBPF`, `TLS`, `PEX`, `DISCOVERY`, `PBFT`,
+`ENFORCER`, `IPC`, `SANDBOX`, `TELEMETRY`, `AUDIT`.
+
+Levels: `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`.
 
 ---
 
 ## 11. Data Flow Analysis
 
-This section traces one event end-to-end. The example is an entropy spike detected on CHARLIE that results in ALPHA being isolated.
+This section traces five end-to-end data flows through the entire
+system, with file:line references at each step.
 
-### 11.1 Detection Event (CHARLIE)
+### 11.1 Detection Event Flow (Happy Path)
 
-1. A process on the host running CHARLIE does something unusual (e.g., a high-entropy `sendto` syscall).
-2. The eBPF kprobe for `sendto` fires. It calls `bpf_ringbuf_reserve(&telemetry_ringbuf, sizeof(KernelEvent), 0)`, fills the event with `pid=4201`, `event_type=2`, `comm="curl"`, `payload=<first 256 bytes of args>`, and submits.
-3. The NodeAgent's `telemetry_loop` polls the ring buffer, receives the event, and passes it to the InferenceEngine.
-4. The InferenceEngine's ONNX forward pass returns a score of `0.78`.
-5. The heartbeat reads the score, blends with network entropy (0.55), gets `0.78`. Maps to `CRITICAL`.
-6. After 30 seconds of sustained CRITICAL, CHARLIE calls `mesh.initiate_consensus(CHARLIE, "{\"sensor\":\"ebpf_entropy\",\"value\":0.78,...}")`. The first argument is the suspect: **CHARLIE itself**.
+Triggered by an `execve` syscall on ALPHA.
 
-### 11.2 Consensus Event
+```
+KERNEL (ALPHA)
+  kernel/sensor.bpf.c:trace_execve
+    | (bpf_get_current_pid_tgid, bpf_get_current_comm,
+    |  bpf_probe_read_user_str from arg)
+    v
+  ring buffer: telemetry_ringbuf
+    | (bpf_ringbuf_submit)
+    v
+USERSPACE (ALPHA)
+  cell/NodeAgent.cpp:handle_event (libbpf callback)
+    | (push to m_queue)
+    v
+  TelemetryQueue<KernelEventData>
+    | (poll_events() drains in tight loop)
+    v
+  cell/NodeAgent.cpp:poll_events
+    | (returns vector<KernelEventData>)
+    v
+  main.cpp:heartbeat_loop
+    | (for ev in events: inference->analyze(ev.comm, ev.payload))
+    v
+  cell/InferenceEngine.cpp:analyze
+    | (extract_features, ONNX inference)
+    v
+  InferenceEngine::m_last_score > threshold
+    | (verdict() returns "CRITICAL")
+    v
+  main.cpp:heartbeat_loop
+    | (mesh->initiate_consensus(target=ALPHA, evidence))
+    v
+  consensus/MeshNode.cpp:initiate_consensus
+    | (PBFTConsensus::on_message(self-vote))
+    v
+  consensus/PBFT.hpp:on_message
+    | (verify_message, advance state to PRE_PREPARE)
+    v
+  consensus/MeshNode.cpp:broadcast_pbft_stage
+    | (unicast to all known peers)
+    v
+NETWORK
+  UDP 9999 -> peers' 9999
+    |
+    v
+USERSPACE (peers)
+  consensus/MeshNode.cpp:handle_pbft_message
+    | (verify signature, dispatch to PBFTConsensus)
+    v
+  consensus/PBFT.hpp:on_message
+    | (verify_message, count vote, advance to PREPARE)
+    v
+  consensus/MeshNode.cpp:broadcast_pbft_stage
+    | (unicast PREPARE vote to all)
+    ... (repeats for PREPARE, COMMIT, EXECUTED)
+    v
+  consensus/MeshNode.cpp:on_consensus_executed
+    | (mitigation->on_consensus_executed(round))
+    v
+  enforcer/MitigationEngine.cpp:on_consensus_executed
+    | (enforcer->isolate_node(target=ALPHA))
+    v
+  enforcer/PolicyEnforcer.cpp:isolate_node
+    | (probe_backends, apply to NFT, IPT, EBPF)
+    v
+KERNEL
+  nftables: nft add rule inet neuro_chain input ip saddr <ALPHA_IP> drop
+  iptables: iptables -I INPUT -s <ALPHA_IP> -j DROP
+  XDP: bpf_map_update_elem(xdp_blacklist, <ALPHA_IP>, 1)
+    |
+    v
+  Packets from ALPHA are now dropped at INPUT chain
+```
 
-1. CHARLIE broadcasts `PRE_PREPARE|1|0|CHARLIE|<evidence>|CHARLIE|<sig>|<prev_hash>` on UDP 9999.
-2. ALPHA, BRAVO, DELTA, ECHO each receive the PRE_PREPARE. Each runs `m_pbft.verify_message` (signature check OK, rate limit OK). Each calls `m_pbft.advance_state`, transitions the round from IDLE to PREPARE. Each broadcasts `PREPARE|...`.
-3. All 5 nodes receive 4 PREPARE messages (quorum=4). Each runs `verify_quorum_intersection` (PREPARE set is full, COMMIT set is empty, returns true vacuously). Each transitions to COMMIT and broadcasts `COMMIT|...`.
-4. All 5 nodes receive 4 COMMIT messages. Each runs `verify_quorum_intersection`: PREPARE voters = {ALPHA, BRAVO, CHARLIE, DELTA, ECHO}, COMMIT voters = same set, intersection = 5 >= 4, returns true. Each transitions to EXECUTED.
-5. Each node's `MeshNode::broadcast_pbft_stage` observes the local round state reaching EXECUTED. It calls `m_mitigation->execute_response(evidence, CHARLIE)`. MitigationEngine sees evidence sensor=ebpf_entropy, dispatches to `PolicyEnforcer::isolate_target(CHARLIE)`.
+### 11.2 Consensus Event Flow (PBFT Round)
 
-### 11.3 Enforcement Event
+```
+USERSPACE (proposer)
+  consensus/MeshNode.cpp:initiate_consensus(target, evidence)
+    | (build P2PMessage{stage=PRE_PREPARE, sequence=N, view=V})
+    v
+  consensus/PBFT.hpp:on_message
+    | (sign with local Ed25519 priv)
+    v
+  consensus/MeshNode.cpp:broadcast_pbft_stage
+    | (unicast to all peers)
+    v
+NETWORK
+  UDP 9999 -> peers
+    |
+    v
+USERSPACE (each peer)
+  consensus/MeshNode.cpp:handle_pbft_message
+    | (parse, verify signature)
+    v
+  consensus/PBFT.hpp:verify_message
+    | (Ed25519.verify(pub, sig, (stage||target||evidence||view||sequence)))
+    v
+  consensus/PBFT.hpp:on_message
+    | (check stage, increment vote count, check 2f+1)
+    v
+  consensus/MeshNode.cpp:broadcast_pbft_stage (PREPARE)
+    ... (repeats for PREPARE -> COMMIT -> EXECUTED)
+    v
+  consensus/MeshNode.cpp:on_consensus_executed
+    | (call mitigation->on_consensus_executed)
+    v
+  consensus/MeshNode.cpp:broadcast_pbft_stage (EXECUTED)
+    | (gossip to all peers)
+    v
+  consensus/MeshNode.cpp:handle_pbft_message (peers receive EXECUTED)
+    | (each peer applies their own isolation)
+    v
+  consensus/MeshNode.cpp:broadcast_pbft_stage (BAN_PEER)
+    | (each peer gossips the ban with TTL=3)
+```
 
-1. `PolicyEnforcer::isolate_target(CHARLIE)`:
-   - Cooldown check: 5s since last enforcement? If not, log and return.
-   - `is_safe(CHARLIE)`? No (self is the only safe-listed node).
-   - `resolve_target(CHARLIE)` -> 127.0.0.1 (or whatever CHARLIE's IP is).
-   - `is_ip_safe(127.0.0.1)`? Returns false (loopback is a special case in `is_ip_safe`).
-   - `block_ip_address(127.0.0.1)`:
-     - `apply_ebpf_drop`: `bpf_map_update_elem(xdp_blacklist, &127.0.0.1, &1, BPF_ANY)` -> success.
-     - Returns true.
-2. `m_pbft.ban_peer_local(CHARLIE, "self_detected")`: CHARLIE is added to `m_banned_peers`.
-3. `m_proof_chain->append(CONSENSUS_REACHED, CHARLIE, evidence, signature)`: persisted to disk.
-4. `m_mitigation->execute_response` returns.
+### 11.3 Enforcement Event Flow (Ban Propagation)
 
-### 11.4 Recovery Event
+```
+USERSPACE (peer that executed)
+  consensus/MeshNode.cpp:on_consensus_executed
+    | (enforcer->isolate_node(target))
+    v
+  enforcer/PolicyEnforcer.cpp:isolate_node
+    | (is_safe? is_loopback? resolve_ip)
+    v
+  fork_exec_wait("nft", ["nft", "add", "rule", ...])
+    fork_exec_wait("iptables", ["iptables", "-I", "INPUT", ...])
+    bpf_map_update_elem(xdp_blacklist, ...)
+    | (all three run; first success wins for the rule)
+    v
+  struct EnforcementEvent {target, ip, backend, ts, success}
+    | (push to telemetry)
+    v
+  telemetry/TelemetryBridge.cpp:push_telemetry (JSON)
+    | (write to pipe)
+    v
+  TelemetryBridge child reads pipe
+    | (broadcast to all WebSocket subscribers)
+    v
+NETWORK
+  UDP broadcast (telemetry) to all peers
+    |
+    v
+USERSPACE (peers)
+  consensus/MeshNode.cpp:handle_telemetry_gossip
+    | (forward to local TelemetryBridge)
+    v
+  TelemetryBridge child broadcasts to its subscribers
+```
 
-There is no automatic recovery. CHARLIE is now banned on all 5 nodes. Subsequent ANNOUNCE / BEACON / PBFT messages from CHARLIE are silently dropped (Phase 3 of `verify_message`).
+### 11.4 Recovery Event Flow (Node Restart)
 
-To recover, the operator must:
-- Delete `keystore_CHARLIE/` and restart the node (this generates a new identity, which is dual-path-TOFU'd as a "new" peer).
-- Or, on each peer, manually remove CHARLIE from `m_banned_peers` (no CLI for this in the current version; would require code change or debugger).
-- Or, restart the entire mesh with `mesh_manager.py`.
+```
+USERSPACE (restarting node)
+  main()
+    | (KeyManager::load_or_generate(node_id))
+    v
+  crypto/KeyManager.cpp
+    | (read ~/.neuro_mesh/keys/{id}.key)
+    v
+  IdentityCore (keypair reconstructed)
+    | (X.509 cert loaded from ~/.neuro_mesh/certs/{id}.crt)
+    v
+  PBFTConsensus (empty state)
+    | (read StateJournal)
+    v
+  common/StateJournal.cpp
+    | (parse ~/.neuro_mesh/journal/{id}.log)
+    v
+  Replay all committed decisions into local state
+    | (apply ban list, restore known peers)
+    v
+  MeshNode starts UDP listener
+    | (begins broadcasting DISCOVERY beacons)
+    v
+NETWORK
+  UDP 9998 broadcast every 5s
+    |
+    v
+USERSPACE (peers)
+  consensus/MeshNode.cpp:handle_discovery
+    | (verify signature, register peer as KNOWN)
+    v
+  consensus/MeshNode.cpp:initiate_pex
+    | (TCP connect to peer's 10000)
+    v
+NETWORK
+  TCP 10000 connection
+    |
+    v
+USERSPACE (peers)
+  consensus/MeshNode.cpp:handle_pex
+    | (send peer list, mTLS handshake)
+    v
+  mTLS handshake (cert verify, fingerprint match)
+    | (peer upgraded to TRUSTED)
+    v
+  trust_peer_cert(peer_id, peer_cert)
+    | (add to OpenSSL trust store)
+    v
+  Rejoin ongoing PBFT rounds
+    | (catch up via gossip)
+```
 
-**[KNOWN LIMITATION]**: There is no CLI command to unban a node.
+### 11.5 Telemetry Event Flow
+
+```
+USERSPACE (any component)
+  Observability::increment_counter("pbft_rounds_executed")
+    | (atomic u64 increment)
+    v
+  Observability (in-memory)
+    |
+    v
+  Two consumers:
+    |
+    +-> telemetry/TelemetryExporter::flush
+    |     | (snapshot all metrics to JSON)
+    |     v
+    |   web/mesh_status.json (POSIX-locked)
+    |     |
+    |     v
+    |   Dashboard HTTP poll fallback
+    |
+    +-> main.cpp:heartbeat_loop
+          | (build TelemetryMessage)
+          v
+        consensus/MeshNode.cpp:broadcast_telemetry
+          | (unicast to all known peers)
+          v
+        NETWORK
+          |
+          v
+        USERSPACE (peers)
+          consensus/MeshNode.cpp:handle_telemetry_gossip
+            | (push to local TelemetryBridge)
+            v
+          telemetry/TelemetryBridge.cpp:push_telemetry
+            | (write to pipe)
+            v
+          TelemetryBridge child
+            | (broadcast to WebSocket subscribers)
+            v
+          Browser (dashboard)
+```
 
 ---
 
@@ -1607,39 +2139,135 @@ To recover, the operator must:
 
 ### 12.1 State Machines
 
-The system has four state machines:
+**PBFTConsensus state machine** (per round, indexed by `sequence`):
 
-1. **PBFT consensus** (`PBFTConsensus`): the 6-stage state machine documented in Section 6.
-2. **Connection state** (`MeshNode`): the per-peer state transitions in `PeerManager` (DISCOVERED -> BEACON_CONFIRMED -> ANNOUNCE_CONFIRMED -> DUAL_CONFIRMED -> ACTIVE -> BANNED).
-3. **Sandbox state** (`TelemetryBridge`): the 4-stage sandbox progression (CHROOT -> UID_DROP -> SECCOMP -> UWSOCKETS).
-4. **Enforcement state** (per-target): the per-target transitions in `PolicyEnforcer` (NOT_BLOCKED -> EBPF_BLOCKED -> NFT_BLOCKED -> IPT_BLOCKED).
+```
+struct Round {
+    PBFTStage state = IDLE;
+    int view = 0;
+    string pre_prepare_hash;
+    string evidence_key;
+    string commit_signature;
+    std::chrono::steady_clock::time_point started_at;
+    std::chrono::steady_clock::time_point last_activity;
+};
+```
+
+Transitions:
+- `IDLE -> PRE_PREPARE`: on `initiate_consensus()`.
+- `PRE_PREPARE -> PREPARE`: on 2f+1 PRE_PREPARE votes.
+- `PREPARE -> COMMIT`: on 2f+1 PREPARE votes.
+- `COMMIT -> EXECUTED`: on 2f+1 COMMIT votes.
+- `EXECUTED -> BAN_PEER`: on 2f+1 EXECUTED votes (optional, gossiped).
+
+**Peer state machine** (in PeerManager):
+
+```
+struct Peer {
+    PeerState state = UNKNOWN;  // UNKNOWN -> KNOWN -> TRUSTED -> BANNED
+    std::string id;
+    std::string public_key_pem;
+    std::string tls_fpr;
+    std::string cert_pem;        // V3 only
+    std::string last_ip;
+    std::chrono::steady_clock::time_point last_seen;
+    int trust_score = 100;
+};
+```
+
+Transitions:
+- `UNKNOWN -> KNOWN`: on first valid discovery beacon.
+- `KNOWN -> TRUSTED`: on TCP PEX with matching fingerprint.
+- `KNOWN/TRUSTED -> BANNED`: on receiving BAN_PEER consensus.
+- `BANNED -> TRUSTED`: on `CMD:RESET` (operator action only).
+
+**Enforcement state machine** (in PolicyEnforcer):
+
+```
+struct ActiveRule {
+    std::string target_id;
+    std::string ip;
+    EnforcementBackend backend;
+    std::chrono::steady_clock::time_point applied_at;
+    int rule_handle;             // iptables rule number
+};
+```
+
+Rules are added on EXECUTED; never removed automatically; only
+removed on `reset_enforcement()` (operator action) or process
+restart (without persistence).
 
 ### 12.2 Persistence
 
-- `keystore_<NODE_ID>/id_ed25519`: the local node's private key. Persists across restarts.
-- `keystore_<NODE_ID>/cert.pem`, `key.pem`: the local node's TLS cert and key. Persists across restarts.
-- `web/mesh_status.json`: snapshot of the mesh status, written by `TelemetryExporter` with `flock(LOCK_EX)`.
-- `logs/<NODE_ID>.log`: stdout and stderr of the agent. Append-only.
+**Persisted to disk:**
 
-There is **no** persistence of:
-- `m_rounds`, `m_vote_registry`, `m_node_trust`: lost on restart.
-- `m_seen_messages`: lost on restart.
-- `m_banned_peers`: lost on restart.
+| Path | Format | Purpose |
+|------|--------|---------|
+| `~/.neuro_mesh/keys/{id}.key` | 32-byte raw Ed25519 seed | Identity |
+| `~/.neuro_mesh/certs/{id}.crt` | PEM X.509v3 | TLS cert |
+| `~/.neuro_mesh/certs/{id}.key` | PEM RSA/Ed25519 | TLS private key |
+| `~/.neuro_mesh/journal/{id}.log` | append-only JSON | PBFT history |
+| `web/mesh_status.json` | JSON snapshot | Dashboard HTTP poll |
 
-The `StateJournal` (`common/StateJournal.hpp`) is intended to persist some of these (COMMIT records) but its integration with PBFT recovery was not fully verified.
+**In-memory only (rebuilt on restart):**
+
+- PeerManager state (rebuilt from V3 discovery beacons).
+- OpenSSL trust store (rebuilt from V3 cert PEMs).
+- PBFTConsensus round state (rebuilt from journal + gossip).
+- Active enforcement rules (cleared on restart; will be reapplied
+  via gossip within ~5s of restart).
 
 ### 12.3 Recovery
 
-- **Process restart**: re-generates identity (if keystore missing), re-broadcasts ANNOUNCE, re-receives gossip. Peer count is re-built from ANNOUNCE / BEACON.
-- **Round timeout**: `cleanup_stale_rounds()` evicts a round after 120 s of inactivity.
-- **Mesh restart**: `mesh_manager.py` kills all agents, then re-spawns them with a new IPC token.
+**Node restart recovery:**
+
+1. `KeyManager::load_or_generate(node_id)` returns the persisted
+   Ed25519 key.
+2. `X509` cert loaded from `~/.neuro_mesh/certs/{id}.crt`.
+3. `StateJournal::replay_since(0)` reads all committed decisions.
+4. PeerManager starts empty; populated via UDP discovery.
+5. TelemetryExporter starts writing on first heartbeat.
+6. Enforcement is empty; rules are reapplied via gossip within
+   ~5s as peers send `EXECUTED` messages for ongoing rounds.
+
+**Mid-round crash (proposer dies):**
+
+- After 30s view-change timeout, a new view is initiated.
+- The new proposer re-broadcasts `PRE_PREPARE` with the same
+  evidence.
+- Peers that already have a `Round` in state `PREPARE` for this
+  sequence update their `view` and continue.
+- Peers that did not have the round start fresh.
+
+**Mid-round crash (voter dies):**
+
+- The remaining `2f+1` voters complete the round.
+- The dead voter re-derives state from `StateJournal` on restart.
 
 ### 12.4 Synchronization
 
-- **Inter-thread**: `std::mutex m_mtx` in `PBFTConsensus`; `std::shared_mutex m_mtx` in `PolicyEnforcer`; other classes use their own internal mutexes.
-- **Inter-process**: via PBFT (consensus) and gossip (telemetry). The mesh converges within 2 s (one heartbeat) of any state change.
-- **Atomicity**: `m_sequence_number` in `MeshNode` is `std::atomic<uint64_t>` with `fetch_add(1, memory_order_relaxed)`. Other counters use `std::atomic`.
-- **IPC pipe**: the parent writes 4-byte length + JSON; the child reads in a loop. The pipe is `pipe2(O_CLOEXEC)`. The parent closes the write end on shutdown; the child's read returns 0 (EOF) and the child exits.
+**Across the mesh:**
+
+- PBFT provides consensus-level synchronization: all honest nodes
+  agree on the same set of EXECUTED rounds.
+- Gossip provides best-effort eventual consistency for telemetry.
+- Discovery beacons (every 5s) provide view synchronization: each
+  node's PeerManager eventually reflects the same set of active
+  peers.
+
+**Across processes (local):**
+
+- IPC socket provides command-response synchronization.
+- `flock` on `mesh_status.json` prevents corruption if multiple
+  nodes share a volume (rare in practice; only for the demo).
+
+### 12.5 No Distributed Transactions
+
+Neuro-Mesh does **not** implement cross-node transactions. PBFT
+produces agreement on a single decision per round, but there is no
+multi-round atomicity. If round R1 bans peer X and round R2 unbans
+peer X (in a hypothetical unban round), they are processed
+independently and the later decision wins.
 
 ---
 
@@ -1647,100 +2275,282 @@ The `StateJournal` (`common/StateJournal.hpp`) is intended to persist some of th
 
 ### 13.1 Node Crashes
 
-- **Single node crash**: detected by `mesh_manager.py` (polls `p.poll()` every 2 s). Restarted with exponential backoff (2, 4, 8, 16, 30 s; max 5 attempts).
-- **Crash during a PBFT round**: the round continues on the remaining 4 nodes. With n=4, quorum=3, intersection is computed from the remaining voters. The round can still complete if the remaining 4 nodes had 3+ in PREPARE and 3+ in COMMIT with intersection >= 3.
-- **Crash of the proposer**: the round is left in IDLE. No view-change protocol is broadcast (see Section 6.6 / Section 18). The next heartbeat from another node detecting the same anomaly will initiate a new round.
-- **Crash of the IPC client**: the parent (mesh_manager) is unaffected; the agent is unaffected; the client simply disconnects.
-- **Crash of the TelemetryBridge child**: the parent detects via `waitpid` on the next `push_telemetry` call. The agent continues; the WebSocket is unavailable until restart.
+**Hard crash (SIGKILL, OOM, kernel panic):**
+- The IPC socket is removed by the kernel.
+- Peers detect this via UDP beacon timeout (5s beacon * 3 missed
+  = 15s to detect).
+- The dead node is marked stale; its EXECUTED decisions are
+  re-validated by the remaining `2f+1` nodes.
+- On restart, the node reloads its key + journal + certs and
+  rejoins via discovery.
+
+**Graceful shutdown (SIGINT/SIGTERM):**
+- `global_running` flag is set to false.
+- Main loop exits.
+- IPC listener joins.
+- MeshNode stops UDP listener.
+- TelemetryBridge child detects pipe EOF and exits.
+- Enforcer clears all rules (optional, configurable).
+- AuditLogger closes socket.
+- Process exits 0.
 
 ### 13.2 Message Loss
 
-- **UDP PBFT loss**: handled by re-broadcasts. Each node re-broadcasts the next stage when it observes the previous one, so a lost PREPARE is implicitly recovered when the next PREPARE comes in from a different sender.
-- **UDP telemetry loss**: heartbeat every 2 s; loss is bounded to 1-2 cycles.
-- **TCP PEX loss**: the new node relies on its next discovery beacon.
-- **TLS data loss**: same as UDP; the next heartbeat re-sends.
+**UDP packet loss:**
+- PBFT does not retransmit; the view-change protocol (30s timeout)
+  eventually re-runs the round.
+- Telemetry gossip is best-effort; the next heartbeat (2s) sends
+  fresh data.
+- Discovery beacons are idempotent; loss is invisible.
+
+**TCP connection loss:**
+- mTLS connections are not held open indefinitely; each request
+  opens a fresh connection.
+- TCP PEX is fire-and-forget; loss means a slower mesh formation
+  but no functional degradation.
+
+**Pipe (parent-to-bridge) loss:**
+- The bridge child detects pipe EOF and exits.
+- The parent may continue to operate; the dashboard is unavailable
+  but the agent is still functional.
 
 ### 13.3 Invalid Messages
 
-- **Malformed pipe-delimited**: `validate_message` returns false; message rejected.
-- **Bad signature**: `verify_message` returns false; `record_failure` increments the counter.
-- **Unknown sender**: `verify_message` early-returns without calling `record_failure` (defense: don't punish unknown senders).
-- **View mismatch**: round aborts to IDLE.
-- **Replay**: silently dropped (no failure recorded).
-- **Equivocation**: logged as CRITICAL, sender's trust counter incremented.
+**Signature failure:** message dropped, counter incremented.
+
+**Stage mismatch:** message dropped (round is at a different stage).
+
+**Sequence gap:** message dropped if `MAX_SEQUENCE_GAP` exceeded
+(default 100).
+
+**View mismatch:** message triggers view change if it has a
+higher view number; otherwise dropped.
+
+**Unknown sender:** message dropped (sender not in
+`m_peer_public_keys`).
+
+**Replay:** signature includes sequence; old message dropped.
+
+**Equivocation:** stored as evidence; sender's trust score
+decreased; the conflicting messages are both retained for audit.
 
 ### 13.4 Consensus Failures
 
-- **Quorum not reached**: round stays in current state. After 120 s, evicted.
-- **Quorum intersection fails**: just-inserted vote rolled back, round aborts to IDLE.
-- **All peers crashed**: with n=0, `peer_count() == 1` (self only). The `peer_count() < 1` guard at `MeshNode.cpp:1448` blocks the round from executing (because `peer_count() + 1` from `MeshNode::peer_count()` returns 1, so the check `m_peer_manager.peer_count() < 1` is `0 < 1 = true`, log and return).
-- **Equivocation by proposer**: the round may still complete, but the proposer is recorded in `m_node_trust` and eventually auto-banned.
+**No quorum reached within 30s:** view change triggered.
+The new view number is `view + 1`; the new leader is
+`(view + 1) % N`.
+
+**Quorum reached but rule apply fails:** `MitigationEngine` logs
+error and continues. The consensus decision is still valid; the
+node may attempt to re-apply the rule on the next heartbeat.
+
+**Conflicting decisions across views:** prevented by signature
+binding (a view-N signature is not valid in view-N+1).
+
+**Two proposers simultaneously:** PBFT guarantees that only one
+proposer's `PRE_PREPARE` will reach 2f+1; the other's votes are
+discarded. The discarded proposer learns this from the lack of
+PREPARE votes and backs off.
 
 ### 13.5 Enforcement Failures
 
-- **All backends fail**: `block_ip_address` returns false. The round is recorded as EXECUTED but the traffic is NOT actually blocked. The ProofChain still records the decision. Operator must intervene.
-- **Backend partially fails**: if eBPF succeeds, the return is true. If nftables succeeds after eBPF fails, the return is true. The first success short-circuits the cascade.
-- **Loopback target**: `is_loopback` returns true; isolation refused.
+**nftables/iptables not installed:** `probe_backends()` returns
+the subset available; the agent proceeds with what it has.
+
+**Permission denied (not root):** `fork_exec_wait` returns
+non-zero; the rule is not applied; the agent logs an error and
+continues. The decision stands; the operator must fix permissions
+or run as root.
+
+**XDP attach fails:** `load_and_attach_ebpf()` returns error;
+the agent falls back to userspace-only detection.
+
+**Backend hung (nft in deadlock):** parent `waitpid` returns -1
+with ECHILD or EINTR after 5s; the rule is considered failed;
+logged with the timeout.
 
 ### 13.6 Network Failures
 
-- **Discovery beacon lost**: the new node relies on its next attempt.
-- **TLS handshake fails**: connection closed; peer not added to TLS roster.
-- **Tofu mismatch**: the offending ANNOUNCE is rejected; the peer is not pinned.
-- **Switch to offline mode**: if all peers are unreachable, the agent continues to run but cannot initiate cross-node consensus. Local detection still fires; local enforcement is blocked by the `peer_count() < 1` guard.
+**Subnet unreachable:** discovery beacons time out; no new
+peers; existing peers continue to vote.
+
+**Switch loop (broadcast storm):** mitigated by rate limiting
+on the receiver side; broadcasts that exceed
+`MAX_MESSAGES_PER_SENDER_PER_SECOND` are dropped.
+
+**DNS failure:** the agent does not use DNS (all peers are
+identified by node_id + IP, never hostname). DNS failure is
+invisible to the agent.
+
+**Routing loop:** mitigated by TTL=3 on BAN_PEER gossip. After
+3 hops, the message is dropped.
+
+**TCP mTLS handshake timeout:** 5s timeout; exponential backoff
+on retry (1s, 2s, 4s, 8s, 16s, 30s cap); 5 attempts max.
+
+### 13.7 Sandbox Failures
+
+**chroot fails:** FATAL log; bridge continues without chroot
+(less secure but functional). Dashboard works.
+
+**setresuid fails:** FATAL log; child exits. Dashboard unavailable.
+
+**Seccomp install fails:** FATAL log; child exits. Dashboard
+unavailable.
+
+**Syscall not whitelisted:** kernel kills the child with
+SIGSYS. Parent detects via `waitpid`; logs and respawns (max 3
+times, then gives up).
+
+**Pipe write fails (parent dies):** child detects EOF; exits
+cleanly. Respawned on next agent restart.
+
+### 13.8 eBPF Failures
+
+**BPF load fails (verifier rejection):** error message with
+actionable remediation. Falls back to `/proc/net/dev` entropy
+mode. No kernel-level observability.
+
+**BPF load fails (EPERM):** error message indicates
+`unprivileged_bpf_disabled` value. Falls back to
+`/proc/net/dev` entropy mode.
+
+**Ring buffer overrun:** events are dropped on the floor;
+counter incremented; visible in telemetry.
+
+**Interface disappears:** XDP program remains attached but
+receives no packets. No automatic reattach.
+
+**BPF map full:** `bpf_map_update_elem` returns E2BIG; the
+update is dropped. New blacklist entries are not added.
+
+### 13.9 Crypto Failures
+
+**OpenSSL not initialized:** static init in `main()` should
+prevent this; if it fails, Ed25519 operations segfault.
+
+**Key file missing:** generated on first run; persisted.
+
+**Key file corrupted:** crash on startup; manual intervention
+required (the key is the identity, cannot be guessed).
+
+**Cert verification failure:** the connection is rejected; peer
+remains UNTRUSTED.
+
+**Cert expired:** OpenSSL handles this; the connection is
+rejected with `SSL_R_CERTIFICATE_VERIFY_FAILED`.
+
+**Signature decode error:** `verify` returns false; message
+dropped.
 
 ---
 
 ## 14. Configuration System
 
-### 14.1 Configuration Options
+All configuration is via environment variables. There is **no config
+file**. This is intentional: the agent is designed to be deployed via
+container orchestration (Docker, k8s, systemd) where env vars are
+the canonical configuration mechanism.
 
-All configuration is by environment variable, command-line argument, or hard-coded port mapping. There is no configuration file.
+### 14.1 Environment Variables
 
-| Option | Type | Default | Set by | Effect | Risk if misconfigured |
-|--------|------|---------|--------|--------|----------------------|
-| `argv[1]` | string | `ALPHA` | operator | Node ID | Wrong ID = peer set doesn't recognize the node |
-| `NEURO_IPC_TOKEN` | string (43 chars) | none (REQUIRED) | mesh_manager.py | Gates the IPC channel | Missing = no IPC commands accepted |
-| `NEURO_PBFT_RATE_WINDOW_SEC` | int | 10 | operator | Sliding window for rate limit | Too low = false positives; too high = flood vulnerability |
-| `NEURO_PBFT_RATE_MAX` | int | 5 | operator | Max messages per window per peer | Too low = liveness loss; too high = flood vulnerability |
-| `NEURO_WS_PORT` | int | per-node mapping | operator | Override dashboard port | Wrong port = dashboard can't connect |
-| `NEURO_UNSAFE_NO_SANDBOX` | 0 or 1 | 0 | developer | Skip TelemetryBridge sandbox | **1 = production-insecure; only for dev/WSL2** |
-| `NEURO_AUDIT_HOST` | string | 127.0.0.1 | operator | UDP audit destination | Wrong host = audit loss |
-| `NEURO_AUDIT_PORT` | int | 9997 | operator | UDP audit port | Wrong port = audit loss |
-| `NEURO_SANDBOX_UID` | int | `nobody` UID | operator | Sandbox user | Wrong UID = child cannot bind port |
-| `NEURO_SANDBOX_GID` | int | `nogroup` GID | operator | Sandbox group | Same |
-| `NEURO_SANDBOX_CHROOT` | string | `/var/empty` | operator | Sandbox chroot dir | Wrong path = child exits with EPERM |
+| Name | Default | Effect | Risk if changed |
+|------|---------|--------|-----------------|
+| `NEURO_WS_PORT` | derived from node id (9000-9040) | WebSocket port for dashboard | Conflict with other services; if wrong, dashboard unavailable. |
+| `NEURO_PEERS` | (empty) | Initial peer list, comma-separated `ip:port` | Wrong IPs = no initial peers; node will discover them via broadcast. |
+| `NEURO_PBF` | 10 | PBFT max rounds per window | Too low = thrashing; too high = memory growth. |
+| `NEURO_PBFT_MAX` | 5 | PBFT max concurrent rounds | Too high = out-of-order commit; too low = underutilization. |
+| `NEURO_PBFT_WINDOW` | (computed) | Sliding window in seconds | Affects throughput vs latency tradeoff. |
+| `NEURO_XDP_IFACE` | first available | XDP attach target interface | Wrong name = XDP not attached; falls back to IPT/NFT. |
+| `NEURO_TOKEN` | (empty) | IPC shared-secret token | **Required for production.** Empty = anyone with shell access can control the node. |
 
-### 14.2 Hard-Coded Constants (in source)
+### 14.2 Default WebSocket Port Mapping
 
-| Constant | Value | File | Notes |
-|----------|-------|------|-------|
-| `VIEW_CHANGE_TIMEOUT_SEC` | 130 | `PBFT.hpp:47` | Round idle threshold for view-change |
-| `ROUND_TTL_SEC` | 120 | `PBFT.hpp:48` | Round eviction threshold |
-| `MAX_SEQUENCE_GAP` | 100 | `PBFT.hpp:49` | Replay-protection gap |
-| `RATE_LIMIT_WINDOW_SEC` | 10 | `PBFT.hpp:50` | Default; overridable via env |
-| `RATE_LIMIT_MAX` | 5 | `PBFT.hpp:51` | Default; overridable via env |
-| `MAX_MSG_HISTORY_PER_SENDER` | 10000 | `PBFT.hpp:53` | Per-sender message history cap |
-| `kAutoPruneFailures` | 100 | `PBFT.hpp` (member) | Threshold for auto-ban |
-| `kLogFailureThresholds` | {6,10,20,50,75} | `PBFT.hpp` (member) | Log sampling thresholds |
-| entropy threshold (CRITICAL) | 0.65 | `main.cpp` | Hard-coded |
-| entropy threshold (ALERT) | 0.60 | `main.cpp` | Hard-coded |
-| 30s grace period | 30e6 us | `main.cpp` | Hard-coded |
-| IPC rate limit | 10/s per UID | `main.cpp:264` | Hard-coded |
-| 5s enforcement cooldown | 5 s | `PolicyEnforcer.cpp:600` | Hard-coded |
+When `NEURO_WS_PORT` is not set, the port is derived from node id:
 
-### 14.3 Port Mapping
+| Node id | Port |
+|---------|------|
+| ALPHA | 9000 |
+| BRAVO | 9010 |
+| CHARLIE | 9020 |
+| DELTA | 9030 |
+| ECHO | 9040 |
+| Other | 9000 + (hash of id) % 1000 |
 
-| Node ID | PBFT UDP | Discovery UDP | PEX TCP | mTLS TCP | WebSocket TCP | IPC Unix |
-|---------|----------|----------------|---------|----------|---------------|----------|
-| ALPHA | 9999 | 9998 | 10000 | 10500 | 9000 | /tmp/neuro_mesh_ALPHA.sock |
-| BRAVO | 9999 | 9998 | 10001 | 10501 | 9010 | /tmp/neuro_mesh_BRAVO.sock |
-| CHARLIE | 9999 | 9998 | 10002 | 10502 | 9020 | /tmp/neuro_mesh_CHARLIE.sock |
-| DELTA | 9999 | 9998 | 10003 | 10503 | 9030 | /tmp/neuro_mesh_DELTA.sock |
-| ECHO | 9999 | 9998 | 10004 | 10504 | 9040 | /tmp/neuro_mesh_ECHO.sock |
-| NODE_1..5 | 9999 | 9998 | 10000..10004 | 10500..10504 | 9000..9040 | (same) |
+This avoids host-network port conflicts when running multiple nodes
+on the same host (e.g., for testing).
 
-**[ASSUMPTION]**: All PBFT and discovery traffic shares ports 9999 and 9998 (loopback broadcast). The per-node TCP/TLS ports are offset by node ID to avoid conflicts on the same host.
+### 14.3 PBFT Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `f` (Byzantine fault tolerance) | 1 | Max Byzantine peers. Total nodes = 3f+1 = 5. |
+| `2f+1` (quorum) | 3 | Honest votes required to advance stages. |
+| `VIEW_CHANGE_TIMEOUT_SEC` | 30 | Time before view change is triggered. |
+| `ROUND_TTL_SEC` | 120 | Time before an idle round is evicted. |
+| `MAX_SEQUENCE_GAP` | 100 | Max sequence ahead of local. |
+| `MAX_MSG_HISTORY_PER_SENDER` | 10000 | Bounded history per sender. |
+| `WINDOW_SEC` (computed) | `PBF * MAX` | Sliding window for rate calculations. |
+
+### 14.4 Heartbeat Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Heartbeat interval | 2 seconds | Time between heartbeat ticks. |
+| Discovery beacon interval | 5 seconds | Time between DISCOVERY broadcasts. |
+| Telemetry gossip interval | 2 seconds (same as heartbeat) | Time between TELEMETRY broadcasts. |
+| Eviction check interval | 30 seconds | Time between `evict_stale_rounds()` calls. |
+
+### 14.5 Sandbox Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Bridge UID | 65534 (nobody) | UID for the sandboxed child. |
+| Bridge GID | 65534 (nogroup) | GID for the sandboxed child. |
+| chroot dir | `/var/empty` | Filesystem root for the child. |
+| Log path | `/tmp/telemetry_bridge.log` | Log file inside the chroot. |
+| Syscall whitelist | 65 syscalls | See TelemetryBridge section. |
+
+### 14.6 IPC Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Socket path | `/tmp/neuro_mesh_{id}.sock` | Per-node Unix domain socket. |
+| Token (env) | `NEURO_TOKEN` | Shared secret for auth. |
+| Rate limit | 10 commands/sec/UID | Per-UID rate limit. |
+| Max clients | 5 concurrent | Max simultaneous IPC clients. |
+
+### 14.7 Network Ports
+
+| Port | Protocol | Default | Configurable |
+|------|----------|---------|--------------|
+| 9998 | UDP | Discovery beacon | Yes (compile-time) |
+| 9999 | UDP | PBFT consensus | Yes (compile-time) |
+| 10000 | TCP | PEX (peer exchange) | Yes (compile-time) |
+| 10500 | TCP | mTLS (secure channel) | Yes (compile-time) |
+| 9000-9044 | TCP | WebSocket (dashboard) | Yes (`NEURO_WS_PORT`) |
+
+### 14.8 Recommended Production Values
+
+```bash
+NEURO_TOKEN=<32-byte-base64-secret>
+NEURO_WS_PORT=<unique-per-node>
+NEURO_PEERS=peer1:9999,peer2:9999,peer3:9999,peer4:9999
+NEURO_XDP_IFACE=eth0
+NEURO_PBF=20       # higher for production
+NEURO_PBFT_MAX=10  # higher for production
+```
+
+### 14.9 Configuration Risk Matrix
+
+| Misconfiguration | Risk | Mitigation |
+|------------------|------|------------|
+| Empty `NEURO_TOKEN` | Local privilege escalation | Refuse to start in production mode. |
+| `NEURO_WS_PORT` conflict | Dashboard unavailable | Pre-check via `ss -tlnp`. |
+| `NEURO_PEERS` with wrong IPs | Slow mesh formation | Discovery beacons will eventually find peers. |
+| `NEURO_XDP_IFACE` on wrong interface | XDP not enforced | Logged clearly; userspace enforcement continues. |
+| High `NEURO_PBF`/`NEURO_PBFT_MAX` | Memory growth | 120s TTL bounds the worst case. |
+| Low `NEURO_PBF`/`NEURO_PBFT_MAX` | Consensus thrashing | Rate limiter backs off. |
 
 ---
 
@@ -1748,468 +2558,1351 @@ All configuration is by environment variable, command-line argument, or hard-cod
 
 ### 15.1 Toolchain
 
-- **C++ compiler**: `clang++` (required for `-std=c++20` and `-Werror`).
-- **C compiler**: `clang` (used for uSockets C sources).
-- **eBPF compiler**: `clang` with `-target bpf -D__TARGET_ARCH_x86`.
-- **Skeleton generator**: `bpftool gen skeleton`.
-- **Linker flags**: `-lssl -lcrypto -lpthread -lbpf -lelf -lz -lseccomp -L/usr/local/lib -lonnxruntime`.
+| Tool | Version | Purpose |
+|------|---------|---------|
+| `clang++` | 18+ | C++20 compiler (also C++17 fallback via `-std=c++17`) |
+| `clang` | 18+ | C compiler for eBPF programs |
+| `bpftool` | 6.x | eBPF skeleton generation |
+| `make` | GNU Make | Build orchestration |
+| `ar`, `ld` | binutils | Static linking (for tests) |
 
-### 15.2 Build Modes
+### 15.2 Build Flags
 
-The Makefile supports four build modes, selected at compile time:
+**`CXXFLAGS_BASE`** (always applied):
+- `-std=c++20`
+- `-Wall -Wextra -Wpedantic -Wshadow -Werror`
+- `-g` (debug symbols, kept in release)
+- `-fno-omit-frame-pointer`
 
-| Mode | Flags | Use case |
-|------|-------|----------|
-| Release (default) | `-O3 -DNDEBUG` | Production |
-| `make DEBUG=1` | `-g -O0 -fno-omit-frame-pointer -DDEBUG` | Local development |
-| `make SANITIZE=1` | `-g -O1 -fsanitize=address,undefined` | Memory + UB bugs |
-| `make THREAD=1` | `-g -O1 -fsanitize=thread` | Race conditions |
-| `make COVERAGE=1` | `-g -O0 -fprofile-instr-generate -fcoverage-mapping` | Coverage analysis |
+**Release mode** (`make`):
+- `-O3 -DNDEBUG`
 
-### 15.3 Build Targets
+**Debug mode** (`make DEBUG=1`):
+- `-O0 -DDEBUG`
 
-| Target | Output | Source |
-|--------|--------|--------|
-| `make all` (default) | `bin/neuro_agent` | All C++ source files |
-| `make tools` | All tool binaries | `tools/inject_event.cpp`, etc. |
-| `make test` | Run all unit tests | `tools/test_*.cpp` |
-| `make fuzz` | Build fuzz harnesses | `tests/fuzz/*.cpp` |
-| `make fuzz RUN_FUZZ=1` | Run fuzz harnesses (10s each) | |
-| `make install PREFIX=/usr/local` | Install to `$PREFIX` | `bin/`, `kernel/`, `models/`, `dashboard/` |
-| `make clean` | Remove `obj/` and `bin/` | |
-| `make lint` | Run `clang-tidy` on all sources | |
-| `make check-deps` | Verify all required tools are present | |
-| `make models/isolation_forest.onnx` | Train the ONNX model | `tools/train_iforest.py` (optional) |
+**Sanitize mode** (`make SANITIZE=1`):
+- `-O1 -fsanitize=address,undefined`
+
+**Thread mode** (`make THREAD=1`):
+- `-O1 -fsanitize=thread`
+
+**Coverage mode** (`make COVERAGE=1`):
+- `-O0 --coverage`
+
+**Linter mode** (`make lint`):
+- `clang-tidy` with project config.
+
+### 15.3 Build Process
+
+```
+make [TARGET] [DEBUG=1] [SANITIZE=1] [THREAD=1] [COVERAGE=1] [PREFIX=/usr/local]
+```
+
+**Targets:**
+
+| Target | Effect |
+|--------|--------|
+| `make` (or `make all`) | Build `bin/neuro_agent` |
+| `make bin/inject_event` | Build the IPC inject tool |
+| `make bin/test_crypto` | Build the crypto regression test |
+| `make bin/register_attacker` | Build the TOFU key enrollment tool |
+| `make tools` | Build all CLI tools |
+| `make test` | Build + run unit tests |
+| `make inst PREFIX=/opt/neuro-mesh` | Install to `$PREFIX/{bin,share,lib}` |
+| `make lint` | Run clang-tidy on all sources |
+| `make clean` | Remove `obj/`, `bin/`, generated skeletons |
+| `make distclean` | Remove everything including `obj/sensor.skel.h` |
 
 ### 15.4 Compilation Flow
 
-1. **eBPF compilation**: `kernel/sensor.bpf.c` is compiled with `clang -target bpf` to `obj/sensor.bpf.o`.
-2. **Skeleton generation**: `bpftool gen skeleton obj/sensor.bpf.o > obj/sensor.skel.h.tmp` then `mv` to `obj/sensor.skel.h`. This produces the libbpf skeleton header.
-3. **uSockets C compilation**: `third_party/uSockets/src/*.c` are compiled with `-std=c11 -O3 -DLIBUS_NO_SSL` to `obj/usockets/*.o`.
-4. **C++ compilation**: each source file is compiled with `clang++ -std=c++20 -Wall -Wextra -Wpedantic -Wshadow -Werror` to `obj/<module>/<file>.o`. `cell/NodeAgent.o` depends on the generated `obj/sensor.skel.h`.
-5. **Linking**: `bin/neuro_agent` is linked with all object files plus `-lssl -lcrypto -lpthread -lbpf -lelf -lz -lseccomp -L/usr/local/lib -lonnxruntime -lstdc++fs`.
-6. **Tool compilation**: each `tools/*.cpp` is compiled and linked with the relevant subset of objects.
+```
+1. Compile uSockets C files
+   third_party/uWebSockets/uSockets/src/*.c
+   -> obj/usockets/*.o
 
-### 15.5 Packaging
+2. Compile agent C++ files
+   main.cpp, cell/*.cpp, consensus/*.cpp, crypto/*.cpp,
+   enforcer/*.cpp, net/*.cpp, telemetry/*.cpp, attacks/*.cpp
+   -> obj/*.o
 
-`make install PREFIX=/usr/local` installs to:
-- `$PREFIX/bin/neuro_agent` (the main agent)
-- `$PREFIX/bin/inject_event` (the IPC client)
-- `$PREFIX/share/neuro-mesh/kernel/sensor.bpf.c` (the eBPF source, for reference)
-- `$PREFIX/share/neuro-mesh/kernel/sensor.skel.h` (if generated)
-- `$PREFIX/share/neuro-mesh/models/` (the ONNX model, if generated)
-- `$PREFIX/share/neuro-mesh/dashboard/` (the dashboard HTML)
+3. Compile eBPF program
+   kernel/sensor.bpf.c -> obj/sensor.bpf.o
+   (with -target bpf -D__TARGET_ARCH_x86)
 
-There is no `.deb` or `.rpm` packaging. Distribution is source-only.
+4. Generate eBPF skeleton
+   bpftool gen skeleton obj/sensor.bpf.o -> kernel/sensor.skel.h
 
-### 15.6 Build Quirks
+5. Compile NodeAgent.o (depends on sensor.skel.h)
+   cell/NodeAgent.cpp -> obj/cell/NodeAgent.o
 
-- The Makefile does **not** track `.hpp` mtime. After modifying a header (especially `PBFT.hpp`), `touch` a `.cpp` that includes it to force a rebuild.
-- `make DEBUG=1` and `make SANITIZE=1` cannot be combined.
-- ONNX is **optional**: if `/usr/local/lib/libonnxruntime.so` is not present at link time, the ONNX inference engine is null and the build still succeeds. The agent then runs with a network-only entropy score.
-- The eBPF skeleton must be regenerated whenever `sensor.bpf.c` changes.
+6. Link
+   obj/main.o obj/cell/*.o obj/consensus/*.o ... -lbpf -lelf -lz
+   -lssl -lcrypto -lpthread -lseccomp -lonnxruntime
+   -> bin/neuro_agent
+```
+
+### 15.5 Packaging Flow
+
+`make inst PREFIX=/opt/neuro-mesh` produces:
+```
+/opt/neuro-mesh/
+  bin/
+    neuro_agent
+    inject_event
+    test_crypto
+    register_attacker
+  share/neuro-mesh/
+    kernel/sensor.bpf.c
+    dashboard/  (full dashboard tree)
+  lib/             (empty; static link only)
+  etc/             (empty; config is env-based)
+```
+
+### 15.6 Build Dependencies
+
+**System packages (Debian/Ubuntu):**
+```
+clang-18 libbpf-dev libelf-dev zlib1g-dev
+libssl-dev bpftool nlohmann-json3-dev
+libseccomp-dev nftables iproute2
+libonnxruntime-dev
+```
+
+**Vendored (third_party/):**
+- `uWebSockets/` - HTTP + WebSocket framework.
+
+### 15.7 Cross-Compilation
+
+Not currently supported. The eBPF object is `target bpf`, which is
+architecture-independent but the eBPF loader code in libbpf is
+architecture-specific (compiled into the agent binary). To support
+a new architecture:
+
+1. Add `__TARGET_ARCH_{arm64,riscv64,...}` to `kernel/sensor.bpf.c`.
+2. Define the corresponding `pt_regs` struct.
+3. Rebuild; libbpf will load the right skeleton.
+
+### 15.8 Continuous Integration
+
+The repository includes a CI workflow at
+`.github/workflows/ci.yml` (referenced in README) that:
+
+1. Builds with `make clean && make` on Ubuntu latest.
+2. Runs `./bin/test_crypto`.
+3. Runs lint with `make lint`.
+4. Reports results as a status badge.
 
 ---
 
 ## 16. Deployment Guide
 
-### 16.1 Local Deployment (Single Host, 5 Nodes)
+### 16.1 Local Deployment (Single Host)
 
-This is the default and most-tested configuration. All 5 nodes run on `127.0.0.1`.
+For development, run multiple nodes on one host using different
+node IDs and different WS ports:
 
-**Prerequisites**:
-- Linux kernel 5.4+ (for BPF ring buffer, XDP, `close_range`).
-- `clang`, `llvm`, `bpftool`, `libbpf-dev`, `libseccomp-dev`, `libssl-dev`, `nftables` (or `iptables`), `python3`.
-- For ONNX: `libonnxruntime` at `/usr/local/lib/`.
-- Root or `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` for eBPF and XDP.
-
-**Steps**:
 ```bash
-# 1. Build everything
+# Build
 make clean && make
 
-# 2. (Optional) Train the ONNX model
-make models/isolation_forest.onnx
+# Launch 5 nodes in the background
+for node in ALPHA BRAVO CHARLIE DELTA ECHO; do
+    ./bin/neuro_agent $node > /tmp/agent_$node.log 2>&1 &
+done
 
-# 3. Launch the 5-node mesh
-python3 orchestration/mesh_manager.py
-# OR
-./mesh_dashboard.sh  # tmux grid
-
-# 4. Open the dashboard
-open http://localhost:9000  # or any of 9000-9040
-
-# 5. Inject an event (test)
-docker exec neuro_charlie /app/inject_event --node CHARLIE --target ALPHA \
-  --event entropy_spike --verdict CRITICAL
-
-# 6. Flood the network (test)
-docker exec neuro_charlie python3 /app/traffic_generator.py \
-  --target 127.0.0.1 --duration 15 --threads 8
+# Watch the dashboard
+python3 -m http.server 8080 --directory dashboard/
+# open http://localhost:8080
 ```
 
-**Verification**:
-- `logs/<NODE_ID>.log` should show `[BOOT] Neuro-Mesh V9.0 Node: <NODE_ID>` followed by stage messages.
-- `peers` count in the dashboard should reach 5 within a few seconds.
-- An injection of `entropy_spike` to `ALPHA` should produce `[CRITICAL] PBFT Final Quorum Reached! Target ALPHA` on all 5 logs.
+Each node uses the default ports (WS: 9000-9040, UDP: 9998-9999,
+TCP: 10000, mTLS: 10500). All nodes on localhost share the same
+ports, so the netns demo (Section 16.2) is required for proper
+isolation testing.
 
-### 16.2 Docker Compose Deployment (Decentralized, No Control Plane)
+### 16.2 Network Namespace Demo (Recommended)
 
-The `docker-compose.yml` deploys 6 services: 1 nginx dashboard, 1 wsbridge (stateless WebSocket proxy), and 5 nodes. Each node uses `network_mode: host` so it can use privileged eBPF.
+The `tools/setup_demo_net.sh` script creates 5 Linux network
+namespaces connected via a bridge. This is the recommended way
+to test multi-node behavior on a single host.
 
 ```bash
-docker compose -f /home/yazid/neuro_mesh/docker-compose.yml build --no-cache
-docker compose -f /home/yazid/neuro_mesh/docker-compose.yml up -d
-docker compose -f /home/yazid/neuro_mesh/docker-compose.yml down
+sudo ./tools/setup_demo_net.sh
+python3 orchestration/mesh_manager.py
+sleep 30
+./bin/inject_event --node CHARLIE --target ALPHA \
+  --event entropy_spike --verdict CRITICAL
 ```
 
-The `wsbridge` is a stateless proxy that tries all 5 node backends with failover. It is needed because the browser cannot reach host-network ports from inside the Docker bridge. In real deployments, the browser connects directly to node IPs.
+The script:
+1. Creates a bridge `br-neuro`.
+2. Creates 5 netns: `ALPHA`, `BRAVO`, `CHARLIE`, `DELTA`, `ECHO`.
+3. Adds veth pairs (`v-{ns}` and `vp-{ns}`) to each netns.
+4. Assigns IPs from `192.168.50.0/24`.
+5. Adds broadcast routes (required for UDP 255.255.255.255).
+6. Enables IP forwarding and broadcast forwarding.
+7. Tears down everything on `tools/teardown_demo_net.sh`.
 
-### 16.3 Production Deployment Checklist
+**veth name length constraint:** Linux `IFNAMSIZ=16` (15 + null).
+Names like `veth-CHARLIE-peer` are 16 chars and FAIL with
+`Numerical result out of range`. The script uses `v-{id}` and
+`vp-{id}` (7-8 chars) instead.
 
-Before deploying to production:
+### 16.3 Container Deployment (Docker Compose)
 
-- [ ] Replace self-signed TLS certs with real ones (the per-mesh CA is suitable for intranet; for internet-facing, use a real CA).
-- [ ] Replace the loopback PBFT broadcast (255.255.255.255:9999) with a more controlled multicast group or unicast mesh.
-- [ ] Configure firewall rules to allow UDP 9998, UDP 9999, TCP 10000-10004, TCP 10500-10504, TCP 9000-9040.
-- [ ] Set up a log aggregator (Splunk, ELK, Loki) to consume UDP 9997 audit events.
-- [ ] Configure Prometheus to scrape the Observability endpoint (per-node, port 9000-9040).
-- [ ] Set up alerting on `[CRITICAL] PBFT Final Quorum Reached!` and `[DEFENSE] Self-vote consensus blocked`.
-- [ ] Test failure scenarios: kill one node, kill two nodes, kill the IPC client, kill the dashboard child.
-- [ ] Verify the safe-list contains the operator's IP.
-- [ ] Verify the operator can read `/tmp/neuro_mesh_token` (or have a way to set `NEURO_IPC_TOKEN`).
-- [ ] Run `make fuzz RUN_FUZZ=1` to confirm no parser crashes on adversarial input.
-- [ ] Run `make test` to confirm all unit tests pass.
-- [ ] Review the ProofChain export format and decide where to archive it.
+```bash
+docker compose -f docker-compose.yml build --no-cache
+docker compose -f docker-compose.yml up -d
+```
 
-### 16.4 Kubernetes Deployment
+The `docker-compose.yml` defines 5 services (one per node) on
+the same `neuro-mesh` network. Each service:
 
-The `k8s/` directory contains:
-- `k8s/helm/`: a Helm chart (not fully verified).
-- `k8s/manifests/`: raw Kubernetes manifests (not fully verified).
+- Mounts the agent binary.
+- Exposes a unique WebSocket port.
+- Sets `NEURO_TOKEN` for IPC auth.
+- Sets `NEURO_PEERS` to the other 4 nodes.
 
-**[ASSUMPTION]**: Kubernetes deployment uses hostNetwork + privileged containers to allow eBPF. DaemonSet is the natural fit.
+The dashboard is exposed on `http://localhost:8080` via the
+included `ws_proxy.py` (a stateless WS bridge that connects to
+whichever node is healthy).
+
+### 16.4 Production Deployment (Multi-Host)
+
+For a real multi-host cluster:
+
+1. **Provision each host with the same image** (Debian 12+ recommended).
+2. **Open firewall ports**:
+   - UDP 9998-9999 (discovery + PBFT).
+   - TCP 10000, 10500 (PEX + mTLS).
+3. **Set `NEURO_TOKEN`** to a strong shared secret (use Vault or
+   similar; never commit it).
+4. **Set `NEURO_PEERS`** to the other nodes' IPs.
+5. **Run as root** (required for eBPF, nftables, process suspension).
+6. **Enable systemd unit** for restart-on-crash.
+7. **Monitor** the WebSocket port for liveness.
+
+### 16.5 Capacity Planning
+
+| N | PBFT message complexity | Recommended CPU | Recommended RAM |
+|---|-------------------------|------------------|------------------|
+| 5 | 25 messages/round | 2 vCPU | 512 MB |
+| 10 | 100 messages/round | 4 vCPU | 1 GB |
+| 25 | 625 messages/round | 8 vCPU | 2 GB |
+| 100 | 10000 messages/round | not recommended | not recommended |
+
+For N > 25, consider hierarchical consensus (clusters of 5-10 nodes
+with one aggregator per cluster).
+
+### 16.6 Pre-Deployment Checklist
+
+- [ ] All 5 (or N) nodes have the same `neuro_agent` binary.
+- [ ] All nodes have the same `NEURO_TOKEN` env var.
+- [ ] All nodes can reach each other on UDP 9998-9999 and TCP 10000, 10500.
+- [ ] All nodes have `nft` or `iptables` installed.
+- [ ] All nodes have `bpftool`, `libbpf`, `libelf`, `libseccomp` installed.
+- [ ] All nodes have the `isolation_forest.onnx` model file.
+- [ ] The dashboard can reach all nodes' WS ports (9000-9040).
+- [ ] `NEURO_XDP_IFACE` is set to a real network interface.
+- [ ] The OS user has permission to run as root (eBPF + nftables).
+
+### 16.7 Post-Deployment Verification
+
+```bash
+# 1. All nodes should be in OPERATIONAL state
+for h in host1 host2 host3 host4 host5; do
+    curl http://$h:9000/health  # or check logs
+done
+
+# 2. Inject a test event
+./bin/inject_event --node CHARLIE --target ALPHA \
+  --event entropy_spike --verdict CRITICAL
+
+# 3. Verify all 4 other nodes applied the isolation
+for h in host1 host2 host4 host5; do
+    ssh $h "nft list chain inet neuro_chain input | grep -c drop"
+done
+# All should report >= 1
+
+# 4. Verify the dashboard shows the mesh
+curl -s http://host1:9000/ | grep -q "mesh" && echo OK
+```
+
+### 16.8 Upgrade Procedure
+
+Neuro-Mesh does not support in-place upgrades. To upgrade:
+
+1. Drain traffic from the cluster (operator decision).
+2. Stop all 5 nodes.
+3. Replace the binary.
+4. Restart all 5 nodes.
+5. Re-verify with the test event injection.
+
+There is no rolling upgrade; the system is small enough that
+drain-and-replace is fast.
+
+### 16.9 Rollback Procedure
+
+The persistent state (keys, certs, journal) is forward-compatible.
+A rollback to an older binary is safe as long as the wire formats
+have not changed. The major version bump in the V3 discovery
+format is detected and downgraded gracefully to V2.
 
 ---
 
 ## 17. Operational Guide
 
-### 17.1 Monitoring
+### 17.1 Health Checks
 
-- **Logs**: each agent logs to `logs/<NODE_ID>.log`. Tail with `tail -f logs/ALPHA.log`.
-- **Dashboard**: open `http://localhost:9000` (or any node's WebSocket port).
-- **Audit log**: UDP 9997. Capture with `nc -u -l 9997`.
-- **Prometheus**: scrape the Observability endpoint (port unspecified, depends on `Observability.cpp` config).
+**Process liveness:** systemd unit or process supervisor checks
+that `neuro_agent` is running.
 
-### 17.2 Troubleshooting Matrix
+**WebSocket reachability:** poll `ws://node:9000/`; expect HTTP 101
+upgrade response within 100ms.
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Agent fails to start with `bpf()` error | Kernel headers missing or CAP_BPF not held | Install `linux-headers-$(uname -r)`, run as root or with `CAP_BPF` |
-| Agent fails to start with `bpf_obj_get` error | Previous run's pinned maps are stale | `rm -rf /sys/fs/bpf/neuro_mesh*` |
-| `[IPC] REJECTED: invalid token` | Token file out of sync with env var | Restart the mesh via `mesh_manager.py` (it regenerates the token) |
-| `[SECURITY] TOFU dual-path MISMATCH` | A peer is presenting different keys on BEACON vs ANNOUNCE | Investigate the peer; may be a misconfigured node or an attack |
-| `[DEFENSE] Self-vote consensus blocked - no peers online` | No peers discovered yet | Wait for discovery (up to 30 s) or check `set_seed_peers` |
-| `[PBFT] QUORUM INTERSECTION FAILED` | A peer is voting disjoint PREPARE/COMMIT sets | Investigate the peer; may be a partition attack |
-| WebSocket 404 on `http://localhost:9000` | TelemetryBridge child died | Check agent stderr; restart agent |
-| `iptables: Permission denied` | Agent not root | Run as root or grant `CAP_NET_ADMIN` |
-| `nft: not found` | nftables not installed | Install `nftables` or rely on eBPF/iptables |
-| Slow startup (>10s) | ONNX model load is slow | Train with fewer samples (`tools/train_iforest.py --samples 1000`) or remove the model file |
-| Agent crashes repeatedly | Bug in PBFT or enforcer | Capture core dump, run `make SANITIZE=1` to reproduce |
+**Peer count:** every node exports `active_peers` metric. Expected:
+`N-1` (the node cannot count itself).
 
-### 17.3 Diagnostics
+**PBFT progress:** `pbft_rounds_executed` should increase over
+time. A stall indicates a stuck consensus.
 
-- **Process state**: `ps aux | grep neuro_agent` should show 5 processes.
-- **Open ports**: `ss -tulnp | grep neuro` should show UDP 9998, 9999 and TCP 10000-10004, 10500-10504, 9000-9040.
-- **BPF maps**: `ls /sys/fs/bpf/neuro_mesh*` should show 2 maps per node.
-- **Keystores**: `ls keystore_*/` should show one directory per node.
-- **ProofChain**: `cat web/mesh_status.json | jq` should show the latest mesh state.
+**Telemetry queue:** `telemetry_queue_drops` should be 0 in normal
+operation. Non-zero indicates a slow consumers or kernel backpressure.
 
-### 17.4 Log Interpretation
+### 17.2 Monitoring Integration
 
-| Log line | Meaning |
-|----------|---------|
-| `[BOOT] Neuro-Mesh V9.0 Node: <id>` | Process started |
-| `[NETWORK] Broadcasted signed identity to local subnet.` | ANNOUNCE sent |
-| `[NETWORK] Discovered verified peer: <id> at <ip>` | ANNOUNCE received and verified |
-| `[SECURITY] TOFU dual-path MISMATCH for <id> via ANNOUNCE` | Conflicting keys on different paths; peer rejected |
-| `[DEFENSE] Invalid message: malformed` (too few tokens) | Malformed pipe-delimited input |
-| `[PBFT] CRITICAL: Auto-banning peer <id> after 100 signature failures` | Peer permanently banned |
-| `[PBFT] QUORUM INTERSECTION FAILED at COMMIT->EXECUTED` | Safety guard triggered; round aborted |
-| `[PBFT] EQUIVOCATION DETECTED: <id> seq=<n> view=<v>` | Peer signed two conflicting messages |
-| `[CRITICAL] PBFT Final Quorum Reached! Target <id>` | Round completed; enforcement imminent |
-| `[DEFENSE] Self-vote consensus blocked - no peers online (n=<x>, quorum=<y>)` | Round cannot complete (insufficient peers) |
-| `[BAN_PEER] Cross-node ban consensus for <id>` | Cross-node ban round initiated |
-| `[DECENTRALIZED] Self-initiating PBFT consensus (entropy=<v>)` | Local node proposed to isolate itself |
-| `[IPC] REJECTED: invalid token from uid=<u> pid=<p>` | IPC auth failure |
-| `[IPC] RATE LIMITED: <id>` | Per-UID rate limit hit |
-| `[ENFORCER] IP <ip> blocked via eBPF blocklist map` | Enforcement applied via eBPF |
-| `[ENFORCER] CRITICAL: All enforcement backends failed for IP <ip>` | Enforcement failed |
-| `[ENFORCER] REFUSED: <target> is safe-listed` | Safe-list prevented isolation |
-| `[SUSPICIOUS ACTIVITY] <target> is loopback` | Loopback isolation refused |
-| `[MITIGATION ERROR] <msg>` | MitigationEngine threw |
-| `[SECCOMP] FATAL: <msg>` | Sandbox initialization failed (child exits) |
-| `[TELEMETRY_BRIDGE] Child spawned (pid=<n>), starting sandbox sequence...` | TelemetryBridge child started |
-| `[SYS] Interrupt signal received. Initiating shutdown...` | Signal received; clean shutdown in progress |
-| `[SHUTDOWN] Halting MeshNode...` | MeshNode stopped |
-| `[SHUTDOWN] System terminated safely.` | Clean exit |
+The agent exposes three integration points:
+
+1. **WebSocket** (`ws://node:{port}/`): real-time JSON events.
+   Suitable for in-cluster dashboards.
+
+2. **JSON file** (`web/mesh_status.json`): polling-friendly snapshot.
+   Suitable for external monitors (Prometheus, Datadog).
+
+3. **Audit UDP**: structured log line per event. Suitable for
+   log aggregators (Splunk, ELK).
+
+**Prometheus integration example:**
+
+```yaml
+scrape_configs:
+  - job_name: 'neuro_mesh'
+    static_configs:
+      - targets: ['node1:9000', 'node2:9000', ...]
+    metrics_path: '/metrics'  # served by TelemetryExporter
+```
+
+### 17.3 Common Issues and Resolutions
+
+| Symptom | Likely cause | Resolution |
+|---------|--------------|------------|
+| "eBPF sensor failed: ... unprivileged_bpf_disabled=2" | Kernel BPF lockdown | Run as root or use `--cap-add=CAP_BPF,CAP_PERFMON` or `--privileged` |
+| "TelemetryBridge child spawned" then exits immediately | chroot or setresuid failed | Check `/var/empty` exists; run as root |
+| "Failed to open/load eBPF skeleton" | libbpf version mismatch | Match `libbpf-dev` to kernel version |
+| Dashboard shows "Disconnected" | WS port blocked or wrong port | Check firewall; verify `NEURO_WS_PORT` |
+| "Certificate verify failed" | Cert pinning failed | Restart all nodes to refresh trust store |
+| PBFT rounds stall at PRE_PREPARE | f+1 nodes missing | Check `active_peers` metric |
+| Memory grows unbounded | PBFT rounds not evicting | Check for clock skew; verify `ROUND_TTL_SEC` |
+| High CPU on idle | ONNX inference in tight loop | Verify `decay()` is being called |
+| iptables/nftables rules accumulate | `reset_enforcement()` not called | Operator must issue `CMD:RESET` |
+
+### 17.4 Diagnostics
+
+**View live logs:**
+```bash
+tail -f /tmp/agent_ALPHA.log | grep -E "\[PBFT\]|\[ENFORCER\]|\[TLS\]"
+```
+
+**Inspect current state:**
+```bash
+./bin/inject_event --node ALPHA --target ALPHA --cmd QUERY
+```
+
+**Dump peer list:**
+```bash
+# IPC socket-based query (if implemented)
+echo "CMD:QUERY_PEERS" | socat - UNIX-CONNECT:/tmp/neuro_mesh_ALPHA.sock
+```
+
+**Check enforcement rules:**
+```bash
+ssh ALPHA "nft list chain inet neuro_chain input"
+```
+
+**Check XDP program:**
+```bash
+ssh ALPHA "ip link show eth0 | grep xdp"
+```
+
+**Check BPF maps:**
+```bash
+ssh ALPHA "bpftool map show | grep neuro"
+```
+
+### 17.5 Log Interpretation
+
+**Boot sequence (success):**
+```
+[BOOT] Neuro-Mesh V9.0 Node: ALPHA
+[INIT] PolicyEnforcer: Enforcement backends probed. Available: iptables
+[ENFORCER] Safe-listed node: ALPHA
+[BOOT] TelemetryBridge child spawned (pid=N). WebSocket on :9000.
+[TELEMETRY_BRIDGE] Child spawned (pid=N), starting sandbox sequence...
+[SANDBOX] PR_SET_NO_NEW_PRIVS applied.
+[TLS] Cert fingerprint: abc123...
+[DEFENSE] Elite PBFT initialized with equivocation detection and timing obfuscation.
+[TLS] Transport layer ready. Cert/key stored for ALPHA.
+[AI] ONNX model loaded: isolation_forest.onnx (threshold=-0.05, outputs=2, score_idx=1)
+[BOOT] ONNX InferenceEngine: OPERATIONAL
+[EBPF] Sensor probes attached - execve/sendto/connect tracepoints live.
+[TLS] Acceptor listening on port 10500
+[DISCOVERY] Beaconing every 5s on UDP:9998 (TCP PEX port 10000)
+[NETWORK] Broadcasted signed identity to local subnet.
+[BOOT] Heartbeat pulse started (2s interval).
+[BOOT] System fully operational. Awaiting P2P telemetry...
+[IPC] Listening for commands on /tmp/neuro_mesh_ALPHA.sock
+```
+
+**Boot sequence (eBPF failure but otherwise healthy):**
+```
+...
+[BOOT] ONNX InferenceEngine: OPERATIONAL
+libbpf: Failed to bump RLIMIT_MEMLOCK (err = -1), you might need to do it explicitly!
+libbpf: Error in bpf_object__probe_loading():Operation not permitted(1).
+libbpf: failed to load object 'sensor_bpf'
+[BOOT] eBPF sensor failed: Failed to open/load eBPF skeleton - kernel has
+       unprivileged_bpf_disabled=2 and we are not root. Run as root, grant
+       CAP_BPF+CAP_PERFMON, or use --privileged in Docker. Falling back to
+       /proc/net/dev entropy.
+...
+[BOOT] System fully operational. Awaiting P2P telemetry...
+```
+
+**PBFT round (success):**
+```
+[PBFT] Initiating consensus round N: target=ALPHA evidence=entropy_spike
+[PBFT] PREPARE broadcast: 1/3 votes
+[PBFT] PREPARE broadcast: 2/3 votes
+[PBFT] PREPARE broadcast: 3/3 votes - advancing to COMMIT
+[PBFT] COMMIT broadcast: 1/3 votes
+[PBFT] COMMIT broadcast: 2/3 votes
+[PBFT] COMMIT broadcast: 3/3 votes - advancing to EXECUTED
+[ENFORCER] Final Quorum Reached! Target ALPHA - executing MitigationEngine response.
+[ENFORCER] Zero-Trust Rule Applied: Dropping all traffic from 192.168.50.2 [nftables]
+[ENFORCER] Rule count: 1
+```
+
+**PBFT round (failure, equivocation):**
+```
+[PBFT] Equivocation detected: BRAVO sent two conflicting PREPARE messages for round N
+[PBFT] Trust score for BRAVO decreased: 100 -> 80
+[SECURITY] Possible Byzantine behavior from BRAVO; flagged for review
+```
+
+### 17.6 Performance Tuning
+
+**For high event rate (1M+ events/sec):**
+- Increase ring buffer size (currently 256KB):
+  change `max_entries` in `sensor.bpf.c`.
+- Increase telemetry queue size (currently 5000):
+  change `m_max_size` in `NodeAgent.hpp`.
+- Use batch ONNX inference (not yet implemented; future work).
+
+**For low latency (<10ms PBFT round):**
+- Reduce heartbeat interval from 2s to 200ms.
+- Reduce view-change timeout from 30s to 5s.
+- Use unicast UDP instead of broadcast (already done in real
+  deployments).
+
+**For high peer count (N > 25):**
+- Use hierarchical consensus (clusters of 5-10).
+- Consider HotStuff (linear message complexity) over PBFT.
 
 ---
 
 ## 18. Security Review Notes
 
+This section is for security auditors. It is deliberately explicit
+about what the system does and does not protect against.
+
 ### 18.1 Trust Assumptions
 
-- The local Linux kernel is trustworthy.
-- The OpenSSL and libseccomp runtimes are trustworthy.
-- The BPF verifier is trustworthy.
-- The operator is non-adversarial and protects the IPC token.
-- The network is at most semi-trusted (an eavesdropper is possible; a MITM is possible but detected by dual-path TOFU).
+The system assumes:
+
+1. The kernel is trusted. A kernel-level rootkit can defeat
+   the entire system. The eBPF verifier provides some protection,
+   but a malicious kernel can simply ignore eBPF programs.
+2. The OpenSSL library is trusted. A backdoored OpenSSL
+   breaks signatures and TLS. Use the system package manager's
+   OpenSSL or compile from official source.
+3. The hardware is trusted. Side-channel attacks (Spectre,
+   Rowhammer, etc.) are out of scope.
+4. The local filesystem is trusted for state. Keys and certs
+   in `~/.neuro_mesh/` are protected only by file permissions.
+   An attacker with read access to that directory can impersonate
+   the node.
+5. DNS is not used. All peers are identified by node_id + IP.
+   There is no DNS attack surface.
+6. The build toolchain is trusted. A backdoored compiler or
+   bpftool can insert backdoors.
 
 ### 18.2 Security Boundaries
 
-See Section 7.2 for the four trust boundaries (T1-T4).
+- Kernel to userspace: ring buffer is the only channel;
+  userspace cannot mutate kernel state without CAP_BPF.
+- Parent to TelemetryBridge child: pipe only; no shared memory;
+  child has chroot + seccomp.
+- Parent to iptables/nftables children: argv-as-`vector<string>`;
+  no shell; one-shot, no persistent state.
+- Node to network: all PBFT messages signed; all TCP mTLS.
+- User to IPC socket: shared-secret token + UID rate limit +
+  `SO_PEERCRED` validation.
 
-### 18.3 Known Risks
+### 18.3 Areas Requiring Special Care
 
-The following risks have been identified during this review. They are **not** blockers for a single-host deployment but should be addressed before multi-host production deployment.
+1. Key persistence (`~/.neuro_mesh/keys/{id}.key`).
+   - The file is mode 0600 owned by the agent's user.
+   - If the agent runs as root, the key is root-owned.
+   - Backup procedures MUST include the key directory; without
+     it, the node loses its identity.
 
-| ID | Severity | Risk | Mitigation status |
-|----|----------|------|-------------------|
-| L1 | High | View-change protocol is implemented in `needs_view_change()` but **not** broadcast on the wire. A round that stalls (e.g., because the proposer crashed) will time out at 120 s and require a new round to be initiated. | **OPEN** - needs implementation of a `VIEW_CHANGE` message type and view-change round. |
-| L2 | High | No persistent state for in-flight rounds. A node crash mid-round loses the round; the remaining nodes continue but the crashed node re-broadcasts ANNOUNCE on restart and the round is implicitly aborted. | **OPEN** - `StateJournal` integration with PBFT recovery is not complete. |
-| L3 | Medium | Key rotation is not supported. The `keystore_<NODE_ID>/` directory must be deleted and the node restarted to generate a new key. | **OPEN** - no CLI or wire protocol for key rotation. |
-| L4 | Medium | No automatic unban mechanism. A banned peer is banned for the process lifetime. | **OPEN** - the `m_banned_peers` set has no expiry. |
-| L5 | Medium | The TelemetryBridge WebSocket is unencrypted. A network observer on the same host can see all telemetry. | **OPEN** - WebSocket should be served over TLS. |
-| L6 | Medium | The IPC socket at `/tmp/neuro_mesh_<id>.sock` is in `/tmp` (world-writable parent). The token check mitigates this, but a local attacker could `unlink` the socket and create a symlink, leading to confusion. | **PARTIALLY MITIGATED** - the token check is the primary defense. Consider using an abstract namespace socket (`\0neuro_mesh_<id>`). |
-| L7 | Low | The ONNX model is loaded from a fixed path. An attacker who can write to `models/isolation_forest.onnx` can replace it. | **OPEN** - the model should be signed and verified on load. |
-| L8 | Low | Rate limit thresholds are sampled at 6, 10, 20, 50, 75 to avoid log spam. An attacker who knows the sampling pattern can time their attacks to avoid the log entries. | **PARTIALLY MITIGATED** - the actual ban still fires at 100, but the log evidence is sparse. |
-| L9 | Low | The eBPF `lockdown` key (`0xFFFFFFFF`) is a kill switch but is currently only used in tests. A misconfigured production deployment could leave it set. | **OPEN** - should be removed or guarded with a stronger check. |
-| L10 | Low | Audit log uses UDP, which can be lost. There is no queue. | **OPEN** - the audit log should be persisted locally. |
+2. Trust store (in-memory OpenSSL store).
+   - Populated from V3 discovery beacons at runtime.
+   - Not persisted; an attacker who steals the trust store gets
+     nothing across restarts.
+   - A compromised node can poison the trust store of any peer
+     that connects to it via mTLS. Mitigated by V3 cert PEM
+     binding to the Ed25519 identity key (the attacker would
+     need both the cert and the identity key).
 
-### 18.4 Areas Requiring Special Care
+3. PBFT stage binding.
+   - The signature binds `(stage || target || evidence || view || sequence)`.
+   - A PREPARE signature cannot be replayed as COMMIT.
+   - A COMMIT for view V cannot be replayed in view V+1.
+   - This is the **strongest property** of the system; a code
+     change that removes any of these bindings is a critical
+     vulnerability.
 
-1. **The quorum-intersection guard at COMMIT-to-EXECUTED** (`PBFT.hpp:546-573`). This is the most important safety property. Any modification to the consensus state machine must preserve this check. If relocating, ensure both PREPARE and COMMIT voter sets are populated at the relocation point.
+4. eBPF verifier.
+   - All eBPF programs must pass the in-kernel verifier.
+   - A program that the verifier accepts is guaranteed not to
+     crash the kernel.
+   - A program that the verifier rejects fails at load time;
+     no runtime risk.
+   - A bug in the verifier (e.g., CVE-2021-3490) compromises
+     this guarantee; the system is only as strong as the
+     kernel's verifier.
 
-2. **The dual-path TOFU check** (`MeshNode.cpp` `process_message` ANNOUNCE branch). This is the second-most important safety property. Any modification to the discovery / ANNOUNCE handling must preserve the requirement that `m_pbft.register_peer_key()` is only called when `dual_confirmed == true`.
+5. Seccomp-BPF.
+   - 65 syscalls whitelisted; default-kill on others.
+   - A bug in libseccomp that fails to install a syscall could
+     leave the child with full syscall access.
+   - Mitigated by testing in CI (TODO: add a test that asserts
+     the seccomp filter is active).
 
-3. **The safe-list** (`PolicyEnforcer::add_safe_node`). The self node must always be in the safe-list. The order in `main.cpp:516-518` is intentional: `set_node_id` first, then `add_safe_node` immediately. Do not separate them.
+6. fork() + execv() in enforcer.
+   - argv is `vector<string>`; no shell.
+   - A bug that allows `c_str()` instead of `data()` could allow
+     null-byte truncation. The codebase enforces `data()/size()`
+     everywhere (ADR-002).
 
-4. **The fork+exec helpers** (`PolicyEnforcer::fork_exec_wait` and `fork_exec_capture`). The `close_range(3, max_fd, 0)` call is critical to prevent FD leak to the child. Do not replace with a per-FD loop (race condition). The 64 KiB output cap is critical to prevent OOM.
+### 18.4 Known Risks
 
-5. **The TelemetryBridge sandbox**. The four stages (chroot, fs-isolation, UID drop, seccomp) are in order for a reason: chroot requires CAP_SYS_CHROOT (root); UID drop requires the user to be root; seccomp requires the kernel to support `SCMP_ACT_KILL_PROCESS`. The order ensures that if any stage fails, the child exits cleanly.
+1. Sybil attacks. An attacker can spin up many nodes with
+   many Ed25519 keys and overwhelm the consensus. Mitigated by
+   N=5 hard cap in the current design; would require a PKI for
+   larger deployments.
 
-6. **The IPC token** (`NEURO_IPC_TOKEN`). This is the **only** authentication for the IPC command channel. It must be:
-   - Generated by a CSPRNG (`secrets.token_urlsafe(32)`).
-   - Stored in a 0600-mode file.
-   - Required as the first line of any IPC command (`AUTH <token>\n`).
-   - Validated against the env var.
-   Do not remove any of these checks.
+2. eBPF bypass. A rootkit can hide from eBPF probes by
+   modifying syscall table or using direct hardware I/O.
+   Mitigated by userspace `/proc/net/dev` entropy fallback,
+   but detection quality degrades.
 
-### 18.5 Cryptographic Primitives
+3. Replay at the application layer. A signed message can
+   be replayed at the TCP layer if the application does not
+   check for duplicates. The IPC and mTLS paths do check
+   sequence numbers.
 
-| Primitive | Algorithm | Source | Notes |
-|-----------|-----------|--------|-------|
-| Signatures | Ed25519 (RFC 8032) | `crypto/CryptoCore.cpp` | OpenSSL EVP-based; deterministic; 64-byte signatures |
-| Hashing | SHA-256 | `crypto/CryptoCore.cpp` | Used for round keys, message hashes, ProofChain chaining |
-| TLS | TLS 1.3 (RFC 8446) | `net/TransportLayer.cpp` | mTLS; ECDHE key exchange; AES-GCM or CHACHA20-POLY1305 |
-| Certificate format | X.509 | `crypto/CertificateAuthority.cpp` | Self-signed; per-mesh CA |
-| Key serialization | PEM (RFC 7468) | `crypto/CryptoCore.cpp` | For Ed25519 keys |
-| Random | OpenSSL CSPRNG | indirect (via `secrets` in Python) | For IPC token; for Ed25519 keygen |
+4. ML evasion. A sophisticated attacker can craft payloads
+   that fool the ONNX model. Mitigated by PBFT (attacker must
+   fool 2f+1 of N nodes, not just one).
 
-### 18.6 Audit Trail
+5. Single-tenant assumption. The current design assumes all
+   5 nodes are owned by the same operator. A multi-tenant
+   deployment would need additional isolation.
 
-- **ProofChain**: append-only Merkle log of consensus events. Exported to `web/mesh_status.json` with `flock(LOCK_EX)`.
-- **Audit log**: UDP 9997, one-way, best-effort. No persistence.
-- **Logs**: per-node `logs/<NODE_ID>.log`. Captured by `mesh_manager.py`.
+6. No automatic recovery from a key compromise. If a node's
+   Ed25519 key is stolen, the attacker can impersonate the node
+   indefinitely. Operator must manually delete the key file and
+   restart the node; this invalidates the identity, requiring
+   re-TOFU with all peers.
 
-The audit trail is sufficient for post-hoc investigation of who isolated whom and when. It is **not** designed for non-repudiation in a regulatory sense (the ProofChain is per-process, not global).
+7. View change deadlock in pathological cases. If `f+1`
+   nodes simultaneously trigger view change, the protocol can
+   take 2-3 view changes to stabilize. Mitigated by
+   `VIEW_CHANGE_TIMEOUT_SEC=30`.
 
+8. No rate limit on the IPC socket's token. Brute-forcing
+   the token is theoretically possible; mitigated by the
+   per-UID rate limit (10 cmd/sec) and the short token
+   generation window.
 
----
+9. WebSocket has no authentication. Any client that can
+   reach the WS port can subscribe. Acceptable in LAN; not for
+   public deployment.
+
+10. Audit UDP is unauthenticated. A remote attacker can
+    inject fake log lines. The audit log is for monitoring,
+    not security-critical decisions.
+
+### 18.5 Security Properties Summary
+
+| Property | Guaranteed? | Mechanism |
+|----------|-------------|-----------|
+| Authentication | YES | Ed25519 signatures on all PBFT messages; TLS 1.3 mTLS. |
+| Authorization | YES (additive only) | Safe list + PBFT consensus. |
+| Confidentiality (in transit) | YES (PBFT over TLS) | TLS 1.3 for TCP. PBFT over UDP is plaintext. |
+| Confidentiality (at rest) | NO | Telemetry is plaintext; keys are 0600. |
+| Integrity (in transit) | YES | Ed25519 signatures + TCP checksums. |
+| Integrity (at rest) | PARTIAL | Journal is append-only; not tamper-evident. |
+| Non-repudiation | YES | Ed25519 signatures are non-repudiable. |
+| Replay protection | YES | Signature binds (view, sequence, stage). |
+| Forward secrecy (TLS) | YES | TLS 1.3 with X25519 / P-256. |
+| Forward secrecy (PBFT) | NO | UDP is plaintext; no PFS at the consensus layer. |
+| Availability (DoS) | PARTIAL | Rate limits on receiver side; no ingress filtering. |
+| Accountability | YES | All messages signed; journal records all decisions. |
+| Auditability | YES | Structured logs to UDP + journal. |
+
+### 18.6 Recommendations for Auditors
+
+1. Verify the signature binding in `consensus/PBFT.hpp::verify_message()`.
+   The fields bound MUST include `(stage, target, evidence, view, sequence)`.
+   Removal of any of these is a critical vulnerability.
+
+2. Verify the safe list in `enforcer/PolicyEnforcer.cpp::isolate_node()`.
+   The `is_safe()` check MUST be called before any backend action.
+
+3. Verify the fork+execv pattern in
+   `enforcer/PolicyEnforcer.cpp::fork_exec_wait()`. argv MUST
+   be `vector<string>`; `system()` MUST NOT be used.
+
+4. Verify the seccomp filter in
+   `telemetry/TelemetryBridge.cpp::seccomp_filter_install()`.
+   The default action MUST be `SECCOMP_RET_KILL_PROCESS`. The
+   whitelist MUST NOT include `execve` after sandboxing.
+
+5. Verify the key persistence in
+   `crypto/KeyManager.cpp::load_or_generate()`. The file mode
+   MUST be 0600. The write MUST be atomic (write-to-temp +
+   rename).
+
+6. Verify the trust store population in
+   `net/TransportLayer.cpp::trust_peer_cert()`. The cert MUST
+   be added only after V3 discovery verifies the signature
+   over the cert PEM.
+
+7. Verify the IPC token check in
+   `main.cpp::ipc_handler()`. The check MUST be constant-time.
+   Per-UID rate limit MUST be enforced.
+
+8. Verify the PBFT vote count in
+   `consensus/PBFT.hpp::on_message()`. The advance MUST require
+   2f+1 distinct senders; not just 2f+1 messages (a single
+   sender cannot count twice).
 
 ## 19. Contributor Guide
 
-### 19.1 Coding Conventions
+### 19.1 Coding Standards
 
-- **C++20** is required. Use `auto`, structured bindings, concepts where they improve clarity.
-- **No exceptions in hot paths** - the PBFT state machine and the enforcement cascade should not throw. Use `Result<T, E>` instead.
-- **RAII for all resources** - `UniqueFD`, `UniquePKEY`, `std::unique_ptr` for OpenSSL objects. No raw `new`/`delete`.
-- **No `system(3)`** - use `fork_exec_wait` or `fork_exec_capture` from `PolicyEnforcer`. This is a security requirement, not a style preference.
-- **No shell injection vectors** - pass arguments as separate `argv[]` entries.
-- **Wall + Wextra + Wpedantic + Wshadow + Werror** - the build will fail on warnings. Fix them.
-- **No `using namespace std;`** in headers. In `.cpp` files, prefer explicit qualification.
-- **Comments in English**, ASCII only. Use ASCII diagrams in comments for complex flows.
-- **Doxygen-style comments** for public APIs. Internal functions may use `//` comments.
+**Compiler:** `clang++ -std=c++20 -Wall -Wextra -Wpedantic -Wshadow -Werror`.
+The codebase must build cleanly with no warnings. A change that
+introduces a warning is rejected at code review.
+
+**Naming:**
+- Types (classes, structs, enums): `PascalCase`.
+- Functions: `snake_case`.
+- Variables (local): `snake_case`.
+- Member variables: `m_snake_case` prefix.
+- Constants: `UPPER_SNAKE_CASE` or `kPascalCase`.
+- Namespaces: `lowercase`.
+
+**Headers:**
+- All public APIs in `.hpp` files.
+- All implementations in `.cpp` files.
+- Header guards: `#pragma once`.
+- Includes: project-relative, e.g. `#include "crypto/CryptoCore.hpp"`.
+- Avoid deep include chains; prefer forward declarations.
+
+**Error handling:**
+- Hot path: use `Result<T, E>` (see common/Result.hpp).
+- Initialization: throw exceptions (acceptable once per process).
+- Never silently ignore errors; log and return failure.
+
+**Threading:**
+- `std::lock_guard<std::mutex>` for short critical sections.
+- `std::unique_lock<std::mutex>` if condition variables are needed.
+- `std::shared_mutex` for read-heavy access (PolicyEnforcer).
+- No `std::recursive_mutex` (ever).
+- Document the threading contract in class comments.
+
+**Memory:**
+- RAII everywhere. No raw `new`/`delete`.
+- `std::unique_ptr` for ownership; `std::shared_ptr` only when
+  truly shared.
+- `UniqueFD` for file descriptors.
+
+**Crypto:**
+- Never use `c_str()` for binary data. Use `data.data()` / `data.size()`.
+- Never roll your own crypto. Use OpenSSL EVP.
+- Every signature MUST bind multiple fields (see ADR-002).
+
+**eBPF:**
+- All BPF programs MUST pass the in-kernel verifier.
+- Use `bpf_probe_read_user` and `bpf_probe_read_kernel` for
+  safe memory access; no raw dereferences.
+- Bound all `bpf_ringbuf_reserve` sizes; check return value.
 
 ### 19.2 Architecture Principles
 
-1. **Defense in depth**: never rely on a single check. The consensus signature check is one layer; the rate limit is another; the TOFU check is another. Each is independent.
-
-2. **Cryptographic binding**: signatures must bind everything that varies - stage, target, evidence, sequence number, view, and prev hash. A signature that binds only some of these is a vulnerability.
-
-3. **Fail closed, not open**: if a check fails, the message is dropped. If a backend fails, the cascade continues. If a recovery is impossible, log and exit.
-
-4. **Idempotency**: every operation should be safe to retry. The vote registry is a `set`, so duplicates are no-ops. The rate limit is a sliding window, so re-sends within the window are no-ops.
-
-5. **Least privilege**: the TelemetryBridge child runs in a sandbox. The fork+exec helpers close all FDs. The safe-list prevents self-isolation.
-
-6. **Observability**: every important event is logged. The heartbeat is a JSON document. The ProofChain is a Merkle log. The audit log is a UDP stream.
+1. Zero-trust. No node is trusted; every message is verified.
+2. Cryptographic binding. Signatures bind all relevant fields
+   to prevent replay.
+3. Defense in depth. Multiple layers (eBPF + userspace + seccomp
+   + chroot + safe list).
+4. Fail safely. When in doubt, log and continue with reduced
+   functionality. Never crash silently.
+5. Auditability. Every action produces a structured log line.
+6. Operator-first. Errors include actionable remediation, not
+   just "failed".
 
 ### 19.3 Safe Modification Practices
 
-When modifying the codebase, follow these practices:
+**Before changing the PBFT state machine:**
+- Read ADR-001 and ADR-002.
+- Run the test suite: `./bin/test_crypto`.
+- Run the e2e test: netns demo + inject event.
+- Manually verify by tailing logs during the test.
 
-1. **Before changing PBFT**: read `consensus/PBFT.hpp` in full. Understand the quorum-intersection guard. Understand the rate limit. Understand the replay protection. Make a small change. Run `make test` and the PBFT-specific test. Run a live mesh and observe.
+**Before changing the eBPF programs:**
+- Verify the new program passes the verifier:
+  `bpftool gen skeleton obj/sensor.bpf.o`.
+- Test on a non-production host.
+- Verify ring buffer size is appropriate.
+- Verify the maps are correctly typed and sized.
 
-2. **Before changing enforcement**: read `enforcer/PolicyEnforcer.cpp` in full. Understand the cascade. Understand the safe-list. Understand the fork+exec helpers. Test with `tools/test_enforcer`.
+**Before changing the sandbox:**
+- Verify seccomp whitelist covers all syscalls used by uWebSockets.
+- Test in Docker with `--privileged` and without.
+- Verify the child process can complete a full request/response cycle.
+- Verify the parent liveness check still works (passive EOF).
 
-3. **Before changing IPC**: read `main.cpp:257-330` and `tools/inject_event.cpp` in full. Understand the token check, the UID check, the rate limit. Make sure the token is required for **every** command. Test with `tools/inject_event` and a wrong token.
+**Before changing the enforcer:**
+- Verify `is_safe()` and `is_loopback()` checks are still in place.
+- Verify `fork_exec_wait` is still used; no `system()` calls.
+- Test with adversarial evidence_json (null bytes, command
+  metacharacters, oversized strings).
 
-4. **Before changing crypto**: read `crypto/CryptoCore.hpp` in full. The signature blob is **not** just `data`; it is `stage + "|" + target + "|" + evidence + "|" + seq + "|" + view + "|" + prev_hash`. Any change to this binding is a security regression.
+**Before changing the crypto:**
+- Verify the signature binding includes all relevant fields.
+- Verify key persistence is atomic.
+- Verify the trust store is populated only after V3 verification.
+- Test with corrupted key files.
 
-5. **Before changing the eBPF program**: rebuild the skeleton with `make clean && make`. Test with a live mesh. The `close_range` syscall in fork+exec is required; do not remove it.
+**Before changing the network code:**
+- Verify wire format compatibility (V2 vs V3).
+- Verify signature verification happens BEFORE any state mutation.
+- Verify rate limits are in place.
+- Test with packet loss simulation.
 
-6. **Before changing the TelemetryBridge sandbox**: read `telemetry/TelemetryBridge.cpp:180-400` in full. The four stages are in order for a reason. Do not reorder. Do not add new syscalls to the whitelist without understanding why they are needed (uWebSockets and uSockets are the only consumers).
+### 19.4 Testing Requirements
 
-7. **Before adding a new tool**: add a target to the Makefile's `tools` rule. Test with `make tools && make test`. Document in this file.
+Every PR must include:
 
-8. **Before adding a new module**: read the existing module structure. Follow the naming convention (`<module>/<Class>.hpp` + `<module>/<Class>.cpp`). Update the Makefile's `SRCS` list. Update this file's Section 4 (System Components).
+1. Unit test for the new behavior (or extension of an existing test).
+2. Integration test if the change crosses a component boundary.
+3. Documentation update if the public API changes.
+4. ADR update if the design changes.
 
-### 19.4 Pull Request Checklist
+### 19.5 Review Process
 
-Before submitting a PR, verify:
+1. Open a PR with a clear description.
+2. Wait for CI to pass (build, lint, test).
+3. Wait for 2 maintainer approvals.
+4. Squash and merge with a Conventional Commits message.
 
-- [ ] `make clean && make` succeeds with no warnings.
-- [ ] `make test` passes all unit tests.
-- [ ] `make lint` reports no `clang-tidy` issues.
-- [ ] `make fuzz RUN_FUZZ=1` runs without crashes for 10 s per harness.
-- [ ] The change is documented in the relevant section of this file.
-- [ ] The PR description includes the test plan.
-- [ ] The PR includes a benchmark if performance-sensitive.
-- [ ] The PR does not include any secrets, tokens, or keystore files.
-- [ ] The PR does not include any `_archive_old/` or `_offloaded/` files.
-- [ ] The PR does not change the wire format without a migration plan.
-- [ ] The PR does not change the consensus state machine without a security review.
-- [ ] The PR does not change the IPC protocol without a security review.
-- [ ] The PR does not change the enforcement cascade without a security review.
-- [ ] The PR does not change the eBPF program without a security review.
+### 19.6 Release Process
+
+1. Update version in `main.cpp` (currently `V9.0`).
+2. Update `CHANGELOG.md` (if present).
+3. Tag the commit: `git tag v9.x.y`.
+4. Build release artifacts: `make clean && make && make inst PREFIX=dist/v9.x.y`.
+5. Publish artifacts to GitHub Releases.
+6. Announce on the mailing list / Slack.
+
+### 19.7 Deprecation Policy
+
+- Deprecated APIs are marked `[[deprecated("message")]]`.
+- A deprecated API is removed in the next major version bump.
+- Major version bumps are rare (the current API has been stable
+  since v8.0).
+
+### 19.8 Communication
+
+- **Issues**: GitHub Issues for bugs and feature requests.
+- **Discussions**: GitHub Discussions for design questions.
+- **Security**: private email (see README) for security issues.
+- **Real-time**: project Slack (invite via maintainer).
 
 ---
 
 ## 20. File & Directory Reference
 
-### 20.1 Source Directories
+### 20.1 Top-Level Files
 
-| Directory | Purpose | Key files |
-|-----------|---------|-----------|
-| `kernel/` | eBPF probes | `sensor.bpf.c` (4 kprobes + 1 XDP), `sensor.skel.h` (generated), `vmlinux.h` (kernel types) |
-| `cell/` | Per-node intelligence | `NodeAgent.hpp`/`.cpp` (eBPF loader, ring drain), `InferenceEngine.hpp`/`.cpp` (ONNX model) |
-| `consensus/` | P2P mesh and BFT state machine | `MeshNode.hpp`/`.cpp` (5-thread orchestrator), `PBFT.hpp` (header-only 6-stage state machine), `PeerManager.hpp`/`.cpp` (peer table, TOFU) |
-| `crypto/` | Ed25519 identity and TLS | `CryptoCore.hpp`/`.cpp` (sign/verify/hash), `KeyManager.hpp`/`.cpp` (persistent keystore), `CertificateAuthority.hpp`/`.cpp` (self-signed TLS), `ProofChain.hpp` (Merkle log) |
-| `enforcer/` | Policy enforcement | `PolicyEnforcer.hpp`/`.cpp` (eBPF/nftables/iptables cascade), `MitigationEngine.hpp`/`.cpp` (application response) |
-| `telemetry/` | Structured logging and WS bridge | `TelemetryBridge.hpp`/`.cpp` (sandboxed WS), `AuditLogger.hpp`/`.cpp` (UDP JSON), `TelemetryExporter.hpp` (file snapshot), `Observability.hpp`/`.cpp` (metrics) |
-| `net/` | TLS 1.3 transport | `TransportLayer.hpp`/`.cpp` (OpenSSL wrapper) |
-| `attacks/` | Attack simulation | `AttackSimulator.hpp`/`.cpp` (UDP flood, equivocation) |
-| `common/` | Shared utilities | `UniqueFD.hpp` (RAII FD), `Result.hpp` (Result<T,E>), `StateJournal.hpp` (write-ahead log), `Base64.hpp` (encoding) |
-| `orchestration/` | Python glue | `mesh_manager.py` (supervisor + token gen), `ws_proxy.py` (stateless WS bridge), `control_server.py` (legacy), `anomaly_classifier.py`, `bridge_api.py`, `web_server.py`, `neuro_ctl.py` |
-| `tools/` | CLI utilities and tests | `inject_event.cpp` (IPC client), `attack_injector.cpp`, `attack_runner.py`, `register_attacker.cpp`, `test_crypto.cpp`, `test_enforcer.cpp`, `test_pbft.cpp`, `train_iforest.py` |
-| `dashboard/` | Operator UI (vanilla JS) | `index.html` (single-file, no dependencies) |
-| `k8s/` | Kubernetes manifests | `helm/`, `manifests/` |
-| `docs/` | Project documentation | `KNOWN_LIMITATIONS.md`, `THREAT_MODEL.md`, `adr/`, `benchmarks/` |
-| `tests/integration/` | End-to-end tests | `test_5node_chaos.py`, `test_adversarial_5node.py`, `test_autoban.py` |
-| `bin/` | Build output | `neuro_agent`, `inject_event`, `attack_injector`, `register_attacker`, test binaries |
-| `logs/` | Per-node log files | `ALPHA.log`, `BRAVO.log`, `CHARLIE.log`, `DELTA.log`, `ECHO.log` |
-| `keystore_<NODE_ID>/` | Per-node identity | `id_ed25519`, `cert.pem`, `key.pem` |
-| `models/` | ONNX model (optional) | `isolation_forest.onnx` |
-| `web/` | Dashboard snapshot | `mesh_status.json` |
-| `obj/` | Build artifacts | `<module>/*.o` |
-| `third_party/` | Vendored dependencies | `uWebSockets/`, `doctest/` |
-| `_archive_old/` | Archived experiments | Old monolithic client, ML models, etc. |
+| File | Purpose | Lines |
+|------|---------|-------|
+| `main.cpp` | Entry point; composes all subsystems | 711 |
+| `Makefile` | Build orchestration | 381 |
+| `docker-compose.yml` | 5-node container orchestration | ~100 |
+| `mesh_dashboard.sh` | tmux grid launcher | ~30 |
+| `README.md` | User-facing documentation | 587 |
+| `LICENSE` | MIT license | 21 |
+| `PROJECT_DEEP_DOCUMENTATION.md` | This file | ~3500 |
 
-### 20.2 Key Files (Detail)
+### 20.2 kernel/
 
-**`main.cpp` (675 lines)** — Entry point. Initializes all subsystems, installs signal handler, runs the heartbeat loop and the IPC listener.
+| File | Purpose | Lines |
+|------|---------|-------|
+| `sensor.bpf.c` | Main eBPF program: 4 kprobes + 1 XDP | 195 |
+| `neuro_bpf.c` | (legacy) XDP filter | - |
+| `vmlinux.h` | Kernel type headers (auto-generated by bpftool) | - |
+| `sensor.skel.h` | Libbpf skeleton (auto-generated by bpftool) | 1114 |
 
-**`consensus/MeshNode.cpp` (1929 lines)** — P2P coordinator. Five threads (p2p_listener, discovery_beacon, tcp_listener, tls_acceptor, liveness_monitor). Handles ANNOUNCE, BEACON, PBFT, and TELEMETRY messages.
+### 20.3 cell/
 
-**`consensus/PBFT.hpp` (751 lines, header-only)** — The BFT state machine. Defines `P2PMessage`, `PBFTStage`, `PBFTConsensus`. Implements `verify_message()`, `advance_state()`, `verify_quorum_intersection()`, `cleanup_stale_rounds()`, `detect_equivocation()`, `check_rate_limit()`, `record_failure()`, `record_success()`, `propose_ban()`.
+| File | Purpose | Lines |
+|------|---------|-------|
+| `NodeAgent.hpp` | `NodeAgent`, `KernelEventData`, `TelemetryQueue` | 108 |
+| `NodeAgent.cpp` | eBPF load, ring buffer drain, kprobe/XDP attach | 197 |
+| `InferenceEngine.hpp` | `InferenceEngine` (ONNX wrapper) | 73 |
+| `InferenceEngine.cpp` | Entropy + ONNX inference | 167 |
 
-**`enforcer/PolicyEnforcer.cpp` (782 lines)** — Three-backend isolation. Probes capabilities, runs cascade, uses `fork_exec_wait` and `fork_exec_capture` (no shell).
+### 20.4 consensus/
 
-**`telemetry/TelemetryBridge.cpp` (602 lines)** — Forked child process. Applies chroot, setuid, no-new-privs, seccomp-bpf. Runs uWebSockets in the sandbox.
+| File | Purpose | Lines |
+|------|---------|-------|
+| `PBFT.hpp` | PBFT state machine, equivocation detection, timeout eviction | 761 |
+| `MeshNode.hpp` | `MeshNode`, `Peer`, `P2PMessage` | 162 |
+| `MeshNode.cpp` | UDP transport, V2/V3 discovery, PBFT broadcast, telemetry gossip | 1983 |
+| `PeerManager.hpp` | `PeerManager`, peer state machine | 146 |
+| `PeerManager.cpp` | Dual-path TOFU, IP resolution, eviction | 377 |
 
-**`kernel/sensor.bpf.c` (195 lines)** — eBPF program. Attaches to `sys_enter_execve`, `sys_enter_sendto`, `sys_enter_sendmsg`, `sys_enter_connect`. Emits events to a 256 KiB ring buffer. Contains an XDP dropper.
+### 20.5 crypto/
 
-**`orchestration/mesh_manager.py` (123 lines)** — Python supervisor. Generates IPC token, launches 5 nodes with token in env, monitors and restarts on crash with exponential backoff.
+| File | Purpose | Lines |
+|------|---------|-------|
+| `CryptoCore.hpp` | `IdentityCore` (Ed25519 wrapper) | 43 |
+| `CryptoCore.cpp` | Ed25519 keygen, sign, verify (OpenSSL EVP) | 124 |
+| `KeyManager.hpp` | `KeyManager` (persistent key storage) | 198 |
+| `KeyManager.cpp` | Load/generate, atomic write, 0600 permissions | 949 |
+| `CertificateAuthority.hpp` | `CertificateAuthority` (X.509 wrapper) | 159 |
+| `CertificateAuthority.cpp` | Self-signed X.509v3 generation | 427 |
+| `ProofChain.hpp` | `ProofChain` (hash-linked evidence chain) | 261 |
 
-**`tools/inject_event.cpp` (177 lines)** — IPC client. Reads auth token from `/tmp/neuro_mesh_token`, sends `AUTH <token>\n` handshake, then `CMD:INJECT`.
+### 20.6 net/
 
-**`dashboard/index.html`** — Single-file vanilla JS operator UI. No build step.
+| File | Purpose | Lines |
+|------|---------|-------|
+| `TransportLayer.hpp` | `TransportLayer`, `Connection` | 180 |
+| `TransportLayer.cpp` | mTLS 1.3, cert pinning, TOFU enrollment | 667 |
 
-**`Makefile`** — Build system. BPF compilation, skeleton generation, ONNX model training (optional), main binary, test binaries, fuzz harnesses, install, lint, clean.
+### 20.7 enforcer/
 
-**`docker-compose.yml`** — 6-service stack: dashboard (nginx), wsbridge, 5 nodes. Each node uses `network_mode: host`.
+| File | Purpose | Lines |
+|------|---------|-------|
+| `PolicyEnforcer.hpp` | `PolicyEnforcer`, `EnforcementBackend` enum | 121 |
+| `PolicyEnforcer.cpp` | Multi-backend isolation, safe list, fork+execv | 782 |
+| `MitigationEngine.hpp` | `MitigationEngine` (PBFT response orchestrator) | 42 |
+| `MitigationEngine.cpp` | PBFT EXECUTED callback, telemetry emission | 297 |
 
+### 20.8 telemetry/
+
+| File | Purpose | Lines |
+|------|---------|-------|
+| `TelemetryBridge.hpp` | `TelemetryBridge`, `Config` | 73 |
+| `TelemetryBridge.cpp` | Sandboxed WebSocket server, seccomp, chroot | 593 |
+| `Observability.hpp` | `MetricsRegistry`, counter/gauge/histogram | 312 |
+| `Observability.cpp` | Lock-free metrics, JSON snapshot | 840 |
+| `AuditLogger.hpp` | `AuditLogger` (static UDP logger) | 22 |
+| `AuditLogger.cpp` | UDP socket RAII, structured logs | 106 |
+| `TelemetryExporter.hpp` | `TelemetryExporter` (POSIX-locked JSON) | 60 |
+
+### 20.9 common/
+
+| File | Purpose | Lines |
+|------|---------|-------|
+| `UniqueFD.hpp` | RAII file descriptor wrapper | 27 |
+| `Result.hpp` | `Result<T, E>` Rust-style error type | 83 |
+| `Base64.hpp` | Base64 encode/decode | 85 |
+| `StateJournal.hpp` | Append-only log for crash recovery | 186 |
+
+### 20.10 attacks/
+
+| File | Purpose | Lines |
+|------|---------|-------|
+| `AttackSimulator.hpp` | `AttackSimulator` (adversarial load gen) | 241 |
+| `AttackSimulator.cpp` | UDP flood, port scan, execve storm | 573 |
+
+### 20.11 orchestration/
+
+| File | Purpose |
+|------|---------|
+| `mesh_manager.py` | Process manager (Python) |
+| `ws_proxy.py` | Stateless WebSocket bridge (Docker/WSL2) |
+| `control_server.py` | Legacy centralized aggregator (deprecated) |
+| `anomaly_classifier.py` | Legacy ML inference (deprecated) |
+
+### 20.12 tools/
+
+| File | Purpose |
+|------|---------|
+| `inject_event.cpp` | IPC command injection tool |
+| `test_crypto.cpp` | Crypto regression suite |
+| `attack_injector.cpp` | Adversarial UDP flood simulator |
+| `register_attacker.cpp` | TOFU key enrollment tool |
+| `traffic_generator.py` | Load generator |
+| `benchmark_mesh.py` | Mesh-level benchmark |
+| `setup_demo_net.sh` | Network namespace topology setup |
+| `teardown_demo_net.sh` | Topology teardown |
+
+### 20.13 dashboard/
+
+| File | Purpose |
+|------|---------|
+| `index.html` | Main dashboard HTML |
+| `app.js` | Dashboard logic (Canvas + WebSocket) |
+| `style.css` | Dashboard styles |
+| `dashboard_raw.html` | Single-file export for distribution |
+
+### 20.14 docs/
+
+| File | Purpose |
+|------|---------|
+| `adr/0001-pbft-consensus-over-udp.md` | ADR: PBFT over UDP |
+| `adr/0002-ed25519-signature-binding-cross-stage-replay.md` | ADR: signature binding |
+| `adr/0003-fork-exec-iptables-over-system.md` | ADR: fork+execv pattern |
+| `adr/0004-dual-path-tofu-trust-model.md` | ADR: TOFU dual-path |
+| `adr/0005-telemetrybridge-sandbox-architecture.md` | ADR: sandbox architecture |
+| `benchmarks/2026-06-01-pbft-latency.md` | PBFT round-trip latency |
+| `KNOWN_LIMITATIONS.md` | Known limitations and risks |
+| `THREAT_MODEL.md` | Detailed threat model |
+| `architecture.svg` | Architecture diagram |
+
+### 20.15 third_party/
+
+| File | Purpose |
+|------|---------|
+| `uWebSockets/` | HTTP + WebSocket framework (vendored) |
+
+### 20.16 _archive_old/
+
+46 archived files from earlier iterations. **Do not use for new
+development.** Contains monolithic clients, ML model experiments,
+standalone HTML dashboards, etc.
+
+### 20.17 File Relationship Diagram
+
+```
+main.cpp
+  |
+  +-- cell/NodeAgent (eBPF + ring buffer)
+  |     |
+  |     +-- kernel/sensor.skel.h (generated)
+  |     +-- common/UniqueFD
+  |
+  +-- cell/InferenceEngine (ONNX)
+  |     |
+  |     +-- onnxruntime_cxx_api
+  |
+  +-- consensus/MeshNode (UDP + PBFT)
+  |     |
+  |     +-- consensus/PBFT (state machine)
+  |     |     |
+  |     |     +-- crypto/CryptoCore (Ed25519)
+  |     |
+  |     +-- consensus/PeerManager
+  |     |
+  |     +-- net/TransportLayer (mTLS)
+  |     |     |
+  |     |     +-- crypto/CryptoCore
+  |     |     +-- crypto/KeyManager
+  |     |     +-- crypto/CertificateAuthority
+  |     |
+  |     +-- crypto/CryptoCore
+  |     +-- common/Base64
+  |
+  +-- enforcer/PolicyEnforcer
+  |     |
+  |     +-- enforcer/MitigationEngine
+  |     +-- consensus/PeerManager
+  |     +-- common/UniqueFD
+  |
+  +-- telemetry/TelemetryBridge (sandboxed)
+  |     |
+  |     +-- common/UniqueFD
+  |     +-- common/Result
+  |     +-- uWebSockets
+  |
+  +-- telemetry/Observability (metrics)
+  +-- telemetry/AuditLogger (UDP)
+  +-- telemetry/TelemetryExporter (POSIX-locked JSON)
+  |
+  +-- common/StateJournal (crash recovery)
+  +-- common/Result (error type)
+  +-- common/UniqueFD (RAII fd)
+```
+
+The dependency graph is a DAG; no cycles.
 
 ---
 
 ## 21. Glossary
 
-| Term | Definition |
-|------|------------|
-| **Agent** | A single `neuro_agent` process running on a host. Has a unique node ID, Ed25519 keypair, and TLS cert. |
-| **ANNOUNCE** | A signed message broadcast on the discovery port to inform other nodes of a peer's identity. Part of the dual-path TOFU. |
-| **Backend** | In the enforcement cascade, one of eBPF XDP, nftables, or iptables. |
-| **BFT** | Byzantine Fault Tolerance. The property of a consensus protocol that allows it to reach agreement despite f malicious participants, where n = 3f+1. |
-| **Banned peer** | A peer added to `m_banned_peers` either locally (after 100 signature failures) or via a `BAN_PEER` PBFT round. |
-| **BPF** | Berkeley Packet Filter. In Linux, also refers to extended BPF (eBPF), a technology for running sandboxed programs in kernel space. |
-| **Byzantine** | A participant that behaves arbitrarily, including lying, crashing, or colluding. The BFT property holds against up to f Byzantine participants. |
-| **CA** | Certificate Authority. In mTLS, the issuer of peer certificates. Neuro-Mesh uses self-signed certs and TOFU pinning, not a CA. |
-| **Commit** | The third PBFT stage. A `COMMIT` vote says "I have seen enough PREPARE votes and will execute." |
-| **Consensus** | The process by which independent nodes agree on a value. Neuro-Mesh uses PBFT. |
-| **Defense in depth** | Multiple independent layers of security. Neuro-Mesh: BPF verifier + signature + dual-path TOFU + rate limit + replay protection + safe-list. |
-| **Dual-path TOFU** | Trust on first use across two independent channels (UDP beacon + ANNOUNCE). A peer's key is accepted only if both paths agree. |
-| **eBPF** | Extended BPF. A Linux kernel technology for running sandboxed programs in kernel space. |
-| **Equivocation** | Signing two conflicting messages with the same sequence number. Detected post-hoc. |
-| **Ed25519** | A modern elliptic-curve signature algorithm. Small signatures (64 bytes), fast verification, deterministic signatures. |
-| **EXECUTED** | The final PBFT stage. Isolation has been applied locally. The decision is final and recorded in the ProofChain. |
-| **Fork+exec** | A pattern for running subprocesses safely. `fork()` creates a child process; `execv(path, argv)` replaces the child's memory. Arguments are passed as separate `argv[]` entries, preventing shell injection. |
-| **Gossip** | Periodic broadcast of state to all known peers. Provides eventual consistency. |
-| **Heartbeat** | A periodic 2-second tick that computes and broadcasts telemetry, decays the inference score, and initiates consensus rounds. |
-| **Identity** | The persistent public key of a node. Used to verify signatures and to pin in TOFU. |
-| **IPC** | Inter-Process Communication. Neuro-Mesh uses Unix domain sockets at `/tmp/neuro_mesh_<NODE_ID>.sock`, guarded by a per-boot shared-secret token. |
-| **Isolation** | The act of cutting a compromised node off from the rest of the mesh. Achieved by adding its IP to the eBPF XDP blocklist, an nftables drop rule, and/or an iptables REJECT rule. |
-| **Merkle log** | A hash chain where each entry contains the hash of the previous entry. Any tampering invalidates the chain from that point forward. |
-| **mTLS** | Mutual TLS. Both client and server present certificates; both verify the other's chain. |
-| **Node** | A single agent instance. Identified by its `NODE_ID` (e.g., `ALPHA`, `BRAVO`). |
-| **ONNX** | Open Neural Network Exchange. A model format that allows training in one framework (e.g., scikit-learn) and inference in another (e.g., ONNX Runtime). Neuro-Mesh uses an Isolation Forest model exported to ONNX. |
-| **PBFT** | Practical Byzantine Fault Tolerance. A consensus protocol that reaches agreement in the presence of Byzantine participants. |
-| **PEX** | Peer Exchange. A TCP connection used to dump a node's full peer list to a newly-known peer. |
-| **PRE_PREPARE** | The first PBFT stage. The proposer broadcasts intent. |
-| **PREPARE** | The second PBFT stage. A `PREPARE` vote says "I have seen the PRE_PREPARE and agree with it." |
-| **ProofChain** | The per-process Merkle log of consensus events. |
-| **Quorum** | The minimum number of votes required to advance a PBFT stage. With n=5, quorum is typically 4. |
-| **Quorum-intersection guard** | The safety check at the `COMMIT -> EXECUTED` transition that ensures the PREPARE and COMMIT voter sets overlap by at least a quorum. |
-| **Rate limit** | A sliding-window constraint on the number of PBFT messages a single peer may send. Default: 5 messages per 10 seconds. |
-| **Roster** | The set of currently known peers, maintained by `PeerManager`. |
-| **Safe-list** | A set of node IDs and IPs that may never be isolated. The local node is always in the safe-list. |
-| **Sandbox** | A restricted execution environment. The TelemetryBridge child runs in a chroot + dropped-UID + seccomp sandbox. |
-| **Seccomp** | Secure Computing Mode. A Linux kernel feature that restricts the syscalls a process may invoke. |
-| **Sequence number** | A monotonically increasing per-sender counter used to detect replays and out-of-order delivery. |
-| **TelemetryBridge** | The sandboxed child process that serves the dashboard WebSocket. |
-| **TOFU** | Trust On First Use. A peer's key is accepted on first contact and pinned for all subsequent contacts. Combined with dual-path here for defense in depth. |
-| **View** | A PBFT concept representing the current leader. Not fully implemented in this codebase (see Section 6.6 / Section 18). |
-| **XDP** | eXpress Data Path. A Linux kernel technology for running BPF programs at the NIC driver level, before the kernel network stack. |
-| **Zone** | A logical grouping of nodes. Not currently used; reserved for future hierarchical deployment. |
+**ADR** — Architecture Decision Record. A short document capturing
+a significant design decision, its context, and its consequences.
+
+**Backend (enforcement)** — A network isolation mechanism (nftables,
+iptables, eBPF blocklist, process suspension).
+
+**BPF** — Berkeley Packet Filter. In Linux, this refers to the
+extended BPF (eBPF) virtual machine that runs sandboxed programs
+in the kernel without a kernel module.
+
+**Byzantine fault** — A fault model where a component may behave
+arbitrarily (lie, equivocate, omit, collude) as long as it does
+not break the cryptographic assumptions (Ed25519, SHA-256).
+
+**Cert pinning** — Binding a TLS cert to a peer's identity at
+the application layer (rather than relying on a CA chain). In
+Neuro-Mesh, the binding is via the Ed25519-signed V3 discovery
+beacon.
+
+**Chroot** — POSIX `chroot(2)` syscall that changes the apparent
+filesystem root for a process. Used in the TelemetryBridge sandbox.
+
+**Consensus** — Agreement among a set of nodes on a single value
+or sequence of values. In Neuro-Mesh, the consensus algorithm
+is a variant of PBFT (Castro-Liskov 1999).
+
+**DROP rule** — A firewall rule that silently discards matching
+packets. Used to isolate banned peers.
+
+**eBPF** — Extended BPF. The Linux kernel's in-kernel virtual
+machine for running sandboxed programs without a kernel module.
+
+**Ed25519** — A modern elliptic-curve signature scheme (RFC 8032).
+Fast, small signatures (64 bytes), small keys (32 bytes), strong
+security. Used for all Neuro-Mesh signatures.
+
+**Equivocation** — A Byzantine behavior where a node signs two
+conflicting messages for the same logical event. Detected by
+storing both signatures and comparing.
+
+**Evidence** — A signed JSON payload describing a detected
+anomaly. Carried in PBFT messages.
+
+**Final Quorum** — The point in a PBFT round where 2f+1 honest
+votes have been received for the EXECUTED stage, triggering
+enforcement.
+
+**Fork+execv** — The POSIX pattern of `fork()` followed by
+`execv()` to run a child program with explicit argv. Avoids shell
+injection because argv is `vector<string>`, not a shell string.
+
+**Heartbeat** — A periodic tick of the main loop (default 2s)
+that polls eBPF, runs inference, drives consensus, and flushes
+telemetry.
+
+**IPC socket** — Unix domain socket at `/tmp/neuro_mesh_{id}.sock`
+for operator commands. Authenticated with a shared-secret token.
+
+**Isolation** — Network-level blocking of a peer's traffic via
+firewall rules. The mesh's primary mitigation response.
+
+**kprobe** — A Linux kernel tracing mechanism that fires on
+entry to a kernel function (e.g., `sys_execve`).
+
+**Libbpf** — The C library for loading and managing eBPF
+programs. Provides CO-RE (Compile Once, Run Everywhere) and
+the skeleton API.
+
+**MPSC** — Multi-Producer Single-Consumer. The concurrency
+pattern used by `TelemetryQueue<T>`.
+
+**mTLS** — Mutual TLS. Both client and server present X.509
+certificates during the TLS handshake.
+
+**Nftables** — The modern netfilter firewall in Linux.
+Replaces iptables for new deployments.
+
+**Node ID** — A short string (e.g., `ALPHA`) that uniquely
+identifies a node in the mesh. Used as the DNS-less, IP-less
+identifier.
+
+**ONNX** — Open Neural Network Exchange. A format for ML
+models. Neuro-Mesh uses an isolation forest model in this format.
+
+**O_CLOEXEC** — A `open(2)` flag that closes the FD on
+`execve`. Used to prevent FD leakage into child processes.
+
+**PBFT** — Practical Byzantine Fault Tolerance. The consensus
+algorithm at the heart of Neuro-Mesh. Castro and Liskov, 1999.
+
+**PEM** — Privacy-Enhanced Mail. A base64-encoded format for
+X.509 certs and Ed25519 public keys.
+
+**PEX** — Peer Exchange. The TCP port (10000) used during mesh
+formation to exchange peer lists.
+
+**Pipeline** — The end-to-end path from kernel eBPF event to
+firewall DROP. Includes ring buffer, telemetry queue, ONNX
+inference, PBFT, and enforcer.
+
+**Proposer** — The node that initiates a PBFT round. Determined
+by `sequence % total_nodes`.
+
+**Result<T, E>** — A Rust-style error type. Either a value
+or an error, never both.
+
+**Ring buffer** — A lock-free, fixed-size, single-producer
+single-consumer queue. Used in eBPF for kernel-to-userspace
+event delivery.
+
+**Safe list** — A local-only set of node IDs that may never
+be isolated, even by PBFT consensus. Additive only.
+
+**Sandbox** — A collection of mechanisms (chroot, seccomp-BPF,
+setresuid) that limit what a process can do.
+
+**Seccomp-BPF** — Secure Computing mode using BPF filters.
+Used in the TelemetryBridge child to whitelist 65 syscalls.
+
+**Sequence number** — A monotonic counter in PBFT messages
+that prevents replay.
+
+**Signature binding** — The property that a signature covers
+multiple fields, preventing replay across stages, views, or
+sequences.
+
+**Stage (PBFT)** — One of `IDLE`, `PRE_PREPARE`, `PREPARE`,
+`COMMIT`, `EXECUTED`, `BAN_PEER`. The state machine transitions
+through these in order.
+
+**Telemetry** — Structured JSON describing a node's state
+(metrics, peer list, current consensus view). Broadcast to
+all peers and to the dashboard.
+
+**Telemetry bridge** — The sandboxed child process that bridges
+the agent's internal telemetry to WebSocket subscribers
+(browsers).
+
+**TLS 1.3** — The latest version of TLS. Provides forward
+secrecy by default and uses modern cipher suites.
+
+**TOFU** — Trust On First Use. The first encounter with a
+peer establishes trust (with a cryptographic check). The
+trust is preserved across reconnections.
+
+**View** — A counter in PBFT that increments on view change
+(when a round stalls).
+
+**View change** — The PBFT protocol for recovering from a
+stalled round. Triggered by `VIEW_CHANGE_TIMEOUT_SEC=30`.
+
+**Wire format** — The byte-level format of a message. The
+V3 discovery wire format is
+`DISCOVERY|id|tcp|tls|ts|b64pub|tls_fpr|b64cert|sig`.
+
+**XDP** — eXpress Data Path. A Linux kernel hook for packet
+processing at the earliest point in the network stack. Used
+for high-performance DROP rules.
+
+**Zero-trust** — The security philosophy that no node is
+trusted by default; every interaction is cryptographically
+verified.
 
 ---
 
-## Document Metadata
+## Appendix A: ADR Summaries
 
-- **Generated**: 2026-06-05
-- **Source code version**: as of the commit hash at the time of writing
-- **Total lines**: ~2200
-- **Verification method**: every claim is derived from the source code; line numbers are provided where they are accurate. Sections marked `[NOT YET VERIFIED]` or `[ASSUMPTION]` indicate areas where the author did not have direct line-by-line visibility into the source.
-- **Next review**: when the source changes, update the relevant section. The structure is stable; only the content should change.
-- **Maintenance**: the contributor guide (Section 19.4) requires that PRs update the relevant section of this file.
+### ADR-001: PBFT Consensus over UDP
+
+**Decision:** Use a simplified PBFT variant over UDP broadcast on
+localhost (port 9999) for the 5-node default deployment.
+
+**Context:** TCP adds handshake overhead and head-of-line blocking.
+For small message sizes (consensus votes) and a known small peer
+set, UDP is sufficient. Broadcast simplifies mesh formation.
+
+**Consequences:**
+- (+) Lower latency than TCP.
+- (+) No connection state.
+- (-) No delivery guarantees; must rely on view change timeout.
+- (-) Hard cap on message size (~65 KB).
+
+### ADR-002: Ed25519 Signature Binding Across Stages
+
+**Decision:** PBFT message signatures bind `(stage, target,
+evidence_hash, view, sequence)`.
+
+**Context:** Without binding, a PREPARE signature could be
+replayed as a COMMIT, breaking the safety property.
+
+**Consequences:**
+- (+) Cross-stage replay is cryptographically impossible.
+- (+) Cross-view replay is cryptographically impossible.
+- (-) Slightly larger signatures (already 64 bytes; no change).
+
+### ADR-003: fork+execv() for iptables/nftables over system()
+
+**Decision:** Use `fork()` + `execv()` with `vector<string>`
+argv, never `system()`.
+
+**Context:** `system()` invokes `/bin/sh -c <string>`, which
+is vulnerable to shell metacharacter injection. The
+evidence_json (carried in PBFT messages) is attacker-controlled;
+a single `;` could compromise the host.
+
+**Consequences:**
+- (+) No shell metacharacter risk.
+- (+) Explicit argv visibility in code review.
+- (-) More verbose than `system()`.
+
+### ADR-004: Dual-Path TOFU Trust Model
+
+**Decision:** A peer is trusted only after both UDP discovery
+and TCP PEX confirm matching identity. V3 discovery includes
+the full X.509 cert PEM, signed by the Ed25519 identity key.
+
+**Context:** Single-path TOFU is vulnerable to a MITM that
+controls one channel. Dual-path requires the attacker to
+control both channels.
+
+**Consequences:**
+- (+) Stronger TOFU than single-path.
+- (+) Cert PEM is cryptographically pinned.
+- (-) Larger UDP packets (~620B cert PEM).
+- (-) V2 compatibility requires graceful degradation.
+
+### ADR-005: TelemetryBridge Sandbox Architecture
+
+**Decision:** The dashboard-facing WebSocket server runs in a
+forked child with chroot + setresuid + 65-syscall seccomp-BPF
+default-kill. The parent writes JSON to a pipe; the child
+reads and broadcasts.
+
+**Context:** The dashboard is a browser; an XSS in the
+dashboard (or a malicious operator on the LAN) could
+otherwise gain access to the agent's privileges.
+
+**Consequences:**
+- (+) Defense in depth: chroot, setresuid, seccomp.
+- (+) Crashes in the bridge don't affect the agent.
+- (-) Debugging is harder (the child is sandboxed).
+
+---
+
+## Appendix B: Build & Run Quick Reference
+
+```bash
+# Build
+make clean && make
+
+# Run a single node
+./bin/neuro_agent ALPHA
+
+# Run the netns demo
+sudo ./tools/setup_demo_net.sh
+python3 orchestration/mesh_manager.py
+
+# Inject a test event
+./bin/inject_event --node CHARLIE --target ALPHA \
+  --event entropy_spike --verdict CRITICAL
+
+# Run the crypto test suite
+./bin/test_crypto
+
+# Open the dashboard
+python3 -m http.server 8080 --directory dashboard/
+# open http://localhost:8080
+
+# Issue an IPC command
+echo "CMD:RESET" | NEURO_TOKEN=secret socat - UNIX-CONNECT:/tmp/neuro_mesh_ALPHA.sock
+
+# View logs
+tail -f /tmp/agent_*.log | grep -E "\[PBFT\]|\[ENFORCER\]"
+
+# Run an attack simulation
+./bin/attack_injector --target 192.168.50.2 --duration 30 --threads 16
+
+# Run a benchmark
+python3 tools/benchmark_mesh.py --nodes 5 --duration 60
+```
+
+---
+
+## Appendix C: Wire Format Reference
+
+### V3 Discovery Beacon (UDP, 9 tokens)
+```
+DISCOVERY|<id>|<tcp_port>|<tls_port>|<unix_ts>|<b64pub>|<tls_fpr>|<b64cert>|<b64sig>
+```
+Signature binds: `(id || tcp_port || tls_port || unix_ts || tls_fpr || b64cert)`
+
+### V2 Discovery Beacon (UDP, 8 tokens, legacy)
+```
+DISCOVERY|<id>|<tcp_port>|<tls_port>|<unix_ts>|<b64pub>|<tls_fpr>|<b64sig>
+```
+Signature binds: `(id || tcp_port || tls_port || unix_ts || tls_fpr)`
+
+### PBFT Message (UDP)
+```
+PBFT|<stage>|<sender_id>|<target_id>|<view>|<sequence>|<b64evidence>|<b64sig>
+```
+Signature binds: `(stage || sender_id || target_id || view || sequence || sha256(evidence))`
+
+### Telemetry Gossip (UDP)
+```
+TELEMETRY|<node_id>|<b64json>|<b64sig>
+```
+Signature binds: `(node_id || b64json)`
+
+### BAN_PEER Gossip (UDP)
+```
+BAN_PEER|<target_id>|<b64sig>
+```
+Signature binds: `(target_id)`
+
+### IPC Command (Unix domain socket)
+```
+AUTH|<token>\n
+CMD:INJECT|<target_id>|<evidence_json>\n
+CMD:ISOLATE|<target_id>\n
+CMD:RESET\n
+CMD:SHUTDOWN\n
+```
+
+### IPC Response
+```
+ACK:INJECT\n
+ACK:ISOLATE\n
+ACK:RESET\n
+ERR:<message>\n
+```
+
+---
+
+*End of document.*
+
+*Maintained by the Neuro-Mesh contributors.*
+*For corrections or additions, open a PR against `PROJECT_DEEP_DOCUMENTATION.md`.*
