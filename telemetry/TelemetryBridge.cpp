@@ -337,7 +337,9 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
 
     // ---- Timer & clock — uWS timers, event-loop timeout granularity ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(clock_gettime), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(clock_nanosleep), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(nanosleep), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(restart_syscall), 0);
 
     // ---- timerfd — epoll-integrated timers (uSockets us_create_timer) ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(timerfd_create), 0);
@@ -389,11 +391,31 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
     // ---- tgkill — thread signaling in uSockets event loop ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(tgkill), 0);
 
-    // ---- clone — std::thread spawn (pthread_create → clone) ----
+    // ---- clone / clone3 — std::thread spawn (pthread_create → clone on
+    //      older glibc, clone3 on glibc ≥ 2.34). Without clone3, thread
+    //      creation is killed by the seccomp default. ----
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(clone), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(clone3), 0);
 
-    // ---- ppoll — pipe monitor thread uses poll() (glibc→ppoll on x86_64) ----
+    // ---- mremap — used by glibc for thread stack growth / mmap realloc. ----
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(mremap), 0);
+
+    // ---- poll / ppoll — pipe monitor thread uses poll() (glibc→poll #7 on
+    //      x86_64; ppoll #271 is also allowed for completeness). Without
+    //      this rule the seccomp default-kill kills the child immediately
+    //      after the WebSocket server starts, leaving a <defunct> zombie. ----
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(poll), 0);
     seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(ppoll), 0);
+
+    // ---- kill / getppid / getuid / getgid — left allowed for any library or
+    //      runtime path that may call them. The pipe monitor no longer
+    //      uses kill(getppid, 0) for liveness (EPERM as nobody, false
+    //      positive) — it relies on read() returning 0 (EOF) when the
+    //      parent closes the pipe. ----
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(kill), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getppid), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getuid), 0);
+    seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getgid), 0);
 
     // ---- Load the filter ----
     if (seccomp_load(ctx) != 0) {
@@ -405,7 +427,7 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
 
     seccomp_release(ctx);
 
-    std::cerr << "[SECCOMP] Default-kill BPF filter loaded (56 syscalls whitelisted)."
+    std::cerr << "[SECCOMP] Default-kill BPF filter loaded (65 syscalls whitelisted)."
               << std::endl;
 }
 
@@ -441,11 +463,13 @@ static void pipe_monitor_loop(PipeMonitorCtx *ctx) {
             _exit(0);
         }
         if (ret == 0) {
-            // Timeout — check if pipe is still valid
-            if (kill(getppid(), 0) != 0) {
-                std::cerr << "[TELEMETRY_BRIDGE] Parent process gone. Exiting." << std::endl;
-                _exit(0);
-            }
+            // Timeout — no liveness check needed. If the parent process dies,
+            // the kernel closes its end of the pipe (parent held the write
+            // FD). The next read() returns 0 (EOF) and we exit naturally
+            // via the n <= 0 branch below. We intentionally do NOT call
+            // kill(getppid(), 0) here: as nobody (uid 65534) we lack the
+            // privilege to send signal 0 to the root-owned parent, so the
+            // call returns -1/EPERM, falsely reporting the parent as gone.
             continue;
         }
 

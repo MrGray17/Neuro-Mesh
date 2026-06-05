@@ -517,6 +517,16 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
+    // Auto-reap dead children (TelemetryBridge WebSocket subprocess).
+    // NOTE: SIGCHLD is left at SIG_DFL (no SA_NOCLDWAIT, no custom handler)
+    // because PolicyEnforcer::fork_exec_wait() relies on waitpid() returning
+    // the child's exit status to know if nft/iptables succeeded. Setting
+    // SA_NOCLDWAIT or SIG_IGN causes waitpid to return ECHILD, breaking
+    // fork_exec_wait and disabling the entire enforcement backend.
+    // The TelemetryBridge child is long-lived; if it dies it becomes a
+    // single <defunct> zombie per node. init(1) reaps it when the agent
+    // exits. This is the correct trade-off: enforcement > zombie hygiene.
+
     // Unbuffered stdout — mesh_manager pipes agent output to log files.
     // Without this, discovery/TOFU/PBFT messages are invisible until process exit.
     // Both C++ and C levels must be made unbuffered because:
