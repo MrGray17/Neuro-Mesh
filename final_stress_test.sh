@@ -25,6 +25,7 @@ info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 
 declare -a STRESS_PIDS=()
 
+# shellcheck disable=SC2317  # called via `trap cleanup EXIT` below
 cleanup() {
     say "Cleaning up..."
     for pid in "${STRESS_PIDS[@]}"; do

@@ -259,7 +259,8 @@ jobs:
       - name: Install and run semgrep
         run: |
           pip3 install --break-system-packages -q semgrep 2>&1 | tail -3
-          semgrep scan --config auto --error --max-target-bytes 1000000 \
+          semgrep scan --config p/security-audit --config p/owasp-top-ten --config p/secrets --error \
+            --max-target-bytes 1000000 \
             --exclude '_archive_old' --exclude 'third_party' --exclude 'node_modules' .
 
   # ─────────────────────────────────────────────

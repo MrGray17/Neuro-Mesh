@@ -41,7 +41,8 @@ def cleanup(sig: int, frame: Any) -> None:
         if os.path.exists(ns_file):
             subprocess.run(
                 ["ip", "netns", "exec", node_id, "pkill", "-9", "neuro_agent"],
-                capture_output=True, timeout=3
+                capture_output=True,
+                timeout=3,
             )
     for p in processes:
         if p.poll() is None:
@@ -90,7 +91,11 @@ def restart_node(index: int, node_id: str) -> None:
 
     log_file = open(f"logs/{node_id}.log", "a", buffering=1)
     log_files[index] = log_file
-    cmd = ["ip", "netns", "exec", node_id, "./bin/neuro_agent", node_id] if os.path.exists(f"/run/netns/{node_id}") else ["./bin/neuro_agent", node_id]
+    cmd = (
+        ["ip", "netns", "exec", node_id, "./bin/neuro_agent", node_id]
+        if os.path.exists(f"/run/netns/{node_id}")
+        else ["./bin/neuro_agent", node_id]
+    )
     new_p = subprocess.Popen(
         cmd,
         stdout=log_file,
@@ -118,7 +123,11 @@ print("[BOOT] Launching Neuro-Mesh...")
 for i, node_id in enumerate(nodes):
     log_file = open(f"logs/{node_id}.log", "a", buffering=1)
     log_files.append(log_file)
-    cmd = ["ip", "netns", "exec", node_id, "./bin/neuro_agent", node_id] if os.path.exists(f"/run/netns/{node_id}") else ["./bin/neuro_agent", node_id]
+    cmd = (
+        ["ip", "netns", "exec", node_id, "./bin/neuro_agent", node_id]
+        if os.path.exists(f"/run/netns/{node_id}")
+        else ["./bin/neuro_agent", node_id]
+    )
     p = subprocess.Popen(
         cmd,
         stdout=log_file,

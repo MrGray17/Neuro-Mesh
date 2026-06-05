@@ -19,13 +19,13 @@ public:
     // Exposed for testing / IPC command injection
     bool terminate_process(uint32_t pid);
 
-private:
-    // JSON field extraction (no library dependency — simple key-value scanning)
+    // Public static helpers — exposed for fuzzing and external schema validation
+    // (pure functions, no internal state access)
     static std::string extract_str(std::string_view json, std::string_view key);
     static int64_t extract_int(std::string_view json, std::string_view key);
-
-    // Validate evidence JSON schema before processing
     static bool validate_evidence_schema(std::string_view json);
+
+private:
 
     // Validate PID before sending signal
     bool validate_pid(uint32_t pid) const;
