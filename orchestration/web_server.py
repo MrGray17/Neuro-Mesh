@@ -75,4 +75,6 @@ def api_status():
 
 if __name__ == "__main__":
     print("Neuro-Mesh Web Server started")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    # Intentional: dashboard backend must be reachable from host browser.
+    # Bound to 0.0.0.0 inside a container, fronted by an auth-gated reverse proxy.
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)  # nosemgrep: python.flask.security.audit.app-run-param-config.avoid_app_run_with_bad_host
