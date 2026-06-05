@@ -128,7 +128,7 @@ public:
                         // Only truncate if the full copy succeeded.
                         // Prevents journal data loss when backup write fails.
                         if (copy_ok) {
-                            (void)::ftruncate(m_fd, 0);
+                            { int _r = ::ftruncate(m_fd, 0); (void)_r; }
                         }
                     }
                 }

@@ -63,7 +63,7 @@ std::string NodeAgent::load_and_attach_ebpf() {
         if (getuid() != 0) {
             FILE* f = std::fopen("/proc/sys/kernel/unprivileged_bpf_disabled", "r");
             int unpriv = 0;
-            if (f) { (void)std::fscanf(f, "%d", &unpriv); std::fclose(f); }
+            if (f) { int _r = std::fscanf(f, "%d", &unpriv); (void)_r; std::fclose(f); }
             if (unpriv >= 1) {
                 err += std::string("kernel has unprivileged_bpf_disabled=")
                      + std::to_string(unpriv)
