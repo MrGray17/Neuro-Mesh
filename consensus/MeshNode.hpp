@@ -118,6 +118,8 @@ private:
     std::string m_tls_cert_path;
     std::string m_tls_key_path;
     std::string m_tls_cert_fingerprint;
+    std::string m_tls_cert_pem;  // Full PEM — broadcast in V3 discovery beacon
+                                   // so peers can X509_STORE_add_cert() it.
 
     // === Thread handles ===
     std::thread m_listener_thread;

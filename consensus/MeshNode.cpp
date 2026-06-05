@@ -164,6 +164,7 @@ MeshNode::MeshNode(const std::string& node_id,
         if (cert_file.is_open()) {
             std::string cert_pem((std::istreambuf_iterator<char>(cert_file)),
                                  std::istreambuf_iterator<char>());
+            m_tls_cert_pem = cert_pem;
             m_tls_cert_fingerprint = crypto::IdentityCore::sha256_hex(cert_pem);
             std::cout << "[TLS] Cert fingerprint: " << m_tls_cert_fingerprint.substr(0, 16) << "..." << std::endl;
         }
@@ -293,20 +294,29 @@ void MeshNode::send_discovery_beacon() {
     auto now = steady_clock::now();
     auto us = duration_cast<microseconds>(now.time_since_epoch()).count();
 
-    // Signed blob binds node_id + tcp_port + tls_port + timestamp + tls_fingerprint
+    // V3: include the full TLS cert PEM in the signed blob so peers can
+    // add it to their OpenSSL trust store. Without the PEM, peers only get
+    // the fingerprint — useless for X509 verification. The signature
+    // binds (node_id|tcp_port|tls_port|timestamp|tls_fingerprint|cert_pem)
+    // so an attacker can't swap the cert for one with the same fingerprint
+    // (impossible by hash collision, but defense in depth).
+    std::string b64_cert_pem = base64_encode(m_tls_cert_pem);
+
     std::string signed_blob = m_node_id + "|" + std::to_string(m_tcp_port) + "|"
                             + std::to_string(m_tls_port) + "|" + std::to_string(us) + "|"
-                            + m_tls_cert_fingerprint;
+                            + m_tls_cert_fingerprint + "|"
+                            + b64_cert_pem;
     std::string raw_sig = crypto::IdentityCore::sign_payload(m_private_key.get(), signed_blob);
     std::string b64_sig = base64_encode(raw_sig);
 
-    // Packet: DISCOVERY|<node_id>|<tcp_port>|<tls_port>|<timestamp_us>|<b64_pubkey>|<tls_fingerprint>|<b64_sig>
+    // Packet: DISCOVERY|<node_id>|<tcp_port>|<tls_port>|<timestamp_us>|<b64_pubkey>|<tls_fingerprint>|<b64_tls_cert_pem>|<b64_sig>
     std::string payload = "DISCOVERY|" + m_node_id + "|"
                         + std::to_string(m_tcp_port) + "|"
                         + std::to_string(m_tls_port) + "|"
                         + std::to_string(us) + "|"
                         + m_public_key_b64 + "|"
                         + m_tls_cert_fingerprint + "|"
+                        + b64_cert_pem + "|"
                         + b64_sig;
 
     send_udp_discovery(payload);
@@ -821,22 +831,26 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     // - Old: 6 tokens (no TLS fingerprint)
     // - V1: 7 tokens (with TLS fingerprint, no signature bind)
     // - V2: 8 tokens (with TLS fingerprint, signature includes fingerprint)
+    // - V3: 9 tokens (with TLS cert PEM, signature includes PEM) — current
     if (tokens[0] != "DISCOVERY") return;
 
     bool has_tls_fingerprint = tokens.size() >= 7;
-    bool has_signature = tokens.size() >= 8;
+    bool has_signed_fpr = tokens.size() >= 8;
+    bool has_cert_pem  = tokens.size() >= 9;
     if (tokens.size() < 6) return;
 
     const std::string& peer_id   = tokens[1];
-    int peer_tcp_port            = 0;
-    int peer_tls_port            = 0;
-    int64_t timestamp            = 0;
+    int peer_tcp_port  = 0;
+    int peer_tls_port  = 0;
+    int64_t timestamp  = 0;
     if (!try_parse_int(tokens[2], peer_tcp_port)) return;
     if (has_tls_fingerprint && !try_parse_int(tokens[3], peer_tls_port)) return;
     if (!try_parse_long(tokens[has_tls_fingerprint ? 4 : 3], timestamp)) return;
     const std::string& b64_pubkey = tokens[has_tls_fingerprint ? 5 : 4];
     const std::string& tls_fingerprint = has_tls_fingerprint ? tokens[6] : "";
-    const std::string& b64_sig    = has_signature ? tokens[7] : "";
+    const std::string& b64_cert_pem = has_cert_pem ? tokens[7] : "";
+    const std::string& b64_sig   = has_cert_pem ? tokens[8]
+                                : (has_signed_fpr ? tokens[7] : "");
 
     if (peer_id == m_node_id) return;
 
@@ -844,9 +858,14 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     std::string peer_pem = base64_decode(b64_pubkey).value_or("");
     if (peer_pem.empty()) return;
 
-    // Verify signature: bind(node_id | tcp_port | tls_port | timestamp | [tls_fingerprint])
+    // Verify signature: bind(node_id|tcp_port|tls_port|timestamp|[tls_fpr][|cert_pem])
     std::string signed_blob;
-    if (has_tls_fingerprint && tokens.size() >= 8) {
+    if (has_cert_pem) {
+        // V3 format: signature includes TLS fingerprint AND cert PEM
+        signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|"
+                    + std::to_string(peer_tls_port) + "|" + std::to_string(timestamp) + "|"
+                    + tls_fingerprint + "|" + b64_cert_pem;
+    } else if (has_tls_fingerprint && tokens.size() >= 8) {
         // V2 format: signature includes TLS fingerprint
         signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|"
                     + std::to_string(peer_tls_port) + "|" + std::to_string(timestamp) + "|"
@@ -857,7 +876,7 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
                     + std::to_string(peer_tls_port) + "|" + std::to_string(timestamp);
     } else {
         // Old format
-        signed_blob = peer_id + "|" + std::to_string(peer_tcp_port) + "|" + std::to_string(timestamp);
+        signed_blob = peer_id + "|" + std::to_string(timestamp);
     }
     std::string raw_sig = base64_decode(b64_sig).value_or("");
     if (raw_sig.empty()) return;
@@ -939,6 +958,20 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
             m_pbft.increment_peers();
             std::cout << "[TOFU] Dual-path confirmed for " << peer_id_copy
                       << " — registered with PBFT." << std::endl;
+
+            // V3: add the peer's TLS cert to OpenSSL's trust store. Without
+            // this, every mTLS handshake fails with "unknown ca" because
+            // the cert store only contains our own self-signed cert. The
+            // PEM is signed by the peer's Ed25519 identity key inside the
+            // discovery beacon — a true cryptographic pin.
+            if (has_cert_pem && !b64_cert_pem.empty() && m_transport) {
+                std::string peer_cert_pem = base64_decode(b64_cert_pem).value_or("");
+                if (!peer_cert_pem.empty() && m_transport->trust_peer_cert(peer_cert_pem)) {
+                    std::cout << "[TLS] Trusted peer cert for " << peer_id_copy
+                              << " (added to OpenSSL store, " << peer_cert_pem.size()
+                              << " bytes)." << std::endl;
+                }
+            }
         }
 
         if (m_enforcer) m_enforcer->register_peer_ip(peer_id_copy, sender_ip_copy);

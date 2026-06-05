@@ -152,7 +152,16 @@ public:
     void close(int fd);
     void shutdown();
 
-    std::optional<ConnectionInfo> get_connection_info(int fd) const;
+    std::    optional<ConnectionInfo> get_connection_info(int fd) const;
+
+    // Add a peer's self-signed cert to OpenSSL's trust store. Called after
+    // TOFU dual-path confirmation, once the peer's cert PEM has been
+    // authenticated via the Ed25519 discovery signature. After this call,
+    // outbound mTLS to the peer succeeds instead of failing with
+    // "unknown ca" / "certificate verify failed".
+    bool trust_peer_cert(const std::string& pem_cert) {
+        return m_tls_ctx.trust_peer_cert(pem_cert);
+    }
 
     int server_socket() const { return m_server_fd; }
 
