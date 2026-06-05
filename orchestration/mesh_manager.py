@@ -6,9 +6,21 @@ import time
 import signal
 import sys
 import os
+import secrets
 from typing import Any
 
 nodes = ["ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO"]
+
+# Generate a random IPC auth token at boot. Each node reads it from the
+# env var NEURO_IPC_TOKEN and refuses commands from clients that don't
+# present it. The token is also written to IPC_TOKEN_FILE so external
+# tools (inject_event) can read it.
+IPC_TOKEN_FILE = "/tmp/neuro_mesh_token"
+ipc_token = secrets.token_urlsafe(32)
+with open(IPC_TOKEN_FILE, "w") as tf:
+    tf.write(ipc_token)
+os.chmod(IPC_TOKEN_FILE, 0o600)
+print(f"[BOOT] IPC auth token written to {IPC_TOKEN_FILE} (mode 0600)")
 processes: list[subprocess.Popen[Any]] = []
 log_files: list[Any] = []
 restart_counts: dict[str, int] = {n: 0 for n in nodes}
@@ -36,6 +48,10 @@ def cleanup(sig: int, frame: Any) -> None:
             lf.close()
         except Exception:
             pass
+    try:
+        os.unlink(IPC_TOKEN_FILE)
+    except FileNotFoundError:
+        pass
     sys.exit(0)
 
 
@@ -68,6 +84,7 @@ def restart_node(index: int, node_id: str) -> None:
         ["./bin/neuro_agent", node_id],
         stdout=log_file,
         stderr=subprocess.STDOUT,
+        env={**os.environ, "NEURO_IPC_TOKEN": ipc_token},
     )
     processes[index] = new_p
     restart_counts[node_id] = count + 1
@@ -94,6 +111,7 @@ for i, node_id in enumerate(nodes):
         ["./bin/neuro_agent", node_id],
         stdout=log_file,
         stderr=subprocess.STDOUT,
+        env={**os.environ, "NEURO_IPC_TOKEN": ipc_token},
     )
     processes.append(p)
     time.sleep(0.5)

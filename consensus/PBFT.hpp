@@ -203,23 +203,27 @@ public:
 
         cleanup_stale_rounds();
 
-        if (msg.stage_str == "PRE_PREPARE" || msg.stage_str == "BAN_PEER") {
-            if (!check_rate_limit(msg.sender_id)) {
-                // Sample rate-limit log to the same thresholds as record_failure.
-                // A persistently rate-limited peer would otherwise produce
-                // ~1 log per 2s indefinitely, drowning the journal.
-                auto& trust = m_node_trust[msg.sender_id];
-                for (int threshold : kLogFailureThresholds) {
-                    if (trust.consecutive_failures == threshold) {
-                        std::cerr << "[PBFT] RATE LIMITED: " << msg.sender_id
-                                  << " (" << m_rate_max << " PRE_PREPARE/"
-                                  << m_rate_window_sec << "s)" << std::endl;
-                        break;
-                    }
+        // Rate limit ALL PBFT messages per-sender. The sliding-window
+        // check in check_rate_limit() bounds total inbound volume from
+        // any single peer, regardless of stage. Previously this only
+        // guarded PRE_PREPARE/BAN_PEER, leaving PREPARE/COMMIT/EXECUTED
+        // unauthenticated-rate-limits — an attacker who passed one
+        // PRE_PREPARE could flood PREPARE messages unbounded.
+        if (!check_rate_limit(msg.sender_id)) {
+            // Sample rate-limit log to the same thresholds as record_failure.
+            // A persistently rate-limited peer would otherwise produce
+            // ~1 log per 2s indefinitely, drowning the journal.
+            auto& trust = m_node_trust[msg.sender_id];
+            for (int threshold : kLogFailureThresholds) {
+                if (trust.consecutive_failures == threshold) {
+                    std::cerr << "[PBFT] RATE LIMITED: " << msg.sender_id
+                              << " (" << m_rate_max << " msgs/"
+                              << m_rate_window_sec << "s)" << std::endl;
+                    break;
                 }
-                record_failure(msg.sender_id);
-                return PBFTStage::IDLE;
             }
+            record_failure(msg.sender_id);
+            return PBFTStage::IDLE;
         }
 
         auto msg_hash = compute_message_hash(msg);
@@ -271,13 +275,28 @@ public:
             round.state = PBFTStage::PREPARE;
         }
         else if (msg.stage_str == "PREPARE" && current_votes >= quorum && round.state == PBFTStage::PREPARE) {
-            if (!verify_quorum_intersection(round_key, msg_hash)) {
-                std::cerr << "[PBFT] QUORUM INTERSECTION FAILED - possible partition attack" << std::endl;
-                return PBFTStage::IDLE;
-            }
             round.state = PBFTStage::COMMIT;
         }
         else if (msg.stage_str == "COMMIT" && current_votes >= quorum && round.state == PBFTStage::COMMIT) {
+            // Quorum intersection guard at the COMMIT→EXECUTED transition.
+            // Previously this check was at the PREPARE→COMMIT transition where
+            // it was a no-op: at that point the COMMIT voter set is empty (no
+            // one has voted COMMIT yet), so verify_quorum_intersection()'s
+            // `if (commit_it == prep_it->second.end()) return true;` short-
+            // circuit always fired, making the check vacuous. The meaningful
+            // invariant — that the PREPARE and COMMIT quorums must overlap —
+            // is only checkable once COMMIT votes exist, i.e. here. Without
+            // this guard, a partition attacker can drive a round to EXECUTED
+            // with disjoint PREPARE/COMMIT quorums, breaking safety.
+            if (!verify_quorum_intersection(round_key, msg_hash)) {
+                std::cerr << "[PBFT] QUORUM INTERSECTION FAILED at COMMIT->EXECUTED - possible partition attack" << std::endl;
+                // Roll back the just-inserted vote to keep the registry clean
+                // for the next attempt at the same evidence (surgical fix for
+                // liveness: stale poisoned votes would otherwise prevent any
+                // future commit on this evidence_key until ROUND_TTL_SEC).
+                stage_voters.erase(msg.sender_id);
+                return PBFTStage::IDLE;
+            }
             round.state = PBFTStage::EXECUTED;
         }
         // Phase 3: BAN_PEER flow. Once the round hits EXECUTED via the
