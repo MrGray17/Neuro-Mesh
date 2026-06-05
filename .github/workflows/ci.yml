@@ -21,6 +21,9 @@ jobs:
       matrix:
         compiler: [clang, gcc]
         mode: [release, debug, sanitize]
+        exclude:
+          - compiler: gcc
+            mode: sanitize  # g++-14 ASAN false positive in std_function.h
     steps:
       - uses: actions/checkout@v4
       - name: Clone uWebSockets
