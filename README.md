@@ -36,7 +36,7 @@ network isolation — peer-to-peer, cryptographic, autonomous.
 
 ---
 
-## ⚡ What Is Neuro-Mesh?
+## What Is Neuro-Mesh?
 
 Neuro-Mesh is a **production-grade decentralized security fabric** written in modern C++20.
 Each node:
@@ -66,7 +66,7 @@ eBPF kernel probe (kernel/sensor.bpf.c)
 
 ---
 
-## 🎬 30-Second Demo
+## 30-Second Demo
 
 ```bash
 # Build everything (eBPF skeleton + agent + tools)
@@ -110,7 +110,7 @@ Open `http://localhost:8080` in any browser to watch the mesh react in real time
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -197,7 +197,7 @@ docker exec neuro_charlie python3 /app/traffic_generator.py \
 
 ---
 
-## 🏛️ Architecture
+## Architecture
 
 ### Data Flow
 
@@ -276,7 +276,7 @@ docker exec neuro_charlie python3 /app/traffic_generator.py \
 
 ---
 
-## 🛡️ Threat Model
+## Threat Model
 
 Neuro-Mesh is designed to survive the following adversary profiles:
 
@@ -311,7 +311,7 @@ Neuro-Mesh is designed to survive the following adversary profiles:
 
 ---
 
-## ⚡ Performance
+## Performance
 
 Measured on Linux 6.8, Intel Xeon E5-2680v4, 5-node mesh in network namespaces.
 
@@ -340,7 +340,7 @@ See [`docs/benchmarks/`](docs/benchmarks/) for the full methodology, including f
 
 ---
 
-## 🔐 Security Architecture
+## Security Architecture
 
 ### Cryptographic Primitives
 
@@ -404,7 +404,7 @@ Parent liveness is monitored via **passive EOF detection** on a pipe: when the p
 
 ---
 
-## 📚 Architecture Decision Records
+## Architecture Decision Records
 
 All major design decisions are documented as ADRs in [`docs/adr/`](docs/adr/):
 
@@ -416,7 +416,7 @@ All major design decisions are documented as ADRs in [`docs/adr/`](docs/adr/):
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Crypto regression suite
@@ -436,7 +436,7 @@ python3 tools/benchmark_mesh.py --nodes 5 --duration 60
 
 ---
 
-## 🗂️ Project Structure
+## Project Structure
 
 ```
 neuro_mesh/
@@ -513,7 +513,7 @@ neuro_mesh/
 
 ---
 
-## 🛠️ Development
+## Development
 
 ### Coding Standards
 
@@ -543,7 +543,7 @@ neuro_mesh/
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please:
 
@@ -559,13 +559,13 @@ Contributions are welcome! Please:
 
 ---
 
-## 📜 License
+## License
 
 [MIT](LICENSE) — Copyright (c) 2024 Neuro-Mesh Contributors
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **eBPF / libbpf** — kernel-native observability without kmods
 - **OpenSSL** — the bedrock of crypto on Linux
