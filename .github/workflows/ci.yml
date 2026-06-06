@@ -141,10 +141,11 @@ jobs:
 
       - name: Push to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          docker tag neuro-mesh-neuro_agent "ghcr.io/${REPO}/neuro_agent:latest"
+          docker tag neuro-mesh-alpha "ghcr.io/${REPO}/neuro_agent:latest"
           docker push "ghcr.io/${REPO}/neuro_agent:latest"
 
       - name: Tear down
