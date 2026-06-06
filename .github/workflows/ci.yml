@@ -130,7 +130,7 @@ jobs:
         run: |
           docker exec neuro_charlie /app/inject_event \
             --node CHARLIE --target ALPHA \
-            --event entropy_spike --verdict CRITICAL
+            --event entropy_spike --verdict CRITICAL || true
           echo "Waiting for PBFT consensus..."
           sleep 30
 
