@@ -6,4 +6,4 @@ WORKDIR /app
 COPY control_server.py ws_proxy.py ./
 RUN chown -R neuro:neuro /app
 USER neuro
-CMD ["python3", "-u", "control_server.py"]
+CMD ["python3", "-u", "ws_proxy.py"]

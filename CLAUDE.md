@@ -58,7 +58,7 @@ eBPF kernel probe (kernel/sensor.bpf.c)
 
 | Directory | Purpose | Files |
 |-----------|---------|-------|
-| `kernel/` | eBPF probes | `sensor.bpf.c`, `neuro_bpf.c` (XDP filter), `vmlinux.h`, `sensor.skel.h` (generated) |
+| `kernel/` | eBPF probes | `sensor.bpf.c`, `neuro_bpf.c` (XDP filter), `sensor.skel.h` (generated) |
 | `cell/` | Node intelligence | `NodeAgent.hpp/.cpp` (agent core), `InferenceEngine.hpp/.cpp` (entropy anomaly detection) |
 | `consensus/` | P2P + PBFT + gossip | `MeshNode.hpp/.cpp` (UDP mesh, telemetry gossip), `PBFT.hpp` (header-only BFT state machine) |
 | `crypto/` | Ed25519 identity | `CryptoCore.hpp/.cpp` (keygen, sign, verify via OpenSSL EVP) |

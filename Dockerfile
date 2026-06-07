@@ -37,7 +37,8 @@ COPY tools/train_iforest.py tools/train_iforest.py
 RUN python3 tools/train_iforest.py --output isolation_forest.onnx --samples 10000
 
 COPY . .
-RUN git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
+RUN git clone --recurse-submodules https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets && \
+    cd third_party/uWebSockets && git checkout 8a1f3607f4d6cf3249fa6430543fc4134645c7b1 && git submodule update --init --recursive
 RUN rm -rf bin obj && make -j"$(nproc)" && make bin/inject_event
 
 # ============================================================
