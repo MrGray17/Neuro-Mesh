@@ -72,8 +72,8 @@ ONNX_LIBS := -L/usr/local/lib -lonnxruntime
 ALL_LIBS  := $(BPF_LIBS) $(SSL_LIBS) $(SECC_LIBS) $(ONNX_LIBS) $(LDFLAGS_OPT)
 
 # ---- Directories ----
-OBJ_DIR := obj
-BIN_DIR := bin
+OBJ_DIR ?= obj
+BIN_DIR ?= bin
 PREFIX  ?= /usr/local
 
 # ---- Default target ----
