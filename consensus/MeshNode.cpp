@@ -3,6 +3,7 @@
 #include "common/Base64.hpp"
 #include "enforcer/MitigationEngine.hpp"
 #include "telemetry/TelemetryBridge.hpp"
+#include "net/NetUtil.hpp"
 #include <iostream>
 #include <sstream>
 #include <sys/socket.h>
@@ -1707,13 +1708,27 @@ bool MeshNode::is_targeted_recently() const {
 // =============================================================================
 
 void MeshNode::set_seed_peers(const std::vector<std::pair<std::string, int>>& seeds) {
-    m_seed_peers = seeds;
-    if (!seeds.empty()) {
-        std::cout << "[DISCOVERY] Configured " << seeds.size()
-                  << " seed peer(s) for unicast discovery." << std::endl;
-        for (const auto& [ip, port] : seeds) {
-            std::cout << "[DISCOVERY]   Seed: " << ip << ":" << port << std::endl;
+    if (seeds.empty()) return;
+
+    int resolved = 0, failed = 0;
+    for (const auto& [host, port] : seeds) {
+        std::string ip = net::resolve_host(host);
+        struct in_addr test;
+        if (inet_pton(AF_INET, ip.c_str(), &test) == 1) {
+            m_seed_peers.emplace_back(ip, port);
+            ++resolved;
+        } else {
+            std::cerr << "[BOOT] Dropping unresolvable seed peer: "
+                      << host << ":" << port << std::endl;
+            ++failed;
         }
+    }
+
+    std::cout << "[DISCOVERY] Configured " << resolved << " seed peer(s)";
+    if (failed > 0) std::cout << " (" << failed << " skipped)";
+    std::cout << std::endl;
+    for (const auto& [ip, port] : m_seed_peers) {
+        std::cout << "[DISCOVERY]   Seed: " << ip << ":" << port << std::endl;
     }
 }
 
