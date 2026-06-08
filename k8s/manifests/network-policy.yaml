@@ -1,3 +1,7 @@
+# TEMPLATE ONLY — DO NOT COMMIT REAL KEYS.
+# The Secret block below contains placeholder values only.
+# Use a secrets manager (Vault, SOPS, external-secrets-operator) for production.
+
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
