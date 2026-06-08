@@ -76,14 +76,14 @@ make clean && make
 sudo ./tools/setup_demo_net.sh
 python3 orchestration/mesh_manager.py &
 
-# Wait for mesh formation (~30s)
+# Wait for mesh formation (~15s)
 sleep 30
 
 # Inject a CRITICAL entropy spike at CHARLIE targeting ALPHA
 ./bin/inject_event --node CHARLIE --target ALPHA \
   --event entropy_spike --verdict CRITICAL
 
-# In <5s, all 4 honest peers apply nftables DROP for ALPHA's IP:
+# In <10s, all 4 honest peers apply nftables DROP for ALPHA's IP:
 #   [ENFORCER] Zero-Trust Rule Applied: Dropping all traffic from 192.168.50.2
 #   [nftables] chain INPUT: ip saddr 192.168.50.2 counter packets 76 drop
 
@@ -204,6 +204,65 @@ docker exec neuro_charlie /app/inject_event \
 # Generate load to trigger the anomaly detector
 docker exec neuro_charlie python3 /app/traffic_generator.py \
   --target 127.0.0.1 --duration 15 --threads 8
+```
+
+---
+
+## Run with Docker
+
+The fastest way to see Neuro-Mesh in action. Requires a **Linux host** with Docker and Docker Compose.
+
+### One command: full 5-node mesh
+
+```bash
+docker compose -f docker-compose.yml build --no-cache
+docker compose -f docker-compose.yml up -d
+```
+
+This starts:
+- **5 mesh nodes** (ALPHA, BRAVO, CHARLIE, DELTA, ECHO) with eBPF, BPF, NET_ADMIN, PERFMON capabilities
+- **Dashboard** on `http://localhost:8080`
+- **WebSocket bridge** on port 9001
+
+### Run a single container
+
+```bash
+# Build the image
+docker build -t neuro_mesh .
+
+# Run one node (needs host network + eBPF caps)
+docker run --rm -it \
+  --network host \
+  --cap-add SYS_ADMIN --cap-add BPF --cap-add NET_ADMIN --cap-add PERFMON \
+  -v /sys/kernel/debug:/sys/kernel/debug:ro \
+  -v /lib/modules:/lib/modules:ro \
+  neuro_mesh ALPHA
+```
+
+### Inject threats into the Docker mesh
+
+```bash
+# Inject a critical entropy spike at CHARLIE targeting ALPHA
+docker exec neuro_charlie /app/inject_event \
+  --node CHARLIE --target ALPHA \
+  --event entropy_spike --verdict CRITICAL
+
+# Generate traffic load
+docker exec neuro_charlie python3 /app/traffic_generator.py \
+  --target 127.0.0.1 --duration 15 --threads 8
+```
+
+### Docker requirements
+
+- **Linux host** required — eBPF needs the host kernel's BPF subsystem. Docker Desktop on macOS/Windows is not supported.
+- Required capabilities: `SYS_ADMIN`, `BPF`, `NET_ADMIN`, `PERFMON`
+- Required mounts: `/sys/kernel/debug:ro`, `/lib/modules:ro`
+- Free ports: `8080` (dashboard), `9000–9040` (WebSocket), `9001` (wsbridge)
+
+### Tear down
+
+```bash
+docker compose -f docker-compose.yml down
 ```
 
 ---
@@ -415,6 +474,21 @@ Parent liveness is monitored via **passive EOF detection** on a pipe: when the p
 
 ---
 
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| `permission denied` on eBPF load | Missing `SYS_ADMIN` or `BPF` capability | Add `--cap-add SYS_ADMIN --cap-add BPF` or run with `sudo` |
+| `bind: Address already in use` | Another node or service uses the port | Kill the conflicting process or change `NEURO_WS_PORT` |
+| Dashboard shows no data | WebSocket bridge not running or wrong port | Check `docker ps` for `neuro_wsbridge`, ensure port 9001 is free |
+| `ONNX model not found` | `isolation_forest.onnx` not generated | Run `python3 tools/train_iforest.py --output isolation_forest.onnx --samples 5000` |
+| `bpftool: not found` | eBPF skeleton not generated | Install `bpftool` via `linux-tools-common` or `apt install bpftool` |
+| Build fails with `fatal error: sensor.skel.h` | eBPF skeleton missing | Run `make` (auto-generates) or install `bpftool` |
+| `cannot open BPF object` | `/sys/kernel/debug` not mounted | Ensure `-v /sys/kernel/debug:/sys/kernel/debug:ro` in Docker |
+| Node isolates itself | Self-vote not in safe list | Check `PolicyEnforcer::add_safe_node()` is called at startup |
+
+---
+
 ## Architecture Decision Records
 
 All major design decisions are documented as ADRs in [`docs/adr/`](docs/adr/):
@@ -557,13 +631,34 @@ neuro_mesh/
 
 Contributions are welcome! Please:
 
-1. **Open an issue first** for major changes (PBFT state machine, crypto, eBPF probes).
+1. **Open an issue first** for major changes (PBFT, eBPF probes, new enforcers).
 2. **Match the existing code style** — `clang-format` config is in the repo root.
 3. **All new code must build with `-Werror`** — no warnings, no exceptions.
 4. **Add a test** for any new behavior.
-5. **Update the relevant ADR** if you change a design decision.
+5. **Update an ADR** if you change a design decision.
 
-### Reporting Security Issues
+### Development workflow
+
+```bash
+# Build (debug, fast iteration)
+make clean && make DEBUG=1 -j$(nproc)
+
+# Run tests
+make test
+
+# Lint (C++)
+make lint
+
+# Lint (Python + Shell)
+ruff check orchestration/ tools/
+shellcheck -e SC1091,SC2034 *.sh tests/*.sh
+
+# Pre-commit hooks
+pip install pre-commit && pre-commit install
+pre-commit run --all-files
+```
+
+### Reporting security issues
 
 **Please do not file public issues for security vulnerabilities.** Open a [GitHub Security Advisory](https://github.com/MrGray17/Neuro-Mesh/security/advisories/new) privately.
 
