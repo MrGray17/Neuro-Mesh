@@ -1,7 +1,9 @@
-name: One-shot final correctness patch
+name: Apply final source correctness fixes
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [fix/runtime-hardening-2026-08-19]
+    paths: [.github/workflows/one-shot-hardening.yml]
 
 permissions:
   contents: write
@@ -10,7 +12,12 @@ jobs:
   patch:
     runs-on: ubuntu-24.04
     steps:
-      - name: Apply exact hardening replacements
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fix/runtime-hardening-2026-08-19
+          fetch-depth: 0
+
+      - name: Apply exact source fixes
         shell: python
         run: |
           from pathlib import Path
@@ -32,30 +39,22 @@ jobs:
                   raise SystemExit(f"{path}: pattern expected once, matched {count}: {pattern[:80]!r}")
               p.write_text(updated)
 
-          # Repair the Makefile continuation left by removing AttackSimulator.
           replace_once(
               "Makefile",
               "                      $(OBJ_DIR)/net/TransportLayer.o \\\n$(MESHNODE_TEST_TARGET):",
               "                      $(OBJ_DIR)/net/TransportLayer.o\n\n$(MESHNODE_TEST_TARGET):",
           )
 
-          # Remove the temporary self-modifying job from normal CI.
-          sub_once(
-              ".github/workflows/ci.yml",
-              r"\n  apply-source-hardening:\n.*?(?=\n  build:\n)",
-              "\n",
-              flags=re.S,
-          )
-
-          # Proof timestamps are exported/audited, so use a real shared epoch.
           replace_once(
               "crypto/ProofChain.hpp",
               "std::chrono::steady_clock::now().time_since_epoch()",
               "std::chrono::system_clock::now().time_since_epoch()",
           )
-
-          # Sequence numbers are global and no longer equal vector indexes once
-          # the bounded history starts pruning old entries.
+          replace_once(
+              "crypto/ProofChain.hpp",
+              "#include <chrono>\n#include <cstdint>",
+              "#include <chrono>\n#include <cstdint>\n#include <optional>",
+          )
           replace_once(
               "crypto/ProofChain.hpp",
               '''    std::vector<std::string> get_proof_path(uint64_t seq) {\n        std::lock_guard<std::mutex> lock(m_mtx);\n        std::vector<std::string> siblings;\n        if (seq >= m_links.size()) return siblings;\n        rebuild_merkle();\n        compute_sibling_path(seq, siblings);\n        return siblings;\n    }''',
@@ -63,8 +62,13 @@ jobs:
           )
           replace_once(
               "crypto/ProofChain.hpp",
-              '''    bool export_proof_to_file(uint64_t seq) {\n        std::lock_guard<std::mutex> lock(m_mtx);\n        if (seq >= m_links.size()) return false;\n        rebuild_merkle();\n        std::vector<std::string> siblings;\n        compute_sibling_path(seq, siblings);\n        std::string root = m_merkle_root;\n        std::string path = std::string(CHAIN_PATH_PREFIX) + m_node_id\n                         + "_proof_" + std::to_string(seq) + ".json";\n        std::ofstream ofs(path);\n        if (!ofs) return false;\n        ofs << "{\\\"node_id\\\":\\\"" << m_node_id\n            << "\\\",\\\"seq\\\":" << seq\n            << ",\\\"leaf_hash\\\":\\\"" << m_links[seq].link_hash''',
-              '''    bool export_proof_to_file(uint64_t seq) {\n        std::lock_guard<std::mutex> lock(m_mtx);\n        auto idx = index_for_sequence(seq);\n        if (!idx) return false;\n        rebuild_merkle();\n        std::vector<std::string> siblings;\n        compute_sibling_path(*idx, siblings);\n        std::string root = m_merkle_root;\n        std::string path = std::string(CHAIN_PATH_PREFIX) + m_node_id\n                         + "_proof_" + std::to_string(seq) + ".json";\n        std::ofstream ofs(path);\n        if (!ofs) return false;\n        ofs << "{\\\"node_id\\\":\\\"" << m_node_id\n            << "\\\",\\\"seq\\\":" << seq\n            << ",\\\"leaf_hash\\\":\\\"" << m_links[*idx].link_hash''',
+              '''    bool export_proof_to_file(uint64_t seq) {\n        std::lock_guard<std::mutex> lock(m_mtx);\n        if (seq >= m_links.size()) return false;\n        rebuild_merkle();\n        std::vector<std::string> siblings;\n        compute_sibling_path(seq, siblings);''',
+              '''    bool export_proof_to_file(uint64_t seq) {\n        std::lock_guard<std::mutex> lock(m_mtx);\n        auto idx = index_for_sequence(seq);\n        if (!idx) return false;\n        rebuild_merkle();\n        std::vector<std::string> siblings;\n        compute_sibling_path(*idx, siblings);''',
+          )
+          replace_once(
+              "crypto/ProofChain.hpp",
+              '''            << ",\\\"leaf_hash\\\":\\\"" << m_links[seq].link_hash''',
+              '''            << ",\\\"leaf_hash\\\":\\\"" << m_links[*idx].link_hash''',
           )
           replace_once(
               "crypto/ProofChain.hpp",
@@ -76,13 +80,7 @@ jobs:
               '''    std::string m_merkle_root;\n\n    void rebuild_merkle() {''',
               '''    std::string m_merkle_root;\n\n    std::optional<size_t> index_for_sequence(uint64_t seq) const {\n        auto it = std::lower_bound(\n            m_links.begin(), m_links.end(), seq,\n            [](const ProofLink& link, uint64_t value) { return link.sequence < value; });\n        if (it == m_links.end() || it->sequence != seq) return std::nullopt;\n        return static_cast<size_t>(std::distance(m_links.begin(), it));\n    }\n\n    void rebuild_merkle() {''',
           )
-          replace_once(
-              "crypto/ProofChain.hpp",
-              "#include <chrono>\n#include <cstdint>",
-              "#include <chrono>\n#include <cstdint>\n#include <optional>",
-          )
 
-          # Regression test for global sequence lookup after bounded pruning.
           test_path = Path("tests/unit/test_proofchain.cpp")
           test_text = test_path.read_text()
           anchor = '''TEST_F(ProofChainTest, SHA256HexProducesExpectedLength) {'''
@@ -91,9 +89,6 @@ jobs:
           rollover_test = '''TEST_F(ProofChainTest, SequenceLookupSurvivesBoundedPruning) {\n    for (size_t i = 0; i < ProofChain::MAX_CHAIN + 2; ++i) {\n        chain->append(ProofEventType::ANOMALY_DETECTED, "NODE_A",\n                      "data" + std::to_string(i), make_sig());\n    }\n\n    ASSERT_EQ(chain->size(), ProofChain::MAX_CHAIN);\n    const auto snapshot = chain->links();\n    ASSERT_FALSE(snapshot.empty());\n    EXPECT_EQ(snapshot.front().sequence, 2u);\n    EXPECT_TRUE(chain->get_proof_path(0).empty());\n    EXPECT_FALSE(chain->get_proof_path(snapshot.front().sequence).empty());\n    EXPECT_TRUE(chain->export_proof_to_file(snapshot.front().sequence));\n}\n\n'''
           test_path.write_text(test_text.replace(anchor, rollover_test + anchor, 1))
 
-          # MitigationEngine: prefer pidfds so a PID cannot be reused between the
-          # existence check and the destructive signal. Fall back only on kernels
-          # that do not provide pidfds.
           replace_once(
               "enforcer/MitigationEngine.cpp",
               "#include <unistd.h>\n",
@@ -106,9 +101,12 @@ jobs:
               flags=re.S,
           )
 
-          # Remove the abandoned cleanup workflow; the normal CI job that is
-          # executing this patch will remove this one-shot helper on commit.
-          Path(".github/workflows/finalize-hardening.yml").unlink(missing_ok=True)
-
-      - name: Commit hardened sources
-        run: echo "executed by the existing CI self-hardening job"
+      - name: Commit source fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Makefile crypto/ProofChain.hpp tests/unit/test_proofchain.cpp enforcer/MitigationEngine.cpp
+          git commit -m "fix: close proof-chain and PID safety gaps"
+          git fetch origin fix/runtime-hardening-2026-08-19
+          git rebase origin/fix/runtime-hardening-2026-08-19
+          git push origin HEAD:fix/runtime-hardening-2026-08-19
