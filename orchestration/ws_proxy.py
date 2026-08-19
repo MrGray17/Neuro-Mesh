@@ -60,7 +60,9 @@ async def proxy(peer_sock, path="/"):
         try:
             await backend.close()
         except websockets.WebSocketException as exc:
-            print(f"[WS-PROXY] Backend close warning: {exc}", file=sys.stderr, flush=True)
+            print(
+                f"[WS-PROXY] Backend close warning: {exc}", file=sys.stderr, flush=True
+            )
 
 
 async def main() -> None:
