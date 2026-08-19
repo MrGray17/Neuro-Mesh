@@ -4,15 +4,13 @@ on:
   pull_request:
     branches: [main]
 
-authorization:
+permissions:
   contents: write
 
 jobs:
   apply:
     if: github.event.pull_request.head.ref == 'fix/runtime-hardening-2026-08-19' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -22,7 +20,6 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           workflow = Path('.github/workflows/one-shot-hardening.yml').read_text()
           marker = '        run: |\n'
