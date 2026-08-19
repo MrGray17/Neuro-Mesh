@@ -1,0 +1,309 @@
+name: One-shot hardening patch
+
+on:
+  push:
+    branches: [fix/runtime-hardening-2026-08-19]
+    paths: [.github/workflows/one-shot-hardening.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fix/runtime-hardening-2026-08-19
+
+      - name: Apply exact hardening replacements
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Distributed discovery timestamps must use a shared wall-clock epoch.
+          replace_once(
+              "consensus/MeshNode.cpp",
+              '''void MeshNode::send_discovery_beacon() {
+              using namespace std::chrono;
+              auto now = steady_clock::now();
+              auto us = duration_cast<microseconds>(now.time_since_epoch()).count();''',
+              '''void MeshNode::send_discovery_beacon() {
+              using namespace std::chrono;
+              // Discovery timestamps cross host boundaries, so they need a shared
+              // epoch. steady_clock is process/host-local and cannot be compared
+              // between independent machines.
+              auto now = system_clock::now();
+              auto us = duration_cast<microseconds>(now.time_since_epoch()).count();''',
+          )
+
+          replace_once(
+              "consensus/MeshNode.cpp",
+              '''    // Anti-spoofing: check timestamp is within ±30s of now
+              using namespace std::chrono;
+              auto now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+              int64_t drift = (now_us - timestamp) / 1'000'000;''',
+              '''    // Freshness check uses wall-clock because the timestamp came from
+              // another host. Signature verification above prevents tampering.
+              using namespace std::chrono;
+              auto now_us = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
+              int64_t drift = (now_us - timestamp) / 1'000'000;''',
+          )
+
+          # Current nodes require the fully signed V3 discovery format.
+          replace_once(
+              "consensus/MeshNode.cpp",
+              '''    // Accept formats:
+              // - Old: 6 tokens (no TLS fingerprint)
+              // - V1: 7 tokens (with TLS fingerprint, no signature bind)
+              // - V2: 8 tokens (with TLS fingerprint, signature includes fingerprint)
+              // - V3: 9 tokens (with TLS cert PEM, signature includes PEM) — current
+              if (tokens[0] != "DISCOVERY") return;
+
+              bool has_tls_fingerprint = tokens.size() >= 7;
+              bool has_signed_fpr = tokens.size() >= 8;
+              bool has_cert_pem  = tokens.size() >= 9;
+              if (tokens.size() < 6) return;''',
+              '''    // Security-sensitive discovery accepts only the current V3 format.
+              // Older formats did not bind all TLS identity material into the
+              // signature and are intentionally rejected instead of silently
+              // weakening authentication for backward compatibility.
+              if (tokens.size() != 9 || tokens[0] != "DISCOVERY") return;
+
+              constexpr bool has_tls_fingerprint = true;
+              constexpr bool has_signed_fpr = true;
+              constexpr bool has_cert_pem = true;''',
+          )
+
+          # Unsigned telemetry is no longer accepted, and malformed keys/signatures fail closed.
+          replace_once(
+              "consensus/MeshNode.cpp",
+              '''    // Extract signature and json
+              size_t third_delim = msg.find('|', second_delim + 1);
+              std::string json;
+              std::string b64_sig;
+              if (third_delim == std::string::npos) {
+                  // Unsigned (legacy) — accept but do not verify
+                  json = msg.substr(second_delim + 1);
+              } else {
+                  b64_sig = msg.substr(second_delim + 1, third_delim - second_delim - 1);
+                  json = msg.substr(third_delim + 1);
+              }
+
+              // Verify signature if present
+              if (!b64_sig.empty()) {
+                  std::string peer_pem = m_peer_manager.get_peer_key(peer_id);
+                  if (peer_pem.empty()) {
+                      // Signed message from unknown peer — reject to prevent spoofing.
+                      // Only unsigned (legacy) telemetry is accepted from unregistered peers.
+                      std::cerr << "[TELEMETRY] Signed message from unregistered peer " << peer_id
+                                << " — rejected. Complete peer discovery first." << std::endl;
+                      return;
+                  }
+                  auto pubkey = crypto::IdentityCore::get_pubkey_from_pem(peer_pem);
+                  if (pubkey) {
+                      std::string unsigned_msg = "TELEMETRY|" + peer_id + "|" + json;
+                      std::string raw_sig = base64_decode(b64_sig).value_or("");
+                      if (!raw_sig.empty() &&
+                          !crypto::IdentityCore::verify_signature(pubkey.get(), unsigned_msg, raw_sig)) {
+                          std::cerr << "[TELEMETRY] Signature verification FAILED for " << peer_id << std::endl;
+                          return;
+                      }
+                  }
+              }''',
+              '''    // Signed telemetry is mandatory. Legacy unsigned packets are rejected
+              // because accepting them lets any sender forge dashboard/security state.
+              size_t third_delim = msg.find('|', second_delim + 1);
+              if (third_delim == std::string::npos) {
+                  std::cerr << "[TELEMETRY] Unsigned legacy telemetry rejected from "
+                            << peer_id << std::endl;
+                  return;
+              }
+
+              std::string b64_sig = msg.substr(second_delim + 1, third_delim - second_delim - 1);
+              std::string json = msg.substr(third_delim + 1);
+              if (b64_sig.empty() || json.empty()) return;
+
+              std::string peer_pem = m_peer_manager.get_peer_key(peer_id);
+              if (peer_pem.empty()) {
+                  std::cerr << "[TELEMETRY] Message from unregistered peer " << peer_id
+                            << " — rejected. Complete peer discovery first." << std::endl;
+                  return;
+              }
+              auto pubkey = crypto::IdentityCore::get_pubkey_from_pem(peer_pem);
+              if (!pubkey) {
+                  std::cerr << "[TELEMETRY] Invalid registered key for " << peer_id << std::endl;
+                  return;
+              }
+              std::string unsigned_msg = "TELEMETRY|" + peer_id + "|" + json;
+              std::string raw_sig = base64_decode(b64_sig).value_or("");
+              if (raw_sig.empty() ||
+                  !crypto::IdentityCore::verify_signature(pubkey.get(), unsigned_msg, raw_sig)) {
+                  std::cerr << "[TELEMETRY] Signature verification FAILED for " << peer_id << std::endl;
+                  return;
+              }''',
+          )
+
+          # Identify inbound TLS peers by authenticated certificate CN + known IP,
+          # never by the TCP client's ephemeral source port.
+          replace_once(
+              "consensus/MeshNode.cpp",
+              '''        if (conn_info && conn_info->verified) {
+                  auto peers = m_peer_manager.get_all_peers();
+                  for (const auto& entry : peers) {
+                      if (entry.ip == conn_info->peer_ip && entry.tls_port == conn_info->peer_port) {
+                          int old_fd = -1;
+                          if (m_peer_manager.get_peer_tls_fd(entry.node_id, old_fd) && old_fd >= 0) {
+                              m_transport->close(old_fd);
+                          }
+                          m_peer_manager.set_peer_tls_fd(entry.node_id, fd);
+                          std::cout << "[TLS] Accepted connection from " << entry.node_id
+                                    << " (" << conn_info->peer_ip << ":" << conn_info->peer_port << ")" << std::endl;
+                          matched = true;
+                          break;
+                      }
+                  }
+              }''',
+              '''        if (conn_info && conn_info->verified && !conn_info->subject_cn.empty()) {
+                  auto peers = m_peer_manager.get_all_peers();
+                  for (const auto& entry : peers) {
+                      if (entry.node_id == conn_info->subject_cn && entry.ip == conn_info->peer_ip) {
+                          int old_fd = -1;
+                          if (m_peer_manager.get_peer_tls_fd(entry.node_id, old_fd) && old_fd >= 0) {
+                              m_transport->close(old_fd);
+                          }
+                          m_peer_manager.set_peer_tls_fd(entry.node_id, fd);
+                          std::cout << "[TLS] Accepted authenticated connection from "
+                                    << entry.node_id << " (" << conn_info->peer_ip << ")" << std::endl;
+                          matched = true;
+                          break;
+                      }
+                  }
+              }''',
+          )
+
+          # Outbound connections also bind the TLS certificate identity to the
+          # peer ID we intended to contact.
+          replace_once(
+              "consensus/MeshNode.cpp",
+              '''    int fd = m_transport->connect(ip, static_cast<uint16_t>(port));
+              if (fd < 0) return false;
+
+              m_peer_manager.set_peer_tls_fd(peer_id, fd);
+              return true;''',
+              '''    int fd = m_transport->connect(ip, static_cast<uint16_t>(port));
+              if (fd < 0) return false;
+
+              auto conn_info = m_transport->get_connection_info(fd);
+              if (!conn_info || !conn_info->verified || conn_info->subject_cn != peer_id) {
+                  std::cerr << "[TLS] Peer identity mismatch: expected " << peer_id
+                            << ", certificate CN="
+                            << (conn_info ? conn_info->subject_cn : std::string("<missing>"))
+                            << std::endl;
+                  m_transport->close(fd);
+                  return false;
+              }
+
+              m_peer_manager.set_peer_tls_fd(peer_id, fd);
+              return true;''',
+          )
+
+          # Make the existing liveness caller useful: exact round when available,
+          # otherwise detect any stalled active round. advance_view refreshes all
+          # active round timers to avoid advancing once per peer in the same pass.
+          replace_once(
+              "consensus/PBFT.hpp",
+              '''    [[nodiscard]] bool needs_view_change(const std::string& evidence_json,
+                                                        const std::string& target_id) const {
+              std::lock_guard<std::mutex> lock(m_mtx);
+              std::string round_key = crypto::IdentityCore::sha256_hex(
+                  evidence_json + "|" + target_id);
+              if (round_key.empty()) round_key = evidence_json + "|" + target_id;
+              auto it = m_rounds.find(round_key);
+              if (it == m_rounds.end()) return false;
+
+              auto now = std::chrono::steady_clock::now();
+              auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_activity).count();
+              return elapsed > VIEW_CHANGE_TIMEOUT_SEC && it->second.state != PBFTStage::EXECUTED;
+          }''',
+              '''    [[nodiscard]] bool needs_view_change(const std::string& evidence_json,
+                                                        const std::string& target_id) const {
+              std::lock_guard<std::mutex> lock(m_mtx);
+              const auto now = std::chrono::steady_clock::now();
+              const auto stalled = [&](const ConsensusRound& round) {
+                  if (round.state == PBFTStage::IDLE || round.state == PBFTStage::EXECUTED) return false;
+                  const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                      now - round.last_activity).count();
+                  return elapsed > VIEW_CHANGE_TIMEOUT_SEC;
+              };
+
+              std::string round_key = crypto::IdentityCore::sha256_hex(
+                  evidence_json + "|" + target_id);
+              if (round_key.empty()) round_key = evidence_json + "|" + target_id;
+              auto it = m_rounds.find(round_key);
+              if (it != m_rounds.end()) return stalled(it->second);
+
+              // MeshNode's liveness monitor historically supplied a synthetic
+              // key. Fall back to scanning active rounds so the timeout is not
+              // silently disconnected from real consensus state.
+              for (const auto& [key, round] : m_rounds) {
+                  (void)key;
+                  if (stalled(round)) return true;
+              }
+              return false;
+          }''',
+          )
+
+          replace_once(
+              "consensus/PBFT.hpp",
+              '''    void advance_view() {
+              std::lock_guard<std::mutex> lock(m_mtx);
+              ++m_current_view;
+              std::cout << "[PBFT] View advanced to " << m_current_view << std::endl;
+          }''',
+              '''    void advance_view() {
+              std::lock_guard<std::mutex> lock(m_mtx);
+              ++m_current_view;
+              const auto now = std::chrono::steady_clock::now();
+              for (auto& [key, round] : m_rounds) {
+                  (void)key;
+                  if (round.state != PBFTStage::EXECUTED) {
+                      round.view = m_current_view;
+                      round.last_activity = now;
+                  }
+              }
+              std::cout << "[PBFT] View advanced to " << m_current_view << std::endl;
+          }''',
+          )
+
+          # Attack simulation is test tooling, not part of the privileged agent.
+          replace_once(
+              "Makefile",
+              "              attacks/AttackSimulator.cpp \\\n",
+              "",
+          )
+          replace_once(
+              "Makefile",
+              "                      $(OBJ_DIR)/attacks/AttackSimulator.o\n",
+              "",
+          )
+
+          # Remove this one-shot workflow from the resulting branch.
+          Path(".github/workflows/one-shot-hardening.yml").unlink()
+
+      - name: Commit hardened sources
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add consensus/MeshNode.cpp consensus/PBFT.hpp Makefile .github/workflows/one-shot-hardening.yml
+          git commit -m "fix: harden discovery telemetry TLS and view changes"
+          git push origin HEAD:fix/runtime-hardening-2026-08-19
