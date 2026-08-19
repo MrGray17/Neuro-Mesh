@@ -18,12 +18,12 @@ services:
       context: ./orchestration
       dockerfile: Dockerfile
     container_name: neuro_wsbridge
-    ports:
-      - "9001:9001"
+    network_mode: host
     command: ["python3", "-u", "ws_proxy.py"]
     restart: unless-stopped
     environment:
-      NEURO_HOST_IP: "${NEURO_HOST_IP:-172.18.0.1}"
+      NEURO_HOST_IP: "127.0.0.1"
+      NEURO_WS_PROXY_BIND: "127.0.0.1"
 
   alpha:
     build:
