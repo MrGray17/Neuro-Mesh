@@ -10,6 +10,10 @@ namespace neuro_mesh {
 
 struct TelemetryBridgeConfig {
     uint16_t websocket_port = 9000;
+    // Telemetry is read-only but may contain sensitive host/security state.
+    // Keep it loopback-only by default; deployments that intentionally expose
+    // it must opt in with an explicit bind address or a trusted proxy.
+    std::string bind_address = "127.0.0.1";
     std::string chroot_path = "/var/empty";
     uid_t sandbox_uid = 65534;   // nobody
     gid_t sandbox_gid = 65534;   // nogroup
@@ -67,7 +71,9 @@ private:
     static void apply_seccomp_filter(int pipe_read_fd);
 
     // WebSocket event loop in sandboxed child
-    [[noreturn]] static void run_event_loop(int pipe_read_fd, uint16_t port);
+    [[noreturn]] static void run_event_loop(int pipe_read_fd,
+                                            uint16_t port,
+                                            const std::string& bind_address);
 };
 
 } // namespace neuro_mesh
