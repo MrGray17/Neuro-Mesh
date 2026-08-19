@@ -6,13 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ─────────────────────────────────────────────
-  # Build matrix: compiler × mode
-  # ─────────────────────────────────────────────
   build:
     name: Build (${{ matrix.compiler }}, ${{ matrix.mode }})
     runs-on: ubuntu-24.04
@@ -23,38 +23,30 @@ jobs:
         mode: [release, debug, sanitize]
         exclude:
           - compiler: gcc
-            mode: sanitize  # g++-14 ASAN false positive in std_function.h
+            mode: sanitize
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Clone uWebSockets
         run: |
           mkdir -p third_party
           git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
-
       - name: Install system dependencies
         run: |
           set -o pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            clang llvm cmake libbpf-dev libelf-dev zlib1g-dev \
-            libssl-dev libseccomp-dev nlohmann-json3-dev \
-            libgtest-dev linux-tools-common \
-            python3 python3-pip python3-numpy 2>&1 | tail -20
-
+          sudo apt-get install -y -qq clang llvm cmake libbpf-dev libelf-dev zlib1g-dev libssl-dev libseccomp-dev nlohmann-json3-dev libgtest-dev linux-tools-common python3 python3-pip python3-numpy 2>&1 | tail -20
       - name: Build GoogleTest
         run: |
           cd /usr/src/googletest 2>/dev/null || cd /usr/src/gtest
           sudo cmake CMakeLists.txt
           sudo make
           sudo cp lib/*.a /usr/lib
-
-      - name: Install GCC (if needed)
+      - name: Install GCC
         if: matrix.compiler == 'gcc'
         run: |
           sudo apt-get install -y -qq g++-14 2>&1 | tail -3
-          echo "CXX=g++-14" >> $GITHUB_ENV
-          echo "CC=gcc-14" >> $GITHUB_ENV
-
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
       - name: Install ONNX Runtime
         run: |
           wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
@@ -62,119 +54,86 @@ jobs:
           sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
           sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
           sudo ldconfig
-
-      - name: Install Python ML deps
-        run: pip3 install --break-system-packages --timeout 300 --retries 5 -q scikit-learn skl2onnx onnxruntime 2>&1 | tail -3
-
+      - name: Install Python ML dependencies
+        run: pip3 install --break-system-packages --timeout 300 --retries 5 -q scikit-learn skl2onnx onnxruntime
       - name: Generate ONNX model
         run: python3 tools/train_iforest.py --output isolation_forest.onnx --samples 5000
-
-      - name: Build (release)
+      - name: Build release
         if: matrix.mode == 'release'
-        run: make clean OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }} && make -j$(nproc) OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
-
-      - name: Build (debug)
+        run: make clean OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }} && make -j"$(nproc)" OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
+      - name: Build debug
         if: matrix.mode == 'debug'
-        run: make clean OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }} && make -j$(nproc) DEBUG=1 OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
-
-      - name: Build (sanitize)
+        run: make clean OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }} && make -j"$(nproc)" DEBUG=1 OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
+      - name: Build sanitize
         if: matrix.mode == 'sanitize'
-        run: make clean OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }} && make -j$(nproc) SANITIZE=1 OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
-
-      - name: Run unit tests (release)
+        run: make clean OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }} && make -j"$(nproc)" SANITIZE=1 OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
+      - name: Run release tests
         if: matrix.mode == 'release'
         run: make test OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
-      - name: Run unit tests (debug)
+      - name: Run debug tests
         if: matrix.mode == 'debug'
         run: make test DEBUG=1 OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
-      - name: Run unit tests (sanitize)
+      - name: Run sanitizer tests
         if: matrix.mode == 'sanitize'
         run: make test SANITIZE=1 OBJ_DIR=obj-${{ matrix.compiler }}-${{ matrix.mode }} BIN_DIR=bin-${{ matrix.compiler }}-${{ matrix.mode }}
 
-  # ─────────────────────────────────────────────
-  # Docker build & integration
-  # ─────────────────────────────────────────────
   docker:
     name: Docker Build & Integration
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Clone uWebSockets
         run: |
           mkdir -p third_party
           git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
       - name: Build Docker images
-        run: docker compose build --no-cache 2>&1 | tail -10
-
+        run: docker compose build --no-cache
       - name: Boot mesh
         run: |
           docker compose up -d
           sleep 20
           docker ps
-
-      - name: Verify all 5 nodes running
+      - name: Verify all five nodes are running
         run: |
           for node in neuro_alpha neuro_bravo neuro_charlie neuro_delta neuro_echo; do
-            if ! docker ps --format '{{.Names}}' | grep -q "$node"; then
+            if ! docker ps --format '{{.Names}}' | grep -qx "$node"; then
               echo "FAIL: $node not running"
-              docker compose logs "$node" | tail -20
+              docker logs "$node" 2>&1 | tail -80
               exit 1
             fi
           done
-          echo "All 5 nodes running"
-
-      - name: Inject CRITICAL event
+      - name: Inject test event
         run: |
-          docker exec neuro_charlie /app/inject_event \
-            --node CHARLIE --target ALPHA \
-            --event entropy_spike --verdict CRITICAL || true
-          echo "Waiting for PBFT consensus..."
+          docker exec neuro_charlie /app/inject_event --node CHARLIE --target ALPHA --event entropy_spike --verdict CRITICAL
           sleep 30
-
-      - name: Verify consensus in logs
+      - name: Require PBFT execution evidence
         run: |
-          docker logs neuro_alpha 2>&1 | grep -i "EXECUTED\|consensus\|isolate" || true
-          docker logs neuro_charlie 2>&1 | grep -i "EXECUTED\|consensus\|isolate" || true
-
-      - name: Push to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        continue-on-error: true
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          docker tag neuro-mesh-alpha "ghcr.io/${REPO}/neuro_agent:latest"
-          docker push "ghcr.io/${REPO}/neuro_agent:latest"
-
+          mkdir -p /tmp/neuro-logs
+          for node in neuro_alpha neuro_bravo neuro_charlie neuro_delta neuro_echo; do docker logs "$node" > "/tmp/neuro-logs/${node}.log" 2>&1; done
+          if ! grep -RqiE 'PBFT Final Quorum Reached|EXECUTED' /tmp/neuro-logs; then
+            echo "FAIL: integration run never reached PBFT execution"
+            grep -RniE 'PBFT|consensus|ERROR|FATAL|TLS|DISCOVERY' /tmp/neuro-logs | tail -200 || true
+            exit 1
+          fi
       - name: Tear down
         if: always()
         run: docker compose down --volumes --remove-orphans
 
-  # ─────────────────────────────────────────────
-  # Static analysis
-  # ─────────────────────────────────────────────
   static-analysis:
     name: Static Analysis
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Clone uWebSockets
         run: |
           mkdir -p third_party
           git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
       - name: Install dependencies
         run: |
-          set -o pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            clang-tidy cppcheck cmake \
-            libbpf-dev libelf-dev zlib1g-dev \
-            libssl-dev libseccomp-dev nlohmann-json3-dev \
-            linux-tools-common \
-            python3 python3-pip python3-numpy 2>&1 | tail -20
-
+          sudo apt-get install -y -qq clang-tidy cppcheck cmake libbpf-dev libelf-dev zlib1g-dev libssl-dev libseccomp-dev nlohmann-json3-dev linux-tools-common python3 python3-pip python3-numpy
       - name: Install ONNX Runtime
         run: |
           wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
@@ -182,121 +141,56 @@ jobs:
           sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
           sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
           sudo ldconfig
-
-      - name: Install Python ML deps
-        run: pip3 install --break-system-packages --timeout 300 --retries 5 -q scikit-learn skl2onnx 2>&1 | tail -3
-
+      - name: Install Python ML dependencies
+        run: pip3 install --break-system-packages --timeout 300 --retries 5 -q scikit-learn skl2onnx
       - name: Generate ONNX model
         run: python3 tools/train_iforest.py --output isolation_forest.onnx --samples 1000
-
       - name: Run clang-tidy
         run: make lint
-
       - name: Run cppcheck
-        run: |
-          cppcheck --enable=warning,performance,portability,style \
-            --suppress=missingIncludeSystem \
-            --suppress=unusedFunction \
-            --inline-suppr \
-            -I. -Ithird_party/uWebSockets/src -Ithird_party/uWebSockets/uSockets/src \
-            --std=c++20 \
-            main.cpp cell/ consensus/ enforcer/ crypto/ net/ telemetry/ 2>&1 || true
+        run: cppcheck --enable=warning,performance,portability,style --error-exitcode=1 --suppress=missingIncludeSystem --suppress=unusedFunction --inline-suppr -I. -Ithird_party/uWebSockets/src -Ithird_party/uWebSockets/uSockets/src --std=c++20 main.cpp cell/ consensus/ enforcer/ crypto/ net/ telemetry/
 
-  # ─────────────────────────────────────────────
-  # Security audit
-  # ─────────────────────────────────────────────
   security-audit:
     name: Security Audit
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Clone uWebSockets
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Check banned C/C++ functions
         run: |
-          mkdir -p third_party
-          git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
-      - name: Check for banned C/C++ functions
-        run: |
-          echo "=== Checking for unsafe C functions ==="
-          FOUND=0
+          set -euo pipefail
+          found=0
           for pattern in '\bsystem(' '\bgets(' '\bstrcpy(' '\bstrcat(' '\bsprintf(' '\bscanf('; do
-            MATCHES=$(grep -rn "$pattern" --include='*.cpp' --include='*.c' --include='*.hpp' --include='*.h' . | grep -v '_archive_old' | grep -v 'third_party' || true)
-            if [ -n "$MATCHES" ]; then
-              echo "WARNING: Found $pattern:"
-              echo "$MATCHES"
-              FOUND=1
-            fi
+            matches=$(grep -rn "$pattern" --include='*.cpp' --include='*.c' --include='*.hpp' --include='*.h' . | grep -v '_archive_old' | grep -v 'third_party' || true)
+            if [ -n "$matches" ]; then echo "$matches"; found=1; fi
           done
-          if [ "$FOUND" -eq 1 ]; then
-            echo "FAIL: Banned functions found in source code"
-            exit 1
-          fi
-          echo "No banned C functions found"
-
-      - name: Check for banned Python functions
+          test "$found" -eq 0
+      - name: Check banned Python functions
         run: |
-          echo "=== Checking for unsafe Python functions ==="
-          FOUND=0
+          set -euo pipefail
+          found=0
           for pattern in 'os\.system(' '\beval(' '\bexec('; do
-            MATCHES=$(grep -rn "$pattern" --include='*.py' . | grep -v '_archive_old' | grep -v 'third_party' || true)
-            if [ -n "$MATCHES" ]; then
-              echo "WARNING: Found $pattern:"
-              echo "$MATCHES"
-              FOUND=1
-            fi
+            matches=$(grep -rn "$pattern" --include='*.py' . | grep -v '_archive_old' | grep -v 'third_party' || true)
+            if [ -n "$matches" ]; then echo "$matches"; found=1; fi
           done
-          if [ "$FOUND" -eq 1 ]; then
-            echo "FAIL: Banned Python functions found"
-            exit 1
-          fi
-          echo "No banned Python functions found"
-
-      - name: Check for hardcoded secrets
+          test "$found" -eq 0
+      - name: Run Semgrep
         run: |
-          echo "=== Checking for hardcoded secrets ==="
-          grep -rn 'password\s*=\s*"[^"]\+"' --include='*.py' --include='*.cpp' --include='*.hpp' . | grep -v '_archive_old' | grep -v 'test' || true
-          grep -rn 'api_key\s*=\s*"[^"]\+"' --include='*.py' --include='*.cpp' --include='*.hpp' . | grep -v '_archive_old' || true
-          echo "Secret check complete"
+          pip3 install --break-system-packages --ignore-installed PyJWT --timeout 300 --retries 5 -q semgrep
+          semgrep scan --config p/security-audit --config p/owasp-top-ten --config p/secrets --error --max-target-bytes 1000000 --exclude '_archive_old' --exclude 'third_party' --exclude 'node_modules' .
 
-      - name: Check Docker security
-        run: |
-          echo "=== Docker security checks ==="
-          if grep -q 'privileged: true' docker-compose.yml; then
-            echo "WARNING: privileged: true found in docker-compose.yml"
-          fi
-          if ! grep -q 'USER' Dockerfile; then
-            echo "WARNING: No USER directive in Dockerfile"
-          fi
-          echo "Docker security check complete"
-
-      - name: Install and run semgrep
-        run: |
-          pip3 install --break-system-packages --ignore-installed PyJWT --timeout 300 --retries 5 -q semgrep 2>&1 | tail -3
-          semgrep scan --config p/security-audit --config p/owasp-top-ten --config p/secrets --error \
-            --max-target-bytes 1000000 \
-            --exclude '_archive_old' --exclude 'third_party' --exclude 'node_modules' .
-
-  # ─────────────────────────────────────────────
-  # Fuzz testing (libFuzzer, 10s per target)
-  # ─────────────────────────────────────────────
   fuzz:
     name: Fuzz Testing
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Clone uWebSockets
         run: |
           mkdir -p third_party
           git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
-          set -o pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            clang llvm cmake libbpf-dev libelf-dev zlib1g-dev \
-            libssl-dev libseccomp-dev nlohmann-json3-dev \
-            linux-tools-common \
-            python3 python3-pip python3-numpy 2>&1 | tail -20
-
+          sudo apt-get install -y -qq clang llvm cmake libbpf-dev libelf-dev zlib1g-dev libssl-dev libseccomp-dev nlohmann-json3-dev linux-tools-common python3 python3-pip python3-numpy
       - name: Install ONNX Runtime
         run: |
           wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
@@ -304,81 +198,48 @@ jobs:
           sudo cp -r onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/
           sudo cp -r onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
           sudo ldconfig
-
       - name: Build fuzz targets
-        run: |
-          make -j$(nproc) bin/fuzz_beacon_parser bin/fuzz_json_parser bin/fuzz_pbft_message
+        run: make -j"$(nproc)" bin/fuzz_beacon_parser bin/fuzz_json_parser bin/fuzz_pbft_message
+      - name: Fuzz beacon parser
+        run: bin/fuzz_beacon_parser -max_total_time=10
+      - name: Fuzz JSON parser
+        run: bin/fuzz_json_parser -max_total_time=10
+      - name: Fuzz PBFT message parser
+        run: bin/fuzz_pbft_message -max_total_time=10
 
-      - name: Run fuzz beacon parser (10s)
-        run: bin/fuzz_beacon_parser -max_total_time=10 || true
-
-      - name: Run fuzz JSON parser (10s)
-        run: bin/fuzz_json_parser -max_total_time=10 || true
-
-      - name: Run fuzz PBFT message (10s)
-        run: bin/fuzz_pbft_message -max_total_time=10 || true
-
-  # ─────────────────────────────────────────────
-  # Python linting
-  # ─────────────────────────────────────────────
   python-lint:
     name: Python Linting
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Clone uWebSockets
-        run: |
-          mkdir -p third_party
-          git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
-
-      - name: Install ruff
+      - name: Install Ruff
         run: pip install ruff
+      - name: Lint active Python runtime
+        run: ruff check orchestration/ws_proxy.py tools/train_iforest.py
+      - name: Check formatting
+        run: ruff format --check orchestration/ws_proxy.py tools/train_iforest.py
 
-      - name: Run ruff check
-        run: ruff check orchestration/ tools/*.py
-
-      - name: Run ruff format check
-        run: ruff format --check orchestration/ tools/*.py
-
-  # ─────────────────────────────────────────────
-  # Shell script linting
-  # ─────────────────────────────────────────────
   shell-lint:
     name: Shell Linting
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Clone uWebSockets
-        run: |
-          mkdir -p third_party
-          git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
-      - name: Install shellcheck
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install ShellCheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: Run ShellCheck
+        run: shellcheck -e SC1091,SC2034 *.sh tests/*.sh
 
-      - name: Run shellcheck
-        run: |
-          shellcheck -e SC1091,SC2034 *.sh tests/*.sh
-
-  # ─────────────────────────────────────────────
-  # Dockerfile linting
-  # ─────────────────────────────────────────────
   dockerfile-lint:
     name: Dockerfile Linting
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Clone uWebSockets
-        run: |
-          mkdir -p third_party
-          git clone --recurse-submodules --depth 1 https://github.com/uNetworking/uWebSockets.git third_party/uWebSockets
-      - name: Run hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf
         with:
           dockerfile: Dockerfile
           failure-threshold: warning
           ignore: DL3008,DL3013,DL3018,DL3042,DL3047,DL3049,DL3059
-

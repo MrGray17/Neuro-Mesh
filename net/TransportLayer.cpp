@@ -61,14 +61,20 @@ TLSContext::TLSContext(const TLSConfig& config)
     SSL_CTX_set_security_level(m_server_ctx.get(), 2);
     SSL_CTX_set_security_level(m_client_ctx.get(), 2);
 
-    // Load cert/key if paths provided — was never called before (silent no-op bug)
+    // A mesh node acts as both TLS server and TLS client. Both contexts must
+    // carry the same node certificate/key or mutual TLS cannot work outbound.
     if (!m_config.cert_path.empty() && !m_config.key_path.empty()) {
-        load_certificate();
+        if (!load_certificate()) {
+            throw std::runtime_error("Failed to load TLS certificate/key into both contexts");
+        }
     }
 
-    // Load CA and set up mutual TLS if configured
+    // Load CA and set up mutual TLS if configured. Configuration failure is
+    // fatal: silently continuing would create a transport with weaker trust.
     if (!m_config.ca_path.empty()) {
-        load_ca_certificate();
+        if (!load_ca_certificate()) {
+            throw std::runtime_error("Failed to load TLS CA/verification configuration");
+        }
     }
 }
 
@@ -79,22 +85,23 @@ bool TLSContext::load_certificate() {
         return false;
     }
 
-    if (SSL_CTX_use_certificate_file(m_server_ctx.get(), m_config.cert_path.c_str(), SSL_FILETYPE_PEM) != 1) {
-        ERR_print_errors_fp(stderr);
-        return false;
-    }
+    auto load_into = [&](SSL_CTX* ctx) -> bool {
+        if (SSL_CTX_use_certificate_file(ctx, m_config.cert_path.c_str(), SSL_FILETYPE_PEM) != 1) {
+            ERR_print_errors_fp(stderr);
+            return false;
+        }
+        if (SSL_CTX_use_PrivateKey_file(ctx, m_config.key_path.c_str(), SSL_FILETYPE_PEM) != 1) {
+            ERR_print_errors_fp(stderr);
+            return false;
+        }
+        if (SSL_CTX_check_private_key(ctx) != 1) {
+            ERR_print_errors_fp(stderr);
+            return false;
+        }
+        return true;
+    };
 
-    if (SSL_CTX_use_PrivateKey_file(m_server_ctx.get(), m_config.key_path.c_str(), SSL_FILETYPE_PEM) != 1) {
-        ERR_print_errors_fp(stderr);
-        return false;
-    }
-
-    if (SSL_CTX_check_private_key(m_server_ctx.get()) != 1) {
-        ERR_print_errors_fp(stderr);
-        return false;
-    }
-
-    return true;
+    return load_into(m_server_ctx.get()) && load_into(m_client_ctx.get());
 }
 
 bool TLSContext::load_ca_certificate() {
@@ -112,13 +119,13 @@ bool TLSContext::load_ca_certificate() {
         return false;
     }
 
-    // Enable mutual TLS on both sides
+    // Enable mutual TLS on the server side when configured.
     if (m_config.verify_client || m_config.enable_mtls) {
         SSL_CTX_set_verify(m_server_ctx.get(), SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
         SSL_CTX_set_client_CA_list(m_server_ctx.get(), SSL_load_client_CA_file(m_config.ca_path.c_str()));
     }
 
-    // Always verify server cert on client side when CA is available
+    // Always verify server cert on client side when CA is available.
     SSL_CTX_set_verify(m_client_ctx.get(), SSL_VERIFY_PEER, nullptr);
 
     return true;
@@ -135,30 +142,42 @@ bool TLSContext::trust_peer_cert(const std::string& pem_cert) {
     BIO_free(bio);
     if (!cert) return false;
 
-    // Add to server context's extra cert store (for verifying incoming clients)
+    bool ok = true;
+
+    // Add to server context's cert store (for verifying incoming clients).
     X509_STORE* server_store = SSL_CTX_get_cert_store(m_server_ctx.get());
-    if (server_store) {
-        X509_STORE_add_cert(server_store, cert);
+    if (!server_store || X509_STORE_add_cert(server_store, cert) != 1) {
+        // Duplicate certificates are benign; clear that error so callers do
+        // not treat repeated discovery beacons as trust failures.
+        unsigned long err = ERR_peek_last_error();
+        if (err != 0 && ERR_GET_REASON(err) == X509_R_CERT_ALREADY_IN_HASH_TABLE) {
+            ERR_clear_error();
+        } else {
+            ok = false;
+        }
     }
 
-    // Add to client context's extra cert store (for verifying remote servers)
+    // Add to client context's cert store (for verifying remote servers).
     X509_STORE* client_store = SSL_CTX_get_cert_store(m_client_ctx.get());
-    if (client_store) {
-        X509_STORE_add_cert(client_store, cert);
+    if (!client_store || X509_STORE_add_cert(client_store, cert) != 1) {
+        unsigned long err = ERR_peek_last_error();
+        if (err != 0 && ERR_GET_REASON(err) == X509_R_CERT_ALREADY_IN_HASH_TABLE) {
+            ERR_clear_error();
+        } else {
+            ok = false;
+        }
     }
 
     X509_free(cert);
-    return true;
+    return ok;
 }
 
 SSL* TLSContext::create_server_ssl() {
-    SSL* ssl = SSL_new(m_server_ctx.get());
-    return ssl;
+    return SSL_new(m_server_ctx.get());
 }
 
 SSL* TLSContext::create_client_ssl() {
-    SSL* ssl = SSL_new(m_client_ctx.get());
-    return ssl;
+    return SSL_new(m_client_ctx.get());
 }
 
 TransportLayer::TransportLayer(const TLSConfig& config)
@@ -180,8 +199,6 @@ bool TransportLayer::initialize_openssl() {
     return true;
 }
 
-
-
 bool TransportLayer::bind(const std::string& address, uint16_t port) {
     m_server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (m_server_fd < 0) {
@@ -198,7 +215,11 @@ bool TransportLayer::bind(const std::string& address, uint16_t port) {
     // Non-blocking server socket so accept4() returns -1/EAGAIN immediately
     // when no connections are pending (required for clean shutdown).
     int fl = fcntl(m_server_fd, F_GETFL, 0);
-    fcntl(m_server_fd, F_SETFL, fl | O_NONBLOCK);
+    if (fl < 0 || fcntl(m_server_fd, F_SETFL, fl | O_NONBLOCK) < 0) {
+        close(m_server_fd);
+        m_server_fd = -1;
+        return false;
+    }
 
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
@@ -206,8 +227,10 @@ bool TransportLayer::bind(const std::string& address, uint16_t port) {
 
     if (address.empty() || address == "0.0.0.0" || address == "::") {
         addr.sin_addr.s_addr = INADDR_ANY;
-    } else {
-        inet_pton(AF_INET, address.c_str(), &addr.sin_addr);
+    } else if (inet_pton(AF_INET, address.c_str(), &addr.sin_addr) != 1) {
+        close(m_server_fd);
+        m_server_fd = -1;
+        return false;
     }
 
     if (::bind(m_server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
@@ -287,6 +310,13 @@ int TransportLayer::accept() {
         }
     }
 
+    if (SSL_get_verify_result(ssl) != X509_V_OK) {
+        std::cerr << "[TLS] Client certificate verification failed" << std::endl;
+        SSL_free(ssl);
+        close(client_fd);
+        return -1;
+    }
+
     std::lock_guard<std::mutex> lock(m_ssl_mtx);
     m_active_ssl[client_fd] = std::unique_ptr<SSL, SSLDeleter>(ssl, SSLDeleter());
     return client_fd;
@@ -304,7 +334,10 @@ int TransportLayer::connect(const std::string& host, uint16_t port) {
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        close(fd);
+        return -1;
+    }
 
     if (::connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(fd);
@@ -442,9 +475,10 @@ std::optional<ConnectionInfo> TransportLayer::get_connection_info(int fd) const 
                     ASN1_STRING* asn1_str = X509_NAME_ENTRY_get_data(entry);
                     if (asn1_str) {
                         unsigned char* utf8_str = nullptr;
-                        int len = ASN1_STRING_to_UTF8(&utf8_str, asn1_str);
-                        if (len > 0 && utf8_str) {
-                            info.subject_cn = reinterpret_cast<char*>(utf8_str);
+                        int cn_len = ASN1_STRING_to_UTF8(&utf8_str, asn1_str);
+                        if (cn_len > 0 && utf8_str) {
+                            info.subject_cn.assign(reinterpret_cast<char*>(utf8_str),
+                                                   static_cast<size_t>(cn_len));
                             OPENSSL_free(utf8_str);
                         }
                     }
@@ -453,12 +487,13 @@ std::optional<ConnectionInfo> TransportLayer::get_connection_info(int fd) const 
         }
     }
 
-    struct sockaddr_in addr;
-    socklen_t len = sizeof(addr);
-    if (getpeername(fd, (struct sockaddr*)&addr, &len) == 0) {
+    struct sockaddr_in addr{};
+    socklen_t addr_len = sizeof(addr);
+    if (getpeername(fd, (struct sockaddr*)&addr, &addr_len) == 0) {
         char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
-        info.peer_ip = ip;
+        if (inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip))) {
+            info.peer_ip = ip;
+        }
         info.peer_port = ntohs(addr.sin_port);
     }
 

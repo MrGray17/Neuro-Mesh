@@ -6,6 +6,8 @@ services:
       - "8080:80"
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
+    networks:
+      - neuro_mesh
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:80"]
@@ -13,50 +15,73 @@ services:
       timeout: 5s
       retries: 3
 
-  wsbridge:
-    build:
-      context: ./orchestration
-      dockerfile: Dockerfile
-    container_name: neuro_wsbridge
-    ports:
-      - "9001:9001"
-    command: ["python3", "-u", "ws_proxy.py"]
-    restart: unless-stopped
-    environment:
-      NEURO_HOST_IP: "${NEURO_HOST_IP:-172.18.0.1}"
-
   alpha:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_alpha
+    user: "0:0"
     cap_add:
       - SYS_ADMIN
+      - SYS_RESOURCE
       - BPF
       - NET_ADMIN
       - PERFMON
-    network_mode: host
+    environment:
+      NEURO_WS_PORT: "9000"
+      NEURO_XDP_IFACE: "eth0"
+    ports:
+      # The read-only wsbridge sidecar shares ALPHA's network namespace and
+      # listens on 9001. No agent telemetry port is exposed to the host.
+      - "9001:9001"
+    networks:
+      - neuro_mesh
     command: ["ALPHA"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
+      - /sys/fs/bpf:/sys/fs/bpf
     restart: unless-stopped
+
+  wsbridge:
+    build:
+      context: ./orchestration
+      dockerfile: Dockerfile
+    container_name: neuro_wsbridge
+    # Share ALPHA's namespace so the agent TelemetryBridge can remain bound
+    # to 127.0.0.1 while only this read-only proxy is exposed to browsers.
+    network_mode: "service:alpha"
+    depends_on:
+      - alpha
+    command: ["python3", "-u", "ws_proxy.py"]
+    restart: unless-stopped
+    environment:
+      NEURO_HOST_IP: "127.0.0.1"
+      NEURO_WS_PROXY_BIND: "0.0.0.0"
+      NEURO_WS_PROXY_PORT: "9001"
 
   bravo:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_bravo
+    user: "0:0"
     cap_add:
       - SYS_ADMIN
+      - SYS_RESOURCE
       - BPF
       - NET_ADMIN
       - PERFMON
-    network_mode: host
+    environment:
+      NEURO_WS_PORT: "9000"
+      NEURO_XDP_IFACE: "eth0"
+    networks:
+      - neuro_mesh
     command: ["BRAVO"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
+      - /sys/fs/bpf:/sys/fs/bpf
     restart: unless-stopped
 
   charlie:
@@ -64,16 +89,23 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_charlie
+    user: "0:0"
     cap_add:
       - SYS_ADMIN
+      - SYS_RESOURCE
       - BPF
       - NET_ADMIN
       - PERFMON
-    network_mode: host
+    environment:
+      NEURO_WS_PORT: "9000"
+      NEURO_XDP_IFACE: "eth0"
+    networks:
+      - neuro_mesh
     command: ["CHARLIE"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
+      - /sys/fs/bpf:/sys/fs/bpf
     restart: unless-stopped
 
   delta:
@@ -81,16 +113,23 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_delta
+    user: "0:0"
     cap_add:
       - SYS_ADMIN
+      - SYS_RESOURCE
       - BPF
       - NET_ADMIN
       - PERFMON
-    network_mode: host
+    environment:
+      NEURO_WS_PORT: "9000"
+      NEURO_XDP_IFACE: "eth0"
+    networks:
+      - neuro_mesh
     command: ["DELTA"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
+      - /sys/fs/bpf:/sys/fs/bpf
     restart: unless-stopped
 
   echo:
@@ -98,14 +137,25 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: neuro_echo
+    user: "0:0"
     cap_add:
       - SYS_ADMIN
+      - SYS_RESOURCE
       - BPF
       - NET_ADMIN
       - PERFMON
-    network_mode: host
+    environment:
+      NEURO_WS_PORT: "9000"
+      NEURO_XDP_IFACE: "eth0"
+    networks:
+      - neuro_mesh
     command: ["ECHO"]
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /lib/modules:/lib/modules:ro
+      - /sys/fs/bpf:/sys/fs/bpf
     restart: unless-stopped
+
+networks:
+  neuro_mesh:
+    driver: bridge

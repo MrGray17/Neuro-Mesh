@@ -91,14 +91,20 @@ static float network_entropy_score() {
 
     auto now = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(now - s_prev_time).count();
-    if (dt < 0.5f) { s_prev_bytes = total; return 0.0f; }  // seed baseline, skip first delta
+    if (dt < 0.5f) {
+        s_prev_bytes = total;
+        s_prev_time = now;
+        return 0.0f;
+    }
 
-    float byte_rate = static_cast<float>(total - s_prev_bytes) / dt;
+    // Interface counters can reset when an interface/container is recreated.
+    // Avoid unsigned underflow turning that reset into a fake traffic flood.
+    uint64_t delta_bytes = total >= s_prev_bytes ? total - s_prev_bytes : 0;
+    float byte_rate = static_cast<float>(delta_bytes) / dt;
     s_prev_bytes = total;
     s_prev_time  = now;
 
-    // Normalize: 5 MB/s → 0.5, 50 MB/s → 1.0 (logarithmic-ish clamping)
-    constexpr float kMaxRate = 50.0f * 1024 * 1024;  // 50 MB/s = score 1.0
+    constexpr float kMaxRate = 50.0f * 1024 * 1024;
     return std::min(1.0f, byte_rate / kMaxRate);
 }
 
@@ -119,7 +125,7 @@ void signal_handler(int /*signum*/) {
 }
 
 // =============================================================================
-// Heartbeat loop — pushes node vitals to the TelemetryBridge every 2s
+// Detection + heartbeat loop — security-critical and independent of the UI bridge
 // =============================================================================
 
 void heartbeat_loop(TelemetryBridge& bridge, MeshNode& mesh,
@@ -500,7 +506,7 @@ void ipc_listener_loop(const std::string& node_id, PolicyEnforcer& jailer, MeshN
                 jailer.reset_enforcement();
                 std::cout << "[IPC] Enforcement reset." << std::endl;
             } else if (cmd == "CMD:SHUTDOWN") {
-    global_running.store(false, std::memory_order_seq_cst);
+                global_running.store(false, std::memory_order_seq_cst);
             }
         close(client_fd);
     }
@@ -667,15 +673,15 @@ int main(int argc, char* argv[]) {
     // ---- Stage 6: P2P listener ----
     mesh.start();
 
-    // ---- Stage 5: Heartbeat (node vitals broadcast every 2s) ----
-    // Runs after mesh.start() so listener threads are ready to receive gossip.
-    std::thread heartbeat_thread;
-    if (bridge.alive()) {
-        heartbeat_thread = std::thread(heartbeat_loop, std::ref(bridge), std::ref(mesh),
-                                       inference.get(), ebpf.get(), node_id);
-        std::cout << "[BOOT] Heartbeat pulse started (2s interval)."
-                  << (inference ? "" : " No ONNX — network entropy only.") << std::endl;
-    }
+    // ---- Stage 5: Detection + heartbeat ----
+    // This is security-critical. It must run even if the optional WebSocket bridge
+    // failed to spawn or later dies; dashboard availability must never disable sensing.
+    std::thread heartbeat_thread(heartbeat_loop, std::ref(bridge), std::ref(mesh),
+                                 inference.get(), ebpf.get(), node_id);
+    std::cout << "[BOOT] Detection/heartbeat loop started (2s interval)."
+              << (inference ? "" : " No ONNX — network entropy only.")
+              << (bridge.alive() ? "" : " WebSocket telemetry unavailable.")
+              << std::endl;
 
     // ---- Stage 7: IPC listener for C2 commands ----
     std::thread ipc_thread(ipc_listener_loop, node_id, std::ref(jailer), std::ref(mesh), std::ref(bridge));

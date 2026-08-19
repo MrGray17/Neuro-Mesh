@@ -201,12 +201,12 @@ void TelemetryBridge::child_main(int read_fd, const TelemetryBridgeConfig& cfg) 
         // ---- Stage 4: Seccomp-BPF default-kill filter ----
         apply_seccomp_filter(read_fd);
 
-        std::cerr << "[TELEMETRY_BRIDGE] Sandbox complete. Starting WebSocket on port "
-                  << cfg.websocket_port << "..." << std::endl;
+        std::cerr << "[TELEMETRY_BRIDGE] Sandbox complete. Starting WebSocket on "
+                  << cfg.bind_address << ":" << cfg.websocket_port << "..." << std::endl;
     }
 
     // ---- Stage 5: Run the WebSocket event loop (never returns) ----
-    run_event_loop(read_fd, cfg.websocket_port);
+    run_event_loop(read_fd, cfg.websocket_port, cfg.bind_address);
 }
 
 // =========================================================================
@@ -419,10 +419,10 @@ void TelemetryBridge::apply_seccomp_filter(int /*pipe_read_fd*/) {
 
     // ---- Load the filter ----
     if (seccomp_load(ctx) != 0) {
-        std::cerr << "[SECCOMP] WARN: seccomp_load() failed "
-                  << "— continuing WITHOUT seccomp filter" << std::endl;
+        std::cerr << "[SECCOMP] FATAL: seccomp_load() failed; refusing to run "
+                  << "the telemetry bridge unsandboxed" << std::endl;
         seccomp_release(ctx);
-        return;
+        _exit(1);
     }
 
     seccomp_release(ctx);
@@ -529,7 +529,9 @@ static void pipe_monitor_loop(PipeMonitorCtx *ctx) {
     }
 }
 
-[[noreturn]] void TelemetryBridge::run_event_loop(int pipe_read_fd, uint16_t port) {
+[[noreturn]] void TelemetryBridge::run_event_loop(int pipe_read_fd,
+                                                   uint16_t port,
+                                                   const std::string& bind_address) {
     // ---- Per-socket data (empty — we only publish, no client state) ----
     struct PerSocketData {};
 
@@ -542,8 +544,8 @@ static void pipe_monitor_loop(PipeMonitorCtx *ctx) {
             ws->subscribe("topic/telemetry");
         },
         .message = [](auto * /*ws*/, std::string_view /*msg*/, uWS::OpCode) {
-            // Clients may send control messages; we ignore for now.
-            // Future: C2 commands could be routed back through a second pipe.
+            // The bridge is deliberately read-only. Control-plane commands
+            // belong on the authenticated Unix IPC channel, never WebSocket.
         },
         .close = [](auto * /*ws*/, int, std::string_view) {
             // Client disconnected; subscription auto-cleaned by uWS.
@@ -555,27 +557,28 @@ static void pipe_monitor_loop(PipeMonitorCtx *ctx) {
 
     app.ws<PerSocketData>("/*", std::move(ws_behaviour));
 
-    // ---- Listen on the configured port (explicit IPv4 all-interfaces) ----
+    // Loopback-only by default. A deployment must explicitly opt in to a
+    // broader address in TelemetryBridgeConfig, ideally behind an authenticated proxy.
     bool listening = false;
-    app.listen("0.0.0.0", static_cast<int>(port), [&](auto *listen_socket) {
+    app.listen(bind_address, static_cast<int>(port), [&](auto *listen_socket) {
         if (listen_socket) {
             listening = true;
-            std::cerr << "[TELEMETRY_BRIDGE] WebSocket server listening on port "
-                      << port << std::endl;
+            std::cerr << "[TELEMETRY_BRIDGE] WebSocket server listening on "
+                      << bind_address << ":" << port << std::endl;
         } else {
-            std::cerr << "[TELEMETRY_BRIDGE] FATAL: Failed to listen on port "
-                      << port << std::endl;
+            std::cerr << "[TELEMETRY_BRIDGE] FATAL: Failed to listen on "
+                      << bind_address << ":" << port << std::endl;
             _exit(1);
         }
     });
 
     if (!listening) {
-        std::cerr << "[TELEMETRY_BRIDGE] FATAL: Cannot bind to port "
-                  << port << " (address in use?)" << std::endl;
+        std::cerr << "[TELEMETRY_BRIDGE] FATAL: Cannot bind to "
+                  << bind_address << ":" << port << " (address in use?)" << std::endl;
         _exit(1);
     }
 
-    // ---- Start pipe monitor thread (uses poll() + uWS::Loop::defer()) ----
+    // ---- Start pipe monitor thread ----
     PipeMonitorCtx ctx{pipe_read_fd, &app, {}, {}};
     ctx.monitor_thread = std::thread(pipe_monitor_loop, &ctx);
 

@@ -292,7 +292,8 @@ void MeshNode::announce_identity() {
 
 void MeshNode::send_discovery_beacon() {
     using namespace std::chrono;
-    auto now = steady_clock::now();
+    // Discovery timestamps cross host boundaries, so use a shared wall-clock epoch.
+    auto now = system_clock::now();
     auto us = duration_cast<microseconds>(now.time_since_epoch()).count();
 
     // V3: include the full TLS cert PEM in the signed blob so peers can
@@ -833,12 +834,11 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
     // - V1: 7 tokens (with TLS fingerprint, no signature bind)
     // - V2: 8 tokens (with TLS fingerprint, signature includes fingerprint)
     // - V3: 9 tokens (with TLS cert PEM, signature includes PEM) — current
-    if (tokens[0] != "DISCOVERY") return;
+    if (tokens.size() != 9 || tokens[0] != "DISCOVERY") return;
 
-    bool has_tls_fingerprint = tokens.size() >= 7;
-    bool has_signed_fpr = tokens.size() >= 8;
-    bool has_cert_pem  = tokens.size() >= 9;
-    if (tokens.size() < 6) return;
+    const bool has_tls_fingerprint = true;
+    const bool has_signed_fpr = true;
+    const bool has_cert_pem = true;
 
     const std::string& peer_id   = tokens[1];
     int peer_tcp_port  = 0;
@@ -890,9 +890,9 @@ void MeshNode::process_discovery_beacon(const std::string& msg, const std::strin
         return;
     }
 
-    // Anti-spoofing: check timestamp is within ±30s of now
+    // Freshness check uses wall-clock because the signed timestamp came from another host.
     using namespace std::chrono;
-    auto now_us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+    auto now_us = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
     int64_t drift = (now_us - timestamp) / 1'000'000;
     if (drift > 60 || drift < -60) {
         std::cerr << "[DISCOVERY] Stale beacon from " << peer_id
@@ -1051,38 +1051,35 @@ void MeshNode::process_telemetry_gossip(const std::string& msg, const std::strin
     if (peer_id.empty() || peer_id == m_node_id) return;
     if (peer_id.size() > 64) return;
 
-    // Extract signature and json
+    // Signed telemetry is mandatory. Legacy unsigned packets are rejected.
     size_t third_delim = msg.find('|', second_delim + 1);
-    std::string json;
-    std::string b64_sig;
     if (third_delim == std::string::npos) {
-        // Unsigned (legacy) — accept but do not verify
-        json = msg.substr(second_delim + 1);
-    } else {
-        b64_sig = msg.substr(second_delim + 1, third_delim - second_delim - 1);
-        json = msg.substr(third_delim + 1);
+        std::cerr << "[TELEMETRY] Unsigned legacy telemetry rejected from "
+                  << peer_id << std::endl;
+        return;
     }
 
-    // Verify signature if present
-    if (!b64_sig.empty()) {
-        std::string peer_pem = m_peer_manager.get_peer_key(peer_id);
-        if (peer_pem.empty()) {
-            // Signed message from unknown peer — reject to prevent spoofing.
-            // Only unsigned (legacy) telemetry is accepted from unregistered peers.
-            std::cerr << "[TELEMETRY] Signed message from unregistered peer " << peer_id
-                      << " — rejected. Complete peer discovery first." << std::endl;
-            return;
-        }
-        auto pubkey = crypto::IdentityCore::get_pubkey_from_pem(peer_pem);
-        if (pubkey) {
-            std::string unsigned_msg = "TELEMETRY|" + peer_id + "|" + json;
-            std::string raw_sig = base64_decode(b64_sig).value_or("");
-            if (!raw_sig.empty() &&
-                !crypto::IdentityCore::verify_signature(pubkey.get(), unsigned_msg, raw_sig)) {
-                std::cerr << "[TELEMETRY] Signature verification FAILED for " << peer_id << std::endl;
-                return;
-            }
-        }
+    std::string b64_sig = msg.substr(second_delim + 1, third_delim - second_delim - 1);
+    std::string json = msg.substr(third_delim + 1);
+    if (b64_sig.empty() || json.empty()) return;
+
+    std::string peer_pem = m_peer_manager.get_peer_key(peer_id);
+    if (peer_pem.empty()) {
+        std::cerr << "[TELEMETRY] Message from unregistered peer " << peer_id
+                  << " — rejected. Complete peer discovery first." << std::endl;
+        return;
+    }
+    auto pubkey = crypto::IdentityCore::get_pubkey_from_pem(peer_pem);
+    if (!pubkey) {
+        std::cerr << "[TELEMETRY] Invalid registered key for " << peer_id << std::endl;
+        return;
+    }
+    std::string unsigned_msg = "TELEMETRY|" + peer_id + "|" + json;
+    std::string raw_sig = base64_decode(b64_sig).value_or("");
+    if (raw_sig.empty() ||
+        !crypto::IdentityCore::verify_signature(pubkey.get(), unsigned_msg, raw_sig)) {
+        std::cerr << "[TELEMETRY] Signature verification FAILED for " << peer_id << std::endl;
+        return;
     }
 
     m_peer_manager.set_peer_telemetry(peer_id, json);
@@ -1556,17 +1553,17 @@ void MeshNode::tls_acceptor_loop() {
 
         auto conn_info = m_transport->get_connection_info(fd);
         bool matched = false;
-        if (conn_info && conn_info->verified) {
+        if (conn_info && conn_info->verified && !conn_info->subject_cn.empty()) {
             auto peers = m_peer_manager.get_all_peers();
             for (const auto& entry : peers) {
-                if (entry.ip == conn_info->peer_ip && entry.tls_port == conn_info->peer_port) {
+                if (entry.node_id == conn_info->subject_cn && entry.ip == conn_info->peer_ip) {
                     int old_fd = -1;
                     if (m_peer_manager.get_peer_tls_fd(entry.node_id, old_fd) && old_fd >= 0) {
                         m_transport->close(old_fd);
                     }
                     m_peer_manager.set_peer_tls_fd(entry.node_id, fd);
-                    std::cout << "[TLS] Accepted connection from " << entry.node_id
-                              << " (" << conn_info->peer_ip << ":" << conn_info->peer_port << ")" << std::endl;
+                    std::cout << "[TLS] Accepted authenticated connection from "
+                              << entry.node_id << " (" << conn_info->peer_ip << ")" << std::endl;
                     matched = true;
                     break;
                 }
@@ -1591,6 +1588,16 @@ bool MeshNode::connect_tls_to_peer(const std::string& peer_id, const std::string
 
     int fd = m_transport->connect(ip, static_cast<uint16_t>(port));
     if (fd < 0) return false;
+
+    auto conn_info = m_transport->get_connection_info(fd);
+    if (!conn_info || !conn_info->verified || conn_info->subject_cn != peer_id) {
+        std::cerr << "[TLS] Peer identity mismatch: expected " << peer_id
+                  << ", certificate CN="
+                  << (conn_info ? conn_info->subject_cn : std::string("<missing>"))
+                  << std::endl;
+        m_transport->close(fd);
+        return false;
+    }
 
     m_peer_manager.set_peer_tls_fd(peer_id, fd);
     return true;

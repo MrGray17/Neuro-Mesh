@@ -100,6 +100,21 @@ TEST_F(ProofChainTest, ConcurrentAppendsMaintainConsistency) {
     EXPECT_FALSE(path.empty());
 }
 
+TEST_F(ProofChainTest, SequenceLookupSurvivesBoundedPruning) {
+    for (size_t i = 0; i < ProofChain::MAX_CHAIN + 2; ++i) {
+        chain->append(ProofEventType::ANOMALY_DETECTED, "NODE_A",
+                      "data" + std::to_string(i), make_sig());
+    }
+
+    ASSERT_EQ(chain->size(), ProofChain::MAX_CHAIN);
+    const auto snapshot = chain->links();
+    ASSERT_FALSE(snapshot.empty());
+    EXPECT_EQ(snapshot.front().sequence, 2u);
+    EXPECT_TRUE(chain->get_proof_path(0).empty());
+    EXPECT_FALSE(chain->get_proof_path(snapshot.front().sequence).empty());
+    EXPECT_TRUE(chain->export_proof_to_file(snapshot.front().sequence));
+}
+
 TEST_F(ProofChainTest, SHA256HexProducesExpectedLength) {
     std::string hash = ProofLink::sha256_hex("test");
     EXPECT_EQ(hash.size(), 64u);

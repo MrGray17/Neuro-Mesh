@@ -327,15 +327,25 @@ public:
     [[nodiscard]] bool needs_view_change(const std::string& evidence_json,
                                           const std::string& target_id) const {
         std::lock_guard<std::mutex> lock(m_mtx);
+        const auto now = std::chrono::steady_clock::now();
+        const auto stalled = [&](const ConsensusRound& round) {
+            if (round.state == PBFTStage::IDLE || round.state == PBFTStage::EXECUTED) return false;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                now - round.last_activity).count();
+            return elapsed > VIEW_CHANGE_TIMEOUT_SEC;
+        };
+
         std::string round_key = crypto::IdentityCore::sha256_hex(
             evidence_json + "|" + target_id);
         if (round_key.empty()) round_key = evidence_json + "|" + target_id;
         auto it = m_rounds.find(round_key);
-        if (it == m_rounds.end()) return false;
+        if (it != m_rounds.end()) return stalled(it->second);
 
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.last_activity).count();
-        return elapsed > VIEW_CHANGE_TIMEOUT_SEC && it->second.state != PBFTStage::EXECUTED;
+        for (const auto& [key, round] : m_rounds) {
+            (void)key;
+            if (stalled(round)) return true;
+        }
+        return false;
     }
 
     void set_round_commit_sig(const std::string& round_key, const std::string& sig) {
@@ -508,6 +518,14 @@ bool propose_ban(const std::string& target_id, const std::string& reason) {
     void advance_view() {
         std::lock_guard<std::mutex> lock(m_mtx);
         ++m_current_view;
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& [key, round] : m_rounds) {
+            (void)key;
+            if (round.state != PBFTStage::EXECUTED) {
+                round.view = m_current_view;
+                round.last_activity = now;
+            }
+        }
         std::cout << "[PBFT] View advanced to " << m_current_view << std::endl;
     }
 

@@ -45,7 +45,7 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
 RUN rm -rf bin obj && make -j"$(nproc)" && make bin/inject_event
 
 # ============================================================
-# Stage 2: Runtime (distroless-style minimal image)
+# Stage 2: Runtime (minimal image)
 # ============================================================
 FROM ubuntu:24.04
 
@@ -56,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libseccomp2 \
     ca-certificates \
     python3 \
+    procps \
     tini \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -s /usr/sbin/nologin neuro \
@@ -80,6 +81,10 @@ RUN chown -R neuro:neuro /app
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
     CMD pgrep -x neuro_agent > /dev/null || exit 1
 
+# Safe default for direct `docker run`: non-root. The supported Compose host-
+# defense deployment overrides this to root for the parent agent so it can load
+# eBPF/enforcement resources; TelemetryBridge then chroots and drops its child
+# to nobody before serving WebSocket telemetry.
 USER neuro
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/neuro_agent"]
