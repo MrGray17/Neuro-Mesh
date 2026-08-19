@@ -13,41 +13,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  apply-source-hardening:
-    name: Apply Source Hardening
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'fix/runtime-hardening-2026-08-19' && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: fix/runtime-hardening-2026-08-19
-      - name: Apply exact replacements
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          workflow = Path('.github/workflows/one-shot-hardening.yml').read_text()
-          marker = '        run: |\n'
-          anchor = workflow.index('name: Apply exact hardening replacements')
-          start = workflow.index(marker, anchor) + len(marker)
-          end = workflow.index('\n\n      - name: Commit hardened sources', start)
-          body = workflow[start:end]
-          lines = []
-          for line in body.splitlines():
-              lines.append(line[10:] if line.startswith('          ') else line)
-          exec(compile('\n'.join(lines), '<hardening-patch>', 'exec'), {'__name__': '__main__'})
-          PY
-      - name: Commit hardened sources
-        run: |
-          rm -f .github/workflows/one-shot-hardening.yml .github/workflows/apply-hardening-pr.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "fix: harden discovery telemetry TLS and view changes"
-          git push origin HEAD:fix/runtime-hardening-2026-08-19
-
   build:
     name: Build (${{ matrix.compiler }}, ${{ matrix.mode }})
     runs-on: ubuntu-24.04
