@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Read-only WebSocket proxy for Neuro-Mesh telemetry.
 
 The proxy connects browsers to the first available local TelemetryBridge.
