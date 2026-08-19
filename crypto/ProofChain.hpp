@@ -12,6 +12,7 @@
 #include <mutex>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <cstring>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
@@ -76,7 +77,7 @@ public:
                 const std::string& data, const std::string& sig_hex) {
         std::lock_guard<std::mutex> lock(m_mtx);
         auto now = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+            std::chrono::system_clock::now().time_since_epoch()).count();
         uint64_t seq = m_seq++;
 
         std::string ph;
@@ -125,9 +126,10 @@ public:
     std::vector<std::string> get_proof_path(uint64_t seq) {
         std::lock_guard<std::mutex> lock(m_mtx);
         std::vector<std::string> siblings;
-        if (seq >= m_links.size()) return siblings;
+        auto idx = index_for_sequence(seq);
+        if (!idx) return siblings;
         rebuild_merkle();
-        compute_sibling_path(seq, siblings);
+        compute_sibling_path(*idx, siblings);
         return siblings;
     }
 
@@ -148,10 +150,11 @@ public:
 
     bool export_proof_to_file(uint64_t seq) {
         std::lock_guard<std::mutex> lock(m_mtx);
-        if (seq >= m_links.size()) return false;
+        auto idx = index_for_sequence(seq);
+        if (!idx) return false;
         rebuild_merkle();
         std::vector<std::string> siblings;
-        compute_sibling_path(seq, siblings);
+        compute_sibling_path(*idx, siblings);
         std::string root = m_merkle_root;
         std::string path = std::string(CHAIN_PATH_PREFIX) + m_node_id
                          + "_proof_" + std::to_string(seq) + ".json";
@@ -159,7 +162,7 @@ public:
         if (!ofs) return false;
         ofs << "{\"node_id\":\"" << m_node_id
             << "\",\"seq\":" << seq
-            << ",\"leaf_hash\":\"" << m_links[seq].link_hash
+            << ",\"leaf_hash\":\"" << m_links[*idx].link_hash
             << "\",\"root_hash\":\"" << root
             << "\",\"siblings\":[";
         for (size_t i = 0; i < siblings.size(); ++i) {
@@ -195,7 +198,10 @@ public:
         return true;
     }
 
-    const std::vector<ProofLink>& links() const { return m_links; }
+    std::vector<ProofLink> links() const {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        return m_links;
+    }
 
     size_t size() const { std::lock_guard<std::mutex> lock(m_mtx); return m_links.size(); }
     std::string latest_link_hash() const {
@@ -211,6 +217,14 @@ private:
     mutable std::mutex m_mtx;
     bool m_merkle_dirty = false;
     std::string m_merkle_root;
+
+    std::optional<size_t> index_for_sequence(uint64_t seq) const {
+        auto it = std::lower_bound(
+            m_links.begin(), m_links.end(), seq,
+            [](const ProofLink& link, uint64_t value) { return link.sequence < value; });
+        if (it == m_links.end() || it->sequence != seq) return std::nullopt;
+        return static_cast<size_t>(std::distance(m_links.begin(), it));
+    }
 
     void rebuild_merkle() {
         if (!m_merkle_dirty || m_links.empty()) return;

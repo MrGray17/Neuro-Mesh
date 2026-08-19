@@ -203,7 +203,8 @@ MESHNODE_TEST_OBJS := $(OBJ_DIR)/consensus/MeshNode.o \
                       $(OBJ_DIR)/telemetry/Observability.o \
                       $(OBJ_DIR)/crypto/CryptoCore.o \
                       $(OBJ_DIR)/crypto/KeyManager.o \
-                      $(OBJ_DIR)/net/TransportLayer.o \
+                      $(OBJ_DIR)/net/TransportLayer.o
+
 $(MESHNODE_TEST_TARGET): tools/test_meshnode.cpp $(MESHNODE_TEST_OBJS) $(USOCK_OBJS)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< $(USOCK_OBJS) $(MESHNODE_TEST_OBJS) -o $@ $(SSL_LIBS) $(BPF_LIBS) $(SECC_LIBS) $(LDFLAGS_OPT)

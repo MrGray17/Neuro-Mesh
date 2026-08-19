@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 #include <unistd.h>
+#include <sys/syscall.h>
 
 #include <nlohmann/json.hpp>
 
@@ -140,12 +141,49 @@ bool MitigationEngine::validate_pid(uint32_t pid) const {
 bool MitigationEngine::terminate_process(uint32_t pid) {
     if (!validate_pid(pid)) return false;
 
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+    errno = 0;
+    int pidfd = static_cast<int>(
+        syscall(SYS_pidfd_open, static_cast<pid_t>(pid), 0));
+    if (pidfd >= 0) {
+        int rc = static_cast<int>(
+            syscall(SYS_pidfd_send_signal, pidfd, SIGKILL, nullptr, 0));
+        int saved_errno = errno;
+        close(pidfd);
+
+        if (rc == 0) {
+            std::cout << "[ENFORCEMENT] SIGKILL delivered to PID " << pid
+                      << " via pidfd." << std::endl;
+            return true;
+        }
+        if (saved_errno == ESRCH) {
+            std::cout << "[ENFORCEMENT] PID " << pid
+                      << " already exited. No action needed." << std::endl;
+            return true;
+        }
+        std::cerr << "[ENFORCEMENT] pidfd SIGKILL failed for PID " << pid
+                  << ": " << strerror(saved_errno) << std::endl;
+        return false;
+    }
+
+    if (errno == ESRCH) {
+        std::cout << "[ENFORCEMENT] PID " << pid
+                  << " already exited. No action needed." << std::endl;
+        return true;
+    }
+    if (errno != ENOSYS && errno != EINVAL) {
+        std::cerr << "[ENFORCEMENT] pidfd_open failed for PID " << pid
+                  << ": " << strerror(errno) << std::endl;
+        return false;
+    }
+#endif
+
+    // Compatibility fallback for older Linux kernels without pidfd support.
     if (kill(static_cast<pid_t>(pid), SIGKILL) == -1) {
         if (errno == ESRCH) {
-            // Race: process exited between validation and kill — not an error
             std::cout << "[ENFORCEMENT] PID " << pid
-                      << " already exited (race). No action needed." << std::endl;
-            return true; // desired state achieved
+                      << " already exited. No action needed." << std::endl;
+            return true;
         }
         std::cerr << "[ENFORCEMENT] SIGKILL failed for PID " << pid
                   << ": " << strerror(errno) << std::endl;
